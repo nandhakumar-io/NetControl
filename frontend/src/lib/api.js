@@ -22,11 +22,26 @@ const processQueue = (error, token = null) => {
   failedQueue = []
 }
 
+function forceLogout(message) {
+  localStorage.removeItem('nc_token')
+  // Pass a message to the login page so the user knows why they were kicked out
+  window.location.href = `/login?reason=${encodeURIComponent(message)}`
+}
+
 api.interceptors.response.use(
   res => res,
   async err => {
     const original = err.config
-    if (err.response?.status === 401 && !original._retry && original.url !== '/auth/refresh') {
+    const status   = err.response?.status
+    const code     = err.response?.data?.code
+
+    // Account disabled — hard logout immediately, no retry
+    if (code === 'ACCOUNT_DISABLED' || status === 403 && err.response?.data?.error?.includes('disabled')) {
+      forceLogout('Your account has been disabled. Contact your administrator.')
+      return Promise.reject(err)
+    }
+
+    if (status === 401 && !original._retry && original.url !== '/auth/refresh') {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject })
@@ -40,13 +55,18 @@ api.interceptors.response.use(
       try {
         const { data } = await api.post('/auth/refresh')
         localStorage.setItem('nc_token', data.accessToken)
-        processQueue(null, data.token)
-        original.headers.Authorization = `Bearer ${data.token}`
+        processQueue(null, data.accessToken)
+        original.headers.Authorization = `Bearer ${data.accessToken}`
         return api(original)
       } catch (refreshErr) {
         processQueue(refreshErr, null)
-        localStorage.removeItem('nc_token')
-        window.location.href = '/login'
+        // If refresh itself returned ACCOUNT_DISABLED, show the right message
+        const refreshCode = refreshErr.response?.data?.code
+        if (refreshCode === 'ACCOUNT_DISABLED') {
+          forceLogout('Your account has been disabled. Contact your administrator.')
+        } else {
+          forceLogout('Session expired. Please log in again.')
+        }
         return Promise.reject(refreshErr)
       } finally {
         isRefreshing = false

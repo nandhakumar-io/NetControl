@@ -16,6 +16,12 @@ export default function LoginPage() {
     if (token) navigate('/dashboard', { replace: true })
   }, [token])
 
+  // Show reason if redirected here by the api interceptor (e.g. account disabled)
+  useEffect(() => {
+    const reason = new URLSearchParams(window.location.search).get('reason')
+    if (reason) setError(decodeURIComponent(reason))
+  }, [])
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     e.stopPropagation()

@@ -16,6 +16,23 @@ router.get('/', async (req, res) => {
     const where  = [];
     const params = [];
 
+    // Non-admins see:
+    //   1. Their own audit entries
+    //   2. Any admin action that affected a group or device they have access to
+    if (req.user.role !== 'admin') {
+      where.push(`(
+        user_id = ?
+        OR target_id IN (
+          SELECT group_id FROM user_group_access WHERE user_id = ?
+        )
+        OR target_id IN (
+          SELECT d.id FROM devices d
+          INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?
+        )
+      )`);
+      params.push(req.user.id, req.user.id, req.user.id);
+    }
+
     // Filter by action
     if (req.query.action) {
       where.push('action = ?');

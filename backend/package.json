@@ -6,10 +6,12 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "setup": "node db/setup.js"
+    "setup": "node db/setup.js",
+    "migrate": "node db/migrate.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "compression": "^1.7.4",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "crypto-js": "^4.2.0",
@@ -20,15 +22,17 @@
     "fast-xml-parser": "^5.5.12",
     "helmet": "^7.2.0",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^1.4.5-lts.1",
     "mysql2": "^3.22.0",
     "node-cron": "^3.0.3",
     "ssh2": "^1.17.0",
     "uuid": "^9.0.1",
     "winston": "^3.19.0",
     "wol": "^1.0.7",
-    "multer": "^1.4.5-lts.1"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
   }
 }
+

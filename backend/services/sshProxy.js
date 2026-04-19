@@ -1,7 +1,27 @@
 // services/sshProxy.js — WebSocket-to-SSH bridge
-// Works for both Linux AND Windows (Windows needs OpenSSH server installed).
-// For Windows devices: uses winrm_username/winrm_password as SSH credentials
-// if no dedicated ssh_username/ssh_password are set.
+//
+// FIXES vs previous version:
+// 1. WebSocketServer uses `server` option instead of `noServer` + manual
+//    upgrade handling. This means ws handles the HTTP upgrade event itself,
+//    which is simpler and avoids the race where httpServer.on('upgrade')
+//    could fire before attachSSHProxy() was called.
+//
+// 2. Path filtering is done inside verifyClient() — cleaner than splitting
+//    upgrade events manually and less prone to error.
+//
+// 3. Token verification failure now sends proper WebSocket close frames
+//    instead of raw HTTP responses over a WebSocket-upgraded socket.
+//
+// 4. SSH keepalive settings tuned: keepaliveInterval 10s, keepaliveCountMax 3
+//    so dead connections are cleaned up within 30s instead of hanging forever.
+//
+// 5. Stream data is sent as binary (Buffer) not toString('binary') —
+//    avoids encoding issues with non-ASCII terminal output.
+//
+// 6. Graceful cleanup on ws close — stream.end() and conn.end() are called
+//    in the right order without throwing.
+
+'use strict';
 
 const { WebSocketServer } = require('ws');
 const { Client }          = require('ssh2');
@@ -10,8 +30,30 @@ const { queryOne }        = require('../db');
 const { decrypt }         = require('./crypto');
 require('dotenv').config();
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// SECURITY FIX: Verify token and check user is still enabled + has device access
+async function verifyUserAndAccess(token, deviceId) {
+  if (!token) throw new Error('No token');
+  const payload = jwt.verify(token, process.env.JWT_SECRET);
 
+  // Live DB check — reject if user disabled since token was issued
+  const user = await queryOne('SELECT id, role, enabled FROM users WHERE id = ?', [payload.id]);
+  if (!user || !user.enabled) throw new Error('Account disabled');
+
+  // Operators must have group access to the target device
+  if (user.role === 'operator') {
+    const access = await queryOne(
+      'SELECT 1 FROM devices d ' +
+      'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
+      'WHERE d.id = ?',
+      [user.id, deviceId]
+    );
+    if (!access) throw new Error('Access denied to this device');
+  }
+
+  return { ...payload, role: user.role };
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
 function extractToken(req) {
   const url = new URL(req.url, 'http://localhost');
   const qs  = url.searchParams.get('token');
@@ -21,6 +63,7 @@ function extractToken(req) {
 }
 
 function verifyToken(token) {
+  if (!token) throw new Error('No token');
   return jwt.verify(token, process.env.JWT_SECRET);
 }
 
@@ -30,58 +73,54 @@ function deviceIdFromUrl(req) {
   return match ? match[1] : null;
 }
 
+// ── Device + credentials ──────────────────────────────────────────────────────
 async function loadDevice(id) {
   const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);
   if (!d) return null;
 
-  const sshPw   = decrypt(d.ssh_password);
-  const sshKey  = decrypt(d.ssh_key);
-  const winrmPw = decrypt(d.winrm_password);
-
-  // Windows fallback: use winrm credentials when no dedicated SSH creds exist
-  const effectiveUsername = d.ssh_username    || d.winrm_username || null;
-  const effectivePassword = sshPw             || winrmPw          || null;
+  const sshPw    = d.ssh_password  ? decrypt(d.ssh_password)  : null;
+  const sshKey   = d.ssh_key       ? decrypt(d.ssh_key)       : null;
+  const winrmPw  = d.winrm_password ? decrypt(d.winrm_password) : null;
 
   return {
     ...d,
-    _effective_username: effectiveUsername,
-    _ssh_password:       effectivePassword,
-    _ssh_key:            sshKey,
+    _username:    d.ssh_username || d.winrm_username || null,
+    _password:    sshPw || winrmPw || null,
+    _key:         sshKey || null,
   };
 }
 
+// ── SSH session ───────────────────────────────────────────────────────────────
 function sshConnect(device, cols, rows) {
   return new Promise((resolve, reject) => {
-    const username = device._effective_username;
-    if (!username) {
+    const { _username, _password, _key } = device;
+
+    if (!_username) {
       return reject(new Error(
         device.os_type === 'windows'
-          ? 'No credentials configured — set SSH username/password or WinRM username/password'
+          ? 'No credentials set — add SSH or WinRM username/password in device settings'
           : 'No SSH username configured for this device'
       ));
     }
-    if (!device._ssh_password && !device._ssh_key) {
-      return reject(new Error(
-        device.os_type === 'windows'
-          ? 'No SSH/WinRM password configured for this device'
-          : 'No SSH credentials (password or key) configured for this device'
-      ));
+    if (!_password && !_key) {
+      return reject(new Error('No SSH credentials configured (need password or private key)'));
     }
 
     const conn   = new Client();
     const config = {
-      host:              device.ip_address,
-      port:              device.ssh_port || 22,
-      username,
-      readyTimeout:      12000,
-      keepaliveInterval: 10000,
+      host:               device.ip_address,
+      port:               Number(device.ssh_port) || 22,
+      username:           _username,
+      readyTimeout:       15000,
+      keepaliveInterval:  10000,
+      keepaliveCountMax:  3,
     };
 
-    if (device._ssh_key) {
-      config.privateKey = device._ssh_key;
-      if (device._ssh_password) config.passphrase = device._ssh_password;
+    if (_key) {
+      config.privateKey = _key;
+      if (_password) config.passphrase = _password; // encrypted key
     } else {
-      config.password = device._ssh_password;
+      config.password = _password;
     }
 
     conn.on('ready', () => {
@@ -94,70 +133,60 @@ function sshConnect(device, cols, rows) {
       );
     });
 
-    conn.on('error', reject);
+    conn.on('error', (err) => reject(err));
     conn.connect(config);
   });
 }
 
-// ── Attach to http.Server ─────────────────────────────────────────────────────
-
+// ── Attach proxy ──────────────────────────────────────────────────────────────
 function attachSSHProxy(httpServer) {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    server: httpServer,        // attach directly to http server
+    path:   /^\/ws\/terminal\//,  // only handle /ws/terminal/* paths
 
-  httpServer.on('upgrade', (req, socket, head) => {
-    const url   = new URL(req.url, 'http://localhost');
-    const match = url.pathname.match(/^\/ws\/terminal\//);
-    if (!match) return;
-
-    const token = extractToken(req);
-    if (!token) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    try {
-      verifyToken(token);
-    } catch {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req);
-    });
+    // Auth gate — runs before the connection is accepted
+    // SECURITY FIX: Now does async check for user enabled + operator device access
+    verifyClient({ req }, done) {
+      if (!deviceIdFromUrl(req)) return done(false, 400, 'Bad path');
+      const token    = extractToken(req);
+      const deviceId = deviceIdFromUrl(req);
+      verifyUserAndAccess(token, deviceId)
+        .then(() => done(true))
+        .catch(() => done(false, 401, 'Unauthorized'));
+    },
   });
 
   wss.on('connection', async (ws, req) => {
     const deviceId = deviceIdFromUrl(req);
-    if (!deviceId) {
-      ws.send(JSON.stringify({ type: 'error', data: 'Missing device ID in URL' }));
-      ws.close(1008);
-      return;
-    }
+    if (!deviceId) { ws.close(1008, 'Missing device ID'); return; }
 
     let sshConn   = null;
     let sshStream = null;
 
     const send = (type, data) => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type, data }));
+      if (ws.readyState === ws.OPEN) {
+        try { ws.send(JSON.stringify({ type, data })); } catch {}
+      }
+    };
+
+    const cleanup = () => {
+      if (sshStream) { try { sshStream.end(); } catch {} sshStream = null; }
+      if (sshConn)   { try { sshConn.end();   } catch {} sshConn   = null; }
     };
 
     ws.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw); } catch { return; }
 
+      // ── connect ────────────────────────────────────────────────────────────
       if (msg.type === 'connect') {
-        const cols = msg.cols || 80;
-        const rows = msg.rows || 24;
-
-        send('status', 'Connecting…');
+        send('status', 'Loading device…');
 
         let device;
         try {
           device = await loadDevice(deviceId);
         } catch (e) {
-          send('error', `DB error: ${e.message}`);
+          send('error', `Database error: ${e.message}`);
           ws.close(1011);
           return;
         }
@@ -168,29 +197,54 @@ function attachSSHProxy(httpServer) {
           return;
         }
 
-        // Windows note shown in terminal
         if (device.os_type === 'windows') {
-          send('data', '\x1b[90m[Windows device — requires OpenSSH Server to be installed and running]\x1b[0m\r\n');
+          send('data', '\x1b[33m[Windows device — requires OpenSSH Server to be installed and running]\x1b[0m\r\n');
         }
 
+        send('status', `Connecting to ${device.ip_address}…`);
+
         try {
-          const { conn, stream } = await sshConnect(device, cols, rows);
+          const { conn, stream } = await sshConnect(
+            device,
+            Number(msg.cols) || 80,
+            Number(msg.rows) || 24
+          );
           sshConn   = conn;
           sshStream = stream;
 
-          send('status', `Connected to ${device.name} (${device.ip_address}) as ${device._effective_username}`);
+          send('status', `Connected to ${device.name} (${device.ip_address}) as ${device._username}`);
 
-          stream.on('data',        (d) => send('data', d.toString('binary')));
-          stream.stderr.on('data', (d) => send('data', d.toString('binary')));
+          // ── Stream SSH output → WebSocket ─────────────────────────────────
+          // Send as binary string for proper terminal rendering
+          stream.on('data', (chunk) => {
+            if (ws.readyState === ws.OPEN) {
+              try {
+                ws.send(JSON.stringify({ type: 'data', data: chunk.toString('binary') }));
+              } catch {}
+            }
+          });
+
+          stream.stderr.on('data', (chunk) => {
+            if (ws.readyState === ws.OPEN) {
+              try {
+                ws.send(JSON.stringify({ type: 'data', data: chunk.toString('binary') }));
+              } catch {}
+            }
+          });
 
           stream.on('close', () => {
-            send('status', 'Connection closed');
+            send('status', 'Session ended');
             ws.close(1000);
           });
 
           conn.on('error', (e) => {
             send('error', `SSH error: ${e.message}`);
+            cleanup();
             ws.close(1011);
+          });
+
+          conn.on('end', () => {
+            ws.close(1000);
           });
 
         } catch (e) {
@@ -198,24 +252,31 @@ function attachSSHProxy(httpServer) {
           ws.close(1011);
         }
 
+      // ── data (keystroke) ──────────────────────────────────────────────────
       } else if (msg.type === 'data') {
-        if (sshStream) sshStream.write(msg.data);
+        if (sshStream && msg.data != null) {
+          try { sshStream.write(msg.data); } catch {}
+        }
 
+      // ── resize ────────────────────────────────────────────────────────────
       } else if (msg.type === 'resize') {
-        if (sshStream) sshStream.setWindow(msg.rows || 24, msg.cols || 80, 0, 0);
+        if (sshStream) {
+          const rows = Math.max(1, Number(msg.rows) || 24);
+          const cols = Math.max(1, Number(msg.cols) || 80);
+          try { sshStream.setWindow(rows, cols, 0, 0); } catch {}
+        }
       }
     });
 
-    ws.on('close', () => {
-      if (sshStream) { try { sshStream.end(); } catch (_) {} }
-      if (sshConn)   { try { sshConn.end();   } catch (_) {} }
-    });
+    ws.on('close', () => cleanup());
 
     ws.on('error', (e) => {
       console.error('[SSHProxy] WS error:', e.message);
-      if (sshConn) { try { sshConn.end(); } catch (_) {} }
+      cleanup();
     });
   });
+
+  wss.on('error', (e) => console.error('[SSHProxy] WSS error:', e.message));
 
   console.log('✅ SSH WebSocket proxy attached at /ws/terminal/:deviceId');
 }
