@@ -4,13 +4,12 @@ require('dotenv').config();
 
 const KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
 
-console.log(process.env.CREDENTIAL_ENCRYPTION_KEY.length);
-
-// Warn but don't crash — crashing silently swallows all passwords
+// SECURITY FIX: Removed console.log that printed key length on every boot —
+// even logging metadata about the key is unnecessary information disclosure.
 if (!KEY) {
   console.error('ERROR: CREDENTIAL_ENCRYPTION_KEY is not set in .env — credentials will NOT be saved!');
 } else if (KEY.length !== 32) {
-  console.error(`ERROR: CREDENTIAL_ENCRYPTION_KEY is ${KEY.length} chars — must be exactly 32. Credentials will NOT be saved!`);
+  console.error(`ERROR: CREDENTIAL_ENCRYPTION_KEY must be exactly 32 characters (got ${KEY.length}). Credentials will NOT be saved!`);
 }
 
 function encrypt(plaintext) {
@@ -37,4 +36,3 @@ function decrypt(ciphertext) {
 }
 
 module.exports = { encrypt, decrypt };
-

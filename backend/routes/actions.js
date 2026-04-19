@@ -56,14 +56,29 @@ function actionRoute(action) {
       if (!deviceId && !groupId)
         return res.status(400).json({ error: 'deviceId or groupId required' });
 
+      // SECURITY FIX: Operators can only act on devices in their accessible groups (IDOR prevention)
       let devices = [];
       if (deviceId) {
         const d = await loadDevice(deviceId);
         if (!d) return res.status(404).json({ error: 'Device not found' });
+        if (req.user.role === 'operator') {
+          const access = await queryOne(
+            'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+            [req.user.id, d.group_id]
+          );
+          if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+        }
         devices = [d];
       } else {
         const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
         if (!group) return res.status(404).json({ error: 'Group not found' });
+        if (req.user.role === 'operator') {
+          const access = await queryOne(
+            'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+            [req.user.id, groupId]
+          );
+          if (!access) return res.status(403).json({ error: 'Access denied to this group' });
+        }
         const rows = await query('SELECT * FROM devices WHERE group_id = ?', [groupId]);
         devices = rows.map(d => ({
           ...d,
@@ -89,7 +104,7 @@ function actionRoute(action) {
         }
         await audit.log({ userId: req.user.id, username: req.user.username,
           action, targetType: 'device', targetId: device.id,
-          targetName: device.name, ipSource: req.ip, result, details });
+          targetName: device.name, ipSource: req.realIp, result, details });
         results.push({ device: device.name, id: device.id, result, details });
       }
 
@@ -115,6 +130,15 @@ router.post('/exec',
     const device = await loadDevice(req.body.deviceId);
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
+    // SECURITY FIX: Operators can only exec on their accessible devices
+    if (req.user.role === 'operator') {
+      const access = await queryOne(
+        'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+        [req.user.id, device.group_id]
+      );
+      if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+    }
+
     let result = 'success', output = '';
     try {
       const r = device.os_type === 'linux'
@@ -125,7 +149,7 @@ router.post('/exec',
 
     await audit.log({ userId: req.user.id, username: req.user.username,
       action: 'exec_command', targetType: 'device', targetId: device.id,
-      targetName: device.name, ipSource: req.ip, result,
+      targetName: device.name, ipSource: req.realIp, result,
       details: `CMD: ${req.body.command}` });
 
     res.json({ result, output });
@@ -133,4 +157,3 @@ router.post('/exec',
 );
 
 module.exports = router;
-

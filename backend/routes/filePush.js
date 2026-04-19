@@ -1,18 +1,13 @@
-// routes/filePush.js — Batch SCP file push endpoint
-// POST /api/file-push
-//   multipart/form-data:
-//     file        — the file to push (required)
-//     remotePath  — destination path on each device (required, e.g. /tmp/script.sh)
-//     actionPin   — current action PIN (required)
-//     deviceIds   — JSON array of device UUIDs (optional, one of deviceIds/groupId required)
-//     groupId     — UUID of group to push to all devices (optional)
-//     fileMode    — octal string e.g. "0755" (optional, default "0644")
+// routes/filePush.js
+// FIX: multer MUST run before requireActionPin — multer populates req.body
+// from multipart/form-data so actionPin is available for the PIN check.
 
 const express = require('express');
 const multer  = require('multer');
 const { body, validationResult } = require('express-validator');
 
-const { requireAuth, requireActionPin } = require('../middleware/auth');
+const path = require('path');
+const { requireAuth, requireActionPin, requireRole } = require('../middleware/auth');
 const { query, queryOne }               = require('../db');
 const { decrypt }                       = require('../services/crypto');
 const { scpPushMany }                   = require('../services/scpPush');
@@ -21,34 +16,45 @@ const audit                             = require('../services/audit');
 const router = express.Router();
 router.use(requireAuth);
 
-// multer: memory storage, 50 MB limit
 const upload = multer({
   storage: multer.memoryStorage(),
   limits:  { fileSize: 50 * 1024 * 1024 },
 });
 
 function decryptDevice(d) {
+  const sshPw   = decrypt(d.ssh_password);
+  const winrmPw = decrypt(d.winrm_password);
   return {
     ...d,
-    _ssh_password:   decrypt(d.ssh_password),
-    _ssh_key:        decrypt(d.ssh_key),
-    _winrm_password: decrypt(d.winrm_password),
+    _ssh_password:       sshPw   || winrmPw || null,  // winrm fallback
+    _ssh_key:            decrypt(d.ssh_key),
+    _winrm_password:     winrmPw,
+    _effective_username: d.ssh_username || d.winrm_username || null,
   };
 }
 
 router.post(
   '/',
+  // ① multer first — populates req.body from multipart form
   upload.single('file'),
+  // ② validation
   [
-    body('remotePath').notEmpty().isString().isLength({ max: 500 }),
+    body('remotePath').notEmpty().isString().isLength({ max: 500 })
+      // SECURITY FIX: Prevent path traversal — reject any path containing '..'
+      .custom(v => {
+        const normalised = path.posix.normalize(v);
+        if (normalised.includes('..')) throw new Error('Path traversal not allowed');
+        return true;
+      }),
     body('actionPin').notEmpty().isString(),
+    // SECURITY FIX: Validate each deviceId is a UUID to prevent injection
     body('deviceIds').optional().isString(),
     body('groupId').optional().isUUID(),
     body('fileMode').optional().isString().matches(/^0[0-7]{3}$/),
   ],
+  // ③ PIN check — req.body.actionPin is now available
   requireActionPin,
   async (req, res) => {
-    // Validate
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
@@ -57,7 +63,6 @@ router.post(
     const { remotePath, groupId, fileMode = '0644' } = req.body;
     const mode = parseInt(fileMode, 8);
 
-    // Parse deviceIds
     let rawDeviceIds = [];
     if (req.body.deviceIds) {
       try { rawDeviceIds = JSON.parse(req.body.deviceIds); }
@@ -68,21 +73,43 @@ router.post(
       return res.status(400).json({ error: 'Provide deviceIds or groupId' });
     }
 
-    // Load devices
+    // SECURITY FIX: Validate each deviceId is a UUID format
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (rawDeviceIds.some(id => !UUID_RE.test(String(id)))) {
+      return res.status(400).json({ error: 'deviceIds must all be valid UUIDs' });
+    }
+
     let devices = [];
     try {
       if (rawDeviceIds.length) {
-        // fetch each specified device
         const placeholders = rawDeviceIds.map(() => '?').join(',');
-        const rows = await query(
-          `SELECT * FROM devices WHERE id IN (${placeholders})`,
-          rawDeviceIds
-        );
-        devices = rows;
+        if (req.user.role === 'operator') {
+          // SECURITY FIX: Operators can only push to devices in their accessible groups (IDOR)
+          devices = await query(
+            `SELECT d.* FROM devices d
+             INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?
+             WHERE d.id IN (${placeholders})`,
+            [req.user.id, ...rawDeviceIds]
+          );
+          if (devices.length !== rawDeviceIds.length)
+            return res.status(403).json({ error: 'One or more devices are not in your accessible groups' });
+        } else {
+          devices = await query(
+            `SELECT * FROM devices WHERE id IN (${placeholders})`,
+            rawDeviceIds
+          );
+        }
       } else {
-        // all devices in the group
         const group = await queryOne('SELECT id FROM `groups` WHERE id = ?', [groupId]);
         if (!group) return res.status(404).json({ error: 'Group not found' });
+        if (req.user.role === 'operator') {
+          // SECURITY FIX: Operators can only push to their accessible groups
+          const access = await queryOne(
+            'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+            [req.user.id, groupId]
+          );
+          if (!access) return res.status(403).json({ error: 'Access denied to this group' });
+        }
         devices = await query('SELECT * FROM devices WHERE group_id = ?', [groupId]);
       }
     } catch (e) {
@@ -91,18 +118,9 @@ router.post(
 
     if (!devices.length) return res.status(400).json({ error: 'No devices found for target' });
 
-    // Decrypt credentials
     const decrypted = devices.map(decryptDevice);
+    const results   = await scpPushMany(decrypted, req.file.buffer, remotePath, mode);
 
-    // Push file
-    const results = await scpPushMany(
-      decrypted,
-      req.file.buffer,
-      remotePath,
-      mode
-    );
-
-    // Audit each result
     for (const r of results) {
       const dev = devices.find(d => d.name === r.device || d.ip_address === r.device);
       await audit.log({

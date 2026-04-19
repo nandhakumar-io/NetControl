@@ -25,8 +25,13 @@ router.post('/login', authLimiter, async (req, res) => {
     const valid = await bcrypt.compare(password, hash);
 
     if (!user || !valid) {
-      await audit.log({ username, action: 'login_failed', ipSource: req.ip, result: 'failure', details: 'Invalid credentials' });
+      await audit.log({ username, action: 'login_failed', ipSource: req.realIp, result: 'failure', details: 'Invalid credentials' });
       return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    if (!user.enabled) {
+      await audit.log({ userId: user.id, username: user.username, action: 'login_failed', ipSource: req.realIp, result: 'failure', details: 'Account disabled' });
+      return res.status(403).json({ error: 'Account is disabled. Contact your administrator.' });
     }
 
     const accessToken = jwt.sign(
@@ -55,7 +60,7 @@ router.post('/login', authLimiter, async (req, res) => {
       path: '/api/auth',
     });
 
-    await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: req.ip, result: 'success' });
+    await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: req.realIp, result: 'success' });
 
     res.json({ accessToken, user: { id: user.id, username: user.username, role: user.role } });
   } catch (e) {
@@ -81,6 +86,16 @@ router.post('/refresh', async (req, res) => {
     if (!record || record.expires_at < Math.floor(Date.now() / 1000)) {
       res.clearCookie('refreshToken', { path: '/api/auth' });
       return res.status(401).json({ error: 'Refresh token invalid or expired' });
+    }
+
+    // Check the user is still enabled — admin may have disabled the account
+    // since the refresh token was issued
+    const liveUser = await queryOne('SELECT enabled FROM users WHERE id = ?', [record.user_id]);
+    if (!liveUser || !liveUser.enabled) {
+      // Revoke all refresh tokens for this user immediately
+      await execute('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [record.user_id]);
+      res.clearCookie('refreshToken', { path: '/api/auth' });
+      return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
     }
 
     const accessToken = jwt.sign(
@@ -116,4 +131,5 @@ router.get('/me', requireAuth, (req, res) => {
 });
 
 module.exports = router;
+
 

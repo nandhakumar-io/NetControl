@@ -1,5 +1,6 @@
 import React from 'react'
 import { Monitor, Power, RotateCcw, Zap, Pencil, Trash2, Server, TerminalSquare } from 'lucide-react'
+import { useThemeStore } from '../../store/themeStore'
 
 const STATUS_COLORS = {
   online:  'status-dot-online',
@@ -8,22 +9,23 @@ const STATUS_COLORS = {
   error:   'status-dot-error',
 }
 const STATUS_LABELS = {
-  online:  { text: 'Online',  color: 'text-accent-green'  },
-  offline: { text: 'Offline', color: 'text-slate-500'     },
-  unknown: { text: 'Unknown', color: 'text-accent-yellow' },
-  error:   { text: 'Error',   color: 'text-accent-red'    },
+  online:  { text: 'Online',  cls: 'text-accent-green'  },
+  offline: { text: 'Offline', cls: 'text-slate-500'     },
+  unknown: { text: 'Unknown', cls: 'text-accent-yellow' },
+  error:   { text: 'Error',   cls: 'text-accent-red'    },
 }
 
 export default function DeviceCard({
   device, selected,
-  onSelect, onWake, onShutdown, onRestart, onEdit, onDelete
+  onSelect, onWake, onShutdown, onRestart, onEdit, onDelete,
 }) {
+  const { theme } = useThemeStore()
+  const isLight = theme === 'light'
+
   const status      = device.status || 'unknown'
   const statusDot   = STATUS_COLORS[status]
   const statusLabel = STATUS_LABELS[status]
-
-  // "Remote Access" only shown for Linux devices that have SSH credentials
-  const canSSH = device.ssh_username
+  const canSSH      = device.ssh_username
 
   const openTerminal = (e) => {
     e.stopPropagation()
@@ -36,14 +38,20 @@ export default function DeviceCard({
       className={`
         relative rounded-xl border transition-all duration-200 cursor-pointer p-4
         ${selected
-          ? 'bg-brand-500/10 border-brand-500/40 shadow-[0_0_20px_rgba(14,165,233,0.1)]'
-          : 'glass glass-hover border-white/8'
+          ? isLight
+            ? 'border-[#6c5ce7]/40 shadow-[0_0_0_2px_rgba(108,92,231,0.15)]'
+            : 'bg-brand-500/10 border-brand-500/40 shadow-[0_0_20px_rgba(14,165,233,0.1)]'
+          : 'glass glass-hover'
         }
       `}
+      style={selected && isLight ? { backgroundColor: 'rgba(108,92,231,0.05)' } : {}}
     >
-      {/* Selection indicator */}
+      {/* Selection tick */}
       {selected && (
-        <div className="absolute top-3 right-3 w-4 h-4 rounded-full bg-brand-500 flex items-center justify-center">
+        <div
+          className="absolute top-3 right-3 w-4 h-4 rounded-full flex items-center justify-center"
+          style={{ backgroundColor: isLight ? '#6c5ce7' : '#0ea5e9' }}
+        >
           <span className="text-white text-[10px]">✓</span>
         </div>
       )}
@@ -72,16 +80,16 @@ export default function DeviceCard({
         </div>
       </div>
 
-      {/* Status row */}
+      {/* Status */}
       <div className="flex items-center gap-2 mb-4">
         <span className={statusDot} />
-        <span className={`text-xs font-body ${statusLabel.color}`}>{statusLabel.text}</span>
+        <span className={`text-xs font-body ${statusLabel.cls}`}>{statusLabel.text}</span>
         <span className="ml-auto text-[10px] font-mono uppercase" style={{ color: 'var(--text-faint)' }}>
           {device.os_type}
         </span>
       </div>
 
-      {/* Power actions */}
+      {/* Action buttons */}
       <div className="flex gap-1.5 mb-1.5" onClick={e => e.stopPropagation()}>
         <button
           onClick={() => onWake(device)}
@@ -107,23 +115,24 @@ export default function DeviceCard({
           <RotateCcw size={12} />
           <span className="text-[11px] font-body font-medium">Restart</span>
         </button>
+        {/* Edit / Delete — use icon-btn class which adapts to theme */}
         <button
           onClick={() => onEdit(device)}
           title="Edit"
-          className="px-2 py-1.5 rounded-lg bg-surface-3 hover:bg-surface-4 border border-white/6 text-slate-400 hover:text-slate-200 transition-all duration-150"
+          className="icon-btn"
         >
           <Pencil size={12} />
         </button>
         <button
           onClick={() => onDelete(device)}
           title="Delete"
-          className="px-2 py-1.5 rounded-lg bg-surface-3 hover:bg-accent-red/10 border border-white/6 hover:border-accent-red/20 text-slate-500 hover:text-accent-red transition-all duration-150"
+          className="icon-btn hover:!text-accent-red hover:!bg-accent-red/10 hover:!border-accent-red/20"
         >
           <Trash2 size={12} />
         </button>
       </div>
 
-      {/* SSH Terminal button — Linux only, only when ssh_username is set */}
+      {/* SSH button */}
       {canSSH && (
         <div onClick={e => e.stopPropagation()}>
           <button
@@ -131,17 +140,17 @@ export default function DeviceCard({
             title="Open SSH Terminal"
             className="w-full py-1.5 rounded-lg border transition-all duration-150 flex items-center justify-center gap-1.5 text-[11px] font-body font-medium"
             style={{
-              backgroundColor: 'rgba(14,165,233,0.08)',
-              borderColor:     'rgba(14,165,233,0.20)',
-              color:           '#38bdf8',
+              backgroundColor: isLight ? 'rgba(108,92,231,0.07)' : 'rgba(14,165,233,0.08)',
+              borderColor:     isLight ? 'rgba(108,92,231,0.20)' : 'rgba(14,165,233,0.20)',
+              color:           isLight ? '#6c5ce7' : '#38bdf8',
             }}
             onMouseEnter={e => {
-              e.currentTarget.style.backgroundColor = 'rgba(14,165,233,0.16)'
-              e.currentTarget.style.borderColor     = 'rgba(14,165,233,0.40)'
+              e.currentTarget.style.backgroundColor = isLight ? 'rgba(108,92,231,0.14)' : 'rgba(14,165,233,0.16)'
+              e.currentTarget.style.borderColor     = isLight ? 'rgba(108,92,231,0.35)' : 'rgba(14,165,233,0.40)'
             }}
             onMouseLeave={e => {
-              e.currentTarget.style.backgroundColor = 'rgba(14,165,233,0.08)'
-              e.currentTarget.style.borderColor     = 'rgba(14,165,233,0.20)'
+              e.currentTarget.style.backgroundColor = isLight ? 'rgba(108,92,231,0.07)' : 'rgba(14,165,233,0.08)'
+              e.currentTarget.style.borderColor     = isLight ? 'rgba(108,92,231,0.20)' : 'rgba(14,165,233,0.20)'
             }}
           >
             <TerminalSquare size={12} />
@@ -151,7 +160,7 @@ export default function DeviceCard({
       )}
 
       {device.group_name && (
-        <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+        <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid var(--border-subtle)' }}>
           <span className="text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>
             <span style={{ color: 'var(--text-muted)' }}>Group: </span>{device.group_name}
           </span>
@@ -160,4 +169,3 @@ export default function DeviceCard({
     </div>
   )
 }
-

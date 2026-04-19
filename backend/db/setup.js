@@ -1,6 +1,7 @@
 // db/setup.js — Run once to create all tables and seed default admin
 // Usage: node db/setup.js
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');

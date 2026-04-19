@@ -12,9 +12,22 @@ router.use(requireAuth);
 // GET /api/groups
 router.get('/', async (req, res) => {
   try {
-    const groups = await query(
-      'SELECT g.*, COUNT(d.id) as device_count FROM `groups` g LEFT JOIN devices d ON d.group_id = g.id GROUP BY g.id ORDER BY g.name'
-    );
+    let groups;
+    if (req.user.role === 'operator') {
+      // Operators only see groups they have been explicitly granted access to
+      groups = await query(
+        'SELECT g.*, COUNT(d.id) as device_count ' +
+        'FROM `groups` g ' +
+        'INNER JOIN user_group_access uga ON uga.group_id = g.id AND uga.user_id = ? ' +
+        'LEFT JOIN devices d ON d.group_id = g.id ' +
+        'GROUP BY g.id ORDER BY g.name',
+        [req.user.id]
+      );
+    } else {
+      groups = await query(
+        'SELECT g.*, COUNT(d.id) as device_count FROM `groups` g LEFT JOIN devices d ON d.group_id = g.id GROUP BY g.id ORDER BY g.name'
+      );
+    }
     res.json(groups);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -23,6 +36,14 @@ router.get('/', async (req, res) => {
 router.get('/:id/devices', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
+    // Operators must have access to this group
+    if (req.user.role === 'operator') {
+      const access = await queryOne(
+        'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+        [req.user.id, req.params.id]
+      );
+      if (!access) return res.status(403).json({ error: 'Access denied to this group' });
+    }
     const devices = await query(
       'SELECT id, name, ip_address, mac_address, os_type, group_id, status, last_seen, created_at FROM devices WHERE group_id = ? ORDER BY name',
       [req.params.id]
@@ -45,7 +66,7 @@ router.post('/',
         [id, name, description || null]);
       await audit.log({ userId: req.user.id, username: req.user.username,
         action: 'add_group', targetType: 'group', targetId: id,
-        targetName: name, ipSource: req.ip, result: 'success' });
+        targetName: name, ipSource: req.realIp, result: 'success' });
       res.status(201).json(await queryOne('SELECT * FROM `groups` WHERE id = ?', [id]));
     } catch (e) {
       if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Group name already exists' });
@@ -82,10 +103,9 @@ router.delete('/:id', param('id').isUUID(), async (req, res) => {
     await execute('DELETE FROM `groups` WHERE id = ?', [req.params.id]);
     await audit.log({ userId: req.user.id, username: req.user.username,
       action: 'delete_group', targetType: 'group', targetId: req.params.id,
-      targetName: group.name, ipSource: req.ip, result: 'success' });
+      targetName: group.name, ipSource: req.realIp, result: 'success' });
     res.json({ message: 'Group deleted' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;
-
