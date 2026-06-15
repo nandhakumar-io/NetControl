@@ -113,6 +113,7 @@ app.use('/api/schedules', require('./routes/schedules'));
 app.use('/api/audit',     require('./routes/audit'));
 app.use('/api/file-push', require('./routes/filePush'));
 app.use('/api/users',     require('./routes/users'));
+app.use('/api/security',   require('./routes/security'));
 app.use('/api/metrics',   require('./routes/metrics'));
 app.use('/api/alerts',    require('./routes/alerts').router);
 

@@ -213,6 +213,12 @@ async function evaluateAlerts(deviceId, snapshot) {
         breached = rule.operator === 'gt' ? pct > rule.threshold : pct < rule.threshold;
         details = `RAM ${pct.toFixed(1)}% used`;
       }
+      // Offline event — fired by statusPoller when a device goes offline
+      if (rule.metric === 'offline' && snapshot._offline === true) {
+        breached = true;
+        details  = `Device went offline`;
+      }
+
       if (rule.metric === 'disk' && snapshot.disk?.length) {
         for (const d of snapshot.disk) {
           if (rule.operator === 'gt' ? d.use > rule.threshold : d.use < rule.threshold) {
@@ -249,4 +255,13 @@ async function evaluateAlerts(deviceId, snapshot) {
   } catch (e) { console.error('[Alert evaluator]', e.message); }
 }
 
-module.exports = { router, evaluateAlerts, pushNotification };
+/**
+ * evaluateOffline — called by statusPoller when a device transitions online → offline.
+ * Fires any alert rules with metric='offline' for this device.
+ */
+async function evaluateOffline(deviceId, deviceName) {
+  return evaluateAlerts(deviceId, { _offline: true, hostname: deviceName });
+}
+
+module.exports = { router, evaluateAlerts, evaluateOffline, pushNotification };
+

@@ -3,7 +3,7 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
-  Users, FolderOpen, Share2, Bell, X, AlertTriangle
+  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -185,7 +185,8 @@ export default function Layout() {
   ].filter(n => n.show)
 
   const ADMIN_NAV = [
-    { to: '/users', icon: Users, label: 'Users', show: isAdmin },
+    { to: '/users',     icon: Users,       label: 'Users',    show: isAdmin },
+    { to: '/security',  icon: ShieldAlert, label: 'Security', show: isAdmin },
   ].filter(n => n.show)
 
   const NavItem = ({ to, icon: Icon, label }) => (
@@ -332,3 +333,4 @@ export default function Layout() {
     </div>
   )
 }
+

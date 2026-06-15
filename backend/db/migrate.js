@@ -264,7 +264,20 @@ async function run() {
   }
 }
 
-run().catch(err => {
-  console.error('\n❌ Migration failed:', err.message, '\n');
-  process.exit(1);
-});
+run()
+  .then(async () => {
+    // Run security tables (ip_allowlist, webhooks) using a plain connection
+    try {
+      const { migrateSecurityTables } = require('./migrate-security');
+      await migrateSecurityTables();
+      console.log('  ✓ security_tables (ip_allowlist, webhooks)');
+    } catch (e) {
+      console.warn('  ⚠  security_tables:', e.message);
+    }
+    console.log('\n✅ All done.\n');
+  })
+  .then(() => process.exit(0))  // Always exit — don't let pool timers hang node
+  .catch(err => {
+    console.error('\n❌ Migration failed:', err.message, '\n');
+    process.exit(1);
+  });

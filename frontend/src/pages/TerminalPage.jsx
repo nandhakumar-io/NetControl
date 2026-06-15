@@ -1,18 +1,11 @@
-// pages/TerminalPage.jsx — SSH WebSocket terminal
-// FIXES:
-// 1. buildWsUrl now uses window.location to build a RELATIVE ws:// URL that
-//    goes through the Vite proxy (/ws path) — no more hardcoded :4000 port
-//    that breaks behind proxies/load balancers.
-// 2. The 'connect' message is now sent AFTER ws.onopen fires — was already
-//    correct but now also waits for xterm to be ready via a small guard.
-// 3. Relay SSE URL uses /api prefix consistently (was inconsistent with
-//    buildApiBase() which could return wrong base in some deployments).
-// 4. Removed the webTerminal/HTTP relay fallback entirely — it depended on
-//    a separate agent command loop which was broken and confusing.
-//    WebSocket SSH is now the only transport. If it fails, user sees a clear
-//    error with actionable steps.
-// 5. Resize events now correctly send to open WebSocket only.
-// 6. inputDisposable is properly cleaned up on every reconnect.
+// pages/TerminalPage.jsx
+// Transport priority:
+//   1. WebSocket SSH (direct ssh2 on server) — fastest, full PTY
+//   2. HTTP relay fallback (webTerminal.js agent polling) — works when
+//      port 22 is blocked or WebSocket is unavailable (e.g. corporate proxy)
+//
+// The fallback kicks in automatically after WS fails — user sees a notice
+// but the terminal still works.
 
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
@@ -22,44 +15,53 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import {
   X, Maximize2, Minimize2, RefreshCw, Wifi, WifiOff,
-  Loader2, Terminal as TermIcon, Copy, Check
+  Loader2, Terminal as TermIcon, Copy, Check, AlertTriangle
 } from 'lucide-react'
 import api from '../lib/api'
 import { useThemeStore } from '../store/themeStore'
 
-// ── Build WebSocket URL correctly ─────────────────────────────────────────────
-// Uses the same host+port as the current page so it goes through Vite proxy
-// in dev (/ws path is proxied to :4000) and through nginx/caddy in prod.
-// Falls back to VITE_WS_URL env var for custom deployments.
+// ── WebSocket URL ─────────────────────────────────────────────────────────────
 function buildWsUrl(deviceId) {
   const token = localStorage.getItem('nc_token') || ''
-
   if (import.meta.env.VITE_WS_URL) {
     const base = import.meta.env.VITE_WS_URL.replace(/\/$/, '')
     return `${base}/ws/terminal/${deviceId}?token=${encodeURIComponent(token)}`
   }
-
-  // Derive from current page URL — works behind any proxy
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const host  = location.host  // includes port if non-standard
-  return `${proto}://${host}/ws/terminal/${deviceId}?token=${encodeURIComponent(token)}`
+  return `${proto}://${location.host}/ws/terminal/${deviceId}?token=${encodeURIComponent(token)}`
+}
+
+// ── SSE URL for relay output ──────────────────────────────────────────────────
+function buildSseUrl(sessionId) {
+  const token = localStorage.getItem('nc_token') || ''
+  return `/api/terminal/session/${sessionId}/output?token=${encodeURIComponent(token)}`
 }
 
 // ── Status badge ──────────────────────────────────────────────────────────────
-function StatusBadge({ status }) {
+function StatusBadge({ status, transport }) {
   const cfg = {
-    idle:       { icon: null,                                              text: 'Ready',         color: '#64748b' },
-    connecting: { icon: <Loader2 size={11} className="animate-spin" />,   text: 'Connecting…',   color: '#fbbf24' },
-    connected:  { icon: <Wifi size={11} />,                               text: 'Connected',     color: '#22c55e' },
-    error:      { icon: <WifiOff size={11} />,                            text: 'Error',         color: '#f87171' },
-    closed:     { icon: <WifiOff size={11} />,                            text: 'Disconnected',  color: '#64748b' },
-    reconnecting:{ icon: <Loader2 size={11} className="animate-spin" />,  text: 'Reconnecting…', color: '#818cf8' },
+    idle:         { icon: null,                                            text: 'Ready',          color: '#64748b' },
+    connecting:   { icon: <Loader2 size={11} className="animate-spin"/>,  text: 'Connecting…',    color: '#fbbf24' },
+    connected:    { icon: <Wifi size={11}/>,                              text: 'Connected',      color: '#22c55e' },
+    relay:        { icon: <Wifi size={11}/>,                              text: 'Relay',          color: '#f97316' },
+    error:        { icon: <WifiOff size={11}/>,                           text: 'Error',          color: '#f87171' },
+    closed:       { icon: <WifiOff size={11}/>,                           text: 'Disconnected',   color: '#64748b' },
+    reconnecting: { icon: <Loader2 size={11} className="animate-spin"/>,  text: 'Reconnecting…',  color: '#818cf8' },
+    relay_wait:   { icon: <Loader2 size={11} className="animate-spin"/>,  text: 'Waiting for agent…', color: '#f97316' },
   }
   const c = cfg[status] || cfg.idle
   return (
-    <span className="flex items-center gap-1.5 text-xs font-mono" style={{ color: c.color }}>
-      {c.icon} {c.text}
-    </span>
+    <div className="flex items-center gap-2">
+      <span className="flex items-center gap-1.5 text-xs font-mono" style={{color: c.color}}>
+        {c.icon} {c.text}
+      </span>
+      {transport === 'relay' && (
+        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded"
+          style={{background:'rgba(249,115,22,0.15)',color:'#f97316',border:'1px solid rgba(249,115,22,0.3)'}}>
+          HTTP relay
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -71,18 +73,27 @@ export default function TerminalPage() {
   const xtermRef = useRef(null)
   const fitRef   = useRef(null)
   const wsRef    = useRef(null)
-  const inputRef = useRef(null)  // xterm onData disposable
-  const roRef    = useRef(null)  // ResizeObserver
+  const inputRef = useRef(null)
+  const roRef    = useRef(null)
 
-  const [device,   setDevice]   = useState(null)
-  const [status,   setStatus]   = useState('idle')
-  const [errMsg,   setErrMsg]   = useState('')
-  const [fullscreen, setFull]   = useState(false)
-  const [copied,   setCopied]   = useState(false)
+  // Relay state
+  const relaySessionRef  = useRef(null)
+  const relaySseRef      = useRef(null)
+  const relayPollRef     = useRef(null)
+  const relayActiveRef   = useRef(false)
+
+  const [device,    setDevice]    = useState(null)
+  const [status,    setStatus]    = useState('idle')
+  const [transport, setTransport] = useState('ws')   // 'ws' | 'relay'
+  const [errMsg,    setErrMsg]    = useState('')
+  const [fullscreen,setFull]      = useState(false)
+  const [copied,    setCopied]    = useState(false)
+  const [showRelayBanner, setShowRelayBanner] = useState(false)
+
   const { theme } = useThemeStore()
   const isLight = theme === 'light'
 
-  // ── Dispose helpers ───────────────────────────────────────────────────────
+  // ── Dispose ───────────────────────────────────────────────────────────────
   const disposeInput = () => {
     if (inputRef.current) { try { inputRef.current.dispose() } catch {} inputRef.current = null }
   }
@@ -92,182 +103,226 @@ export default function TerminalPage() {
       wsRef.current = null
     }
   }
+  const stopRelay = useCallback(() => {
+    relayActiveRef.current = false
+    if (relaySseRef.current) { try { relaySseRef.current.close() } catch {} relaySseRef.current = null }
+    if (relayPollRef.current) { clearInterval(relayPollRef.current); relayPollRef.current = null }
+    if (relaySessionRef.current) {
+      api.delete(`/terminal/session/${relaySessionRef.current}`).catch(() => {})
+      relaySessionRef.current = null
+    }
+  }, [])
 
   // ── Init xterm (once) ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!termRef.current) return
 
     const term = new Terminal({
-      fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
-      fontSize:   14,
-      lineHeight: 1.4,
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      scrollback:  10000,
-      allowProposedApi: true,
+      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+      fontSize: 14, lineHeight: 1.4,
+      cursorBlink: true, cursorStyle: 'bar',
+      scrollback: 10000, allowProposedApi: true,
       theme: isLight ? {
-        background: '#fafafa', foreground: '#0f172a', cursor: '#6c5ce7',
-        cursorAccent: '#ffffff',
-        selectionBackground: 'rgba(108,92,231,0.25)',
-        black: '#334155', red: '#dc2626', green: '#16a34a', yellow: '#ca8a04',
-        blue: '#2563eb', magenta: '#9333ea', cyan: '#0891b2', white: '#1e293b',
-        brightBlack: '#64748b', brightRed: '#ef4444', brightGreen: '#22c55e',
-        brightYellow: '#eab308', brightBlue: '#3b82f6', brightMagenta: '#a855f7',
-        brightCyan: '#06b6d4', brightWhite: '#334155',
+        background:'#fafafa', foreground:'#0f172a', cursor:'#6c5ce7',
+        cursorAccent:'#ffffff', selectionBackground:'rgba(108,92,231,0.25)',
+        black:'#334155', red:'#dc2626', green:'#16a34a', yellow:'#ca8a04',
+        blue:'#2563eb', magenta:'#9333ea', cyan:'#0891b2', white:'#1e293b',
+        brightBlack:'#64748b', brightRed:'#ef4444', brightGreen:'#22c55e',
+        brightYellow:'#eab308', brightBlue:'#3b82f6', brightMagenta:'#a855f7',
+        brightCyan:'#06b6d4', brightWhite:'#334155',
       } : {
-        background: '#09090f', foreground: '#e2e8f0', cursor: '#38bdf8',
-        cursorAccent: '#09090f',
-        selectionBackground: 'rgba(56,189,248,0.3)',
-        black: '#1a1a2e', red: '#ef4444', green: '#22c55e', yellow: '#eab308',
-        blue: '#3b82f6', magenta: '#a855f7', cyan: '#06b6d4', white: '#e2e8f0',
-        brightBlack: '#475569', brightRed: '#f87171', brightGreen: '#4ade80',
-        brightYellow: '#fbbf24', brightBlue: '#60a5fa', brightMagenta: '#c084fc',
-        brightCyan: '#22d3ee', brightWhite: '#f8fafc',
+        background:'#09090f', foreground:'#e2e8f0', cursor:'#38bdf8',
+        cursorAccent:'#09090f', selectionBackground:'rgba(56,189,248,0.3)',
+        black:'#1a1a2e', red:'#ef4444', green:'#22c55e', yellow:'#eab308',
+        blue:'#3b82f6', magenta:'#a855f7', cyan:'#06b6d4', white:'#e2e8f0',
+        brightBlack:'#475569', brightRed:'#f87171', brightGreen:'#4ade80',
+        brightYellow:'#fbbf24', brightBlue:'#60a5fa', brightMagenta:'#c084fc',
+        brightCyan:'#22d3ee', brightWhite:'#f8fafc',
       },
     })
 
     const fit   = new FitAddon()
     const links = new WebLinksAddon()
-    term.loadAddon(fit)
-    term.loadAddon(links)
+    term.loadAddon(fit); term.loadAddon(links)
     term.open(termRef.current)
-
-    // Small delay then fit so the container has measured itself
     requestAnimationFrame(() => { try { fit.fit() } catch {} })
+    xtermRef.current = term; fitRef.current = fit
 
-    xtermRef.current = term
-    fitRef.current   = fit
-
-    // Observe container resize
     const ro = new ResizeObserver(() => {
       try { fit.fit() } catch {}
-      // Send resize to server if connected
       const ws = wsRef.current
       if (ws?.readyState === WebSocket.OPEN && xtermRef.current) {
-        ws.send(JSON.stringify({
-          type: 'resize',
-          cols: xtermRef.current.cols,
-          rows: xtermRef.current.rows,
-        }))
+        ws.send(JSON.stringify({ type:'resize', cols: xtermRef.current.cols, rows: xtermRef.current.rows }))
       }
     })
-    ro.observe(termRef.current)
-    roRef.current = ro
+    ro.observe(termRef.current); roRef.current = ro
 
     return () => {
-      ro.disconnect()
-      disposeInput()
-      closeWs()
-      term.dispose()
-      xtermRef.current = null
-      fitRef.current   = null
+      ro.disconnect(); disposeInput(); closeWs(); stopRelay()
+      term.dispose(); xtermRef.current = null; fitRef.current = null
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])  // Run once — theme changes don't need to recreate xterm
+  }, [])
 
-  // ── Load device info ──────────────────────────────────────────────────────
+  // ── Load device ───────────────────────────────────────────────────────────
   useEffect(() => {
     api.get(`/devices/${deviceId}`)
       .then(r => { setDevice(r.data); document.title = `Terminal — ${r.data.name}` })
       .catch(() => setErrMsg('Failed to load device'))
   }, [deviceId])
 
+  // ── HTTP Relay fallback ────────────────────────────────────────────────────
+  // Called when WebSocket SSH fails. Opens an HTTP relay session that the
+  // netcontrol-agent on the device polls and proxies to a local shell.
+  const startRelay = useCallback(async () => {
+    const term = xtermRef.current
+    term?.writeln('\r\n\x1b[90m[WebSocket unavailable — falling back to HTTP relay…]\x1b[0m\r\n')
+    term?.writeln('\x1b[90m[The device agent must be running for this to work]\x1b[0m\r\n')
+
+    setStatus('relay_wait')
+    setTransport('relay')
+    setShowRelayBanner(true)
+
+    try {
+      // Open session on backend
+      const { data } = await api.post(`/terminal/open/${deviceId}`)
+      const { sessionId } = data
+      relaySessionRef.current = sessionId
+      relayActiveRef.current  = true
+
+      // SSE stream for output from agent → browser
+      const sseUrl = buildSseUrl(sessionId)
+      const es = new EventSource(sseUrl)
+      relaySseRef.current = es
+
+      es.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.type === 'data')   { xtermRef.current?.write(msg.data) }
+          if (msg.type === 'status') {
+            if (msg.data?.includes('starting shell')) setStatus('relay')
+            term?.writeln(`\r\n\x1b[90m${msg.data}\x1b[0m\r\n`)
+          }
+          if (msg.type === 'closed') { setStatus('closed'); stopRelay() }
+        } catch {}
+      }
+
+      es.onerror = () => {
+        if (!relayActiveRef.current) return
+        term?.writeln('\r\n\x1b[91m[Relay output stream lost]\x1b[0m\r\n')
+        setStatus('error')
+        setErrMsg('HTTP relay stream disconnected')
+        stopRelay()
+      }
+
+      // Wire terminal input → relay input endpoint
+      disposeInput()
+      inputRef.current = xtermRef.current?.onData(async (data) => {
+        if (!relaySessionRef.current || !relayActiveRef.current) return
+        try {
+          await api.post(`/terminal/session/${sessionId}/input`, { data })
+        } catch {}
+      })
+
+    } catch (e) {
+      setStatus('error')
+      setErrMsg(`Relay failed: ${e.response?.data?.error || e.message}`)
+      term?.writeln(`\r\n\x1b[1;31m✖ Relay error: ${e.message}\x1b[0m\r\n`)
+      term?.writeln('\x1b[90mMake sure the netcontrol-agent is running on the device.\x1b[0m\r\n')
+    }
+  }, [deviceId, stopRelay])
+
   // ── WebSocket connect ─────────────────────────────────────────────────────
   const connect = useCallback(() => {
-    closeWs()
-    disposeInput()
+    closeWs(); disposeInput(); stopRelay()
 
     setStatus('connecting')
+    setTransport('ws')
     setErrMsg('')
+    setShowRelayBanner(false)
 
-    const url = buildWsUrl(deviceId)
-    const ws  = new WebSocket(url)
+    const url  = buildWsUrl(deviceId)
+    const ws   = new WebSocket(url)
     wsRef.current = ws
 
     const term = xtermRef.current
     term?.clear()
-    term?.writeln('\x1b[90m[Connecting to ' + deviceId + '…]\x1b[0m\r\n')
+    term?.writeln('\x1b[90m[Connecting via SSH…]\x1b[0m\r\n')
+
+    // Track if we should attempt relay on failure
+    let wsFailedClean = false
 
     ws.onopen = () => {
-      // Wait one frame so term.cols/rows are correct after fit
       requestAnimationFrame(() => {
         if (ws.readyState !== WebSocket.OPEN) return
-        ws.send(JSON.stringify({
-          type: 'connect',
-          cols: term?.cols || 80,
-          rows: term?.rows || 24,
-        }))
+        ws.send(JSON.stringify({ type:'connect', cols: term?.cols||80, rows: term?.rows||24 }))
       })
     }
 
     ws.onmessage = (e) => {
-      let msg
-      try { msg = JSON.parse(e.data) } catch { return }
-
-      if (msg.type === 'data') {
-        xtermRef.current?.write(msg.data)
-      }
-
+      let msg; try { msg = JSON.parse(e.data) } catch { return }
+      if (msg.type === 'data')   { xtermRef.current?.write(msg.data) }
       if (msg.type === 'status') {
-        if (msg.data?.startsWith('Connected')) {
-          setStatus('connected')
-          setErrMsg(msg.data)
-        } else {
-          setErrMsg(msg.data || '')
-        }
+        if (msg.data?.startsWith('Connected')) { setStatus('connected'); setErrMsg(msg.data) }
+        else setErrMsg(msg.data || '')
       }
-
       if (msg.type === 'error') {
-        setStatus('error')
-        setErrMsg(msg.data || 'SSH connection failed')
-        xtermRef.current?.writeln('\r\n\x1b[1;31m✖ ' + (msg.data || 'SSH error') + '\x1b[0m\r\n')
+        wsFailedClean = true  // SSH auth/network error — try relay
+        setErrMsg(msg.data || 'SSH error')
+        xtermRef.current?.writeln(`\r\n\x1b[1;31m✖ ${msg.data || 'SSH error'}\x1b[0m\r\n`)
       }
     }
 
     ws.onclose = (e) => {
       if (e.code === 1000) {
+        // Normal close
         setStatus('closed')
         xtermRef.current?.writeln('\r\n\x1b[90m[Connection closed]\x1b[0m\r\n')
       } else if (e.code === 1011 || e.code === 1008) {
-        // Server-side error or auth failure — don't auto-retry
-        setStatus('error')
-        const reason = e.reason || `WebSocket closed (code ${e.code})`
-        setErrMsg(reason)
-        xtermRef.current?.writeln('\r\n\x1b[1;31m✖ ' + reason + '\x1b[0m\r\n')
+        // Server error / auth failure
+        if (wsFailedClean) {
+          // SSH credentials failed — offer relay fallback
+          setStatus('error')
+          const reason = e.reason || `SSH failed (${e.code})`
+          setErrMsg(reason)
+        } else {
+          setStatus('error')
+          setErrMsg(e.reason || `Connection error (${e.code})`)
+        }
+      } else if (e.code === 1006 || e.code === 0) {
+        // Abnormal close / network failure — try HTTP relay automatically
+        if (!relayActiveRef.current) {
+          startRelay()
+        }
       } else {
-        // Network drop — auto-retry once after 2s
+        // Unknown close — auto-retry WS once, then relay
         setStatus('reconnecting')
-        xtermRef.current?.writeln('\r\n\x1b[90m[Connection lost — retrying in 2s…]\x1b[0m\r\n')
+        xtermRef.current?.writeln('\r\n\x1b[90m[Connection lost — retrying…]\x1b[0m\r\n')
         setTimeout(() => {
-          if (wsRef.current === ws) connect() // only retry if not replaced
+          if (wsRef.current === ws) {
+            // If still on same dead socket, try relay
+            startRelay()
+          }
         }, 2000)
       }
     }
 
-    ws.onerror = () => {
-      // onclose fires after onerror — let it handle the state
-    }
+    ws.onerror = () => { /* handled in onclose */ }
 
-    // Wire terminal input → WebSocket
     inputRef.current = term?.onData(data => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'data', data }))
+        wsRef.current.send(JSON.stringify({ type:'data', data }))
       }
     })
-  }, [deviceId])
+  }, [deviceId, startRelay, stopRelay])
 
-  // ── Auto-connect on mount ────────────────────────────────────────────────
   useEffect(() => {
-    // Delay slightly so xterm has rendered and measured itself
     const t = setTimeout(connect, 200)
-    return () => {
-      clearTimeout(t)
-      closeWs()
-      disposeInput()
-    }
-  }, [connect])
+    return () => { clearTimeout(t); closeWs(); disposeInput(); stopRelay() }
+  }, [connect, stopRelay])
 
-  const reconnect = () => connect()
+  const reconnect = () => { stopRelay(); connect() }
+  const useRelay  = () => { closeWs(); disposeInput(); startRelay() }
 
   const toggleFull = () => {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.()
@@ -279,8 +334,7 @@ export default function TerminalPage() {
   const copyIP = () => {
     if (!device?.ip_address) return
     navigator.clipboard.writeText(device.ip_address).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      setCopied(true); setTimeout(() => setCopied(false), 2000)
     })
   }
 
@@ -291,83 +345,82 @@ export default function TerminalPage() {
   const textMut   = '#64748b'
 
   return (
-    <div className="flex flex-col h-screen select-none" style={{ background: termBg }}>
+    <div className="flex flex-col h-screen select-none" style={{background: termBg}}>
 
       {/* ── Top bar ──────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 px-4 py-2 shrink-0 z-10"
-        style={{ background: barBg, borderBottom: `1px solid ${barBorder}` }}>
-
-        {/* Icon */}
+        style={{background: barBg, borderBottom: `1px solid ${barBorder}`}}>
         <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-          style={{ background: isLight ? '#6c5ce7' : 'rgba(56,189,248,0.15)', border: isLight ? 'none' : '1px solid rgba(56,189,248,0.25)' }}>
-          <TermIcon size={13} style={{ color: isLight ? '#fff' : '#38bdf8' }} />
+          style={{background: isLight ? '#6c5ce7' : 'rgba(56,189,248,0.15)', border: isLight ? 'none' : '1px solid rgba(56,189,248,0.25)'}}>
+          <TermIcon size={13} style={{color: isLight ? '#fff' : '#38bdf8'}}/>
         </div>
-
-        {/* Device info */}
         <div className="flex flex-col min-w-0 mr-2">
-          <span className="text-sm font-semibold leading-tight truncate" style={{ color: textPri }}>
+          <span className="text-sm font-semibold leading-tight truncate" style={{color: textPri}}>
             {device?.name || 'Terminal'}
           </span>
           {device && (
-            <button onClick={copyIP} className="flex items-center gap-1 text-[11px] font-mono text-left leading-tight"
-              style={{ color: textMut }}>
+            <button onClick={copyIP} className="flex items-center gap-1 text-[11px] font-mono text-left leading-tight" style={{color: textMut}}>
               {device.ip_address}
-              {copied
-                ? <Check size={9} style={{ color: '#22c55e' }} />
-                : <Copy size={9} className="opacity-0 hover:opacity-100 transition-opacity" />}
+              {copied ? <Check size={9} style={{color:'#22c55e'}}/> : <Copy size={9} className="opacity-0 hover:opacity-100 transition-opacity"/>}
             </button>
           )}
         </div>
-
-        {/* Status */}
-        <StatusBadge status={status} />
-
-        {/* Error/status message */}
-        {errMsg && status !== 'connected' && (
-          <span className="text-[11px] font-body truncate hidden sm:block" style={{ color: textMut }}>
-            — {errMsg}
-          </span>
+        <StatusBadge status={status} transport={transport}/>
+        {errMsg && status !== 'connected' && status !== 'relay' && (
+          <span className="text-[11px] font-body truncate hidden sm:block" style={{color: textMut}}>— {errMsg}</span>
         )}
-
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Controls */}
+        <div className="flex-1"/>
         {[
-          { icon: <RefreshCw size={13} className={status === 'reconnecting' ? 'animate-spin' : ''} />, fn: reconnect,    title: 'Reconnect', hover: isLight ? '#6c5ce7' : '#818cf8' },
-          { icon: fullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />,                      fn: toggleFull,   title: fullscreen ? 'Exit fullscreen' : 'Fullscreen', hover: textPri },
-          { icon: <X size={13} />,                                                                      fn: () => window.close(), title: 'Close', hover: '#f87171' },
-        ].map(({ icon, fn, title, hover }, i) => (
-          <button key={i} onClick={fn} title={title}
-            className="p-1.5 rounded-lg transition-all"
-            style={{ color: textMut }}
-            onMouseEnter={e => e.currentTarget.style.color = hover}
-            onMouseLeave={e => e.currentTarget.style.color = textMut}>
+          { icon: <RefreshCw size={13} className={status==='reconnecting'||status==='relay_wait'?'animate-spin':''}/>, fn: reconnect, title:'Reconnect via SSH', hover: isLight ? '#6c5ce7' : '#818cf8' },
+          { icon: fullscreen ? <Minimize2 size={13}/> : <Maximize2 size={13}/>, fn: toggleFull, title: fullscreen?'Exit fullscreen':'Fullscreen', hover: textPri },
+          { icon: <X size={13}/>, fn: () => window.close(), title:'Close', hover:'#f87171' },
+        ].map(({icon,fn,title,hover},i) => (
+          <button key={i} onClick={fn} title={title} className="p-1.5 rounded-lg transition-all" style={{color: textMut}}
+            onMouseEnter={e=>e.currentTarget.style.color=hover}
+            onMouseLeave={e=>e.currentTarget.style.color=textMut}>
             {icon}
           </button>
         ))}
       </div>
 
+      {/* ── Relay info banner ─────────────────────────────────────────────── */}
+      {showRelayBanner && (
+        <div className="px-4 py-2 shrink-0 flex items-center gap-3"
+          style={{background:'rgba(249,115,22,0.06)',borderBottom:'1px solid rgba(249,115,22,0.2)'}}>
+          <AlertTriangle size={12} style={{color:'#f97316',flexShrink:0}}/>
+          <p className="text-[11px] font-body flex-1" style={{color:'#f97316'}}>
+            Using HTTP relay — direct SSH unavailable. Performance may be lower.
+          </p>
+          <button onClick={reconnect} className="text-[11px] font-semibold px-2 py-1 rounded-lg"
+            style={{background:'rgba(249,115,22,0.15)',color:'#f97316',border:'1px solid rgba(249,115,22,0.3)'}}>
+            Try SSH
+          </button>
+        </div>
+      )}
+
       {/* ── Error panel ───────────────────────────────────────────────────── */}
-      {status === 'error' && (
-        <div className="px-4 py-3 shrink-0" style={{ background: 'rgba(239,68,68,0.07)', borderBottom: `1px solid rgba(239,68,68,0.2)` }}>
+      {status === 'error' && !relayActiveRef.current && (
+        <div className="px-4 py-3 shrink-0" style={{background:'rgba(239,68,68,0.07)',borderBottom:'1px solid rgba(239,68,68,0.2)'}}>
           <div className="flex items-start gap-3 max-w-2xl">
-            <WifiOff size={14} style={{ color: '#f87171', flexShrink: 0, marginTop: 1 }} />
-            <div className="min-w-0">
-              <p className="text-xs font-semibold mb-1" style={{ color: '#f87171' }}>
-                SSH connection failed
-              </p>
-              <p className="text-[11px] font-mono break-all" style={{ color: textMut }}>{errMsg}</p>
-              <div className="mt-2 space-y-0.5 text-[11px]" style={{ color: textMut }}>
-                <p>• Make sure SSH is running on the device (port 22 by default)</p>
-                <p>• Check the SSH username and password are set in Device settings</p>
+            <WifiOff size={14} style={{color:'#f87171',flexShrink:0,marginTop:1}}/>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold mb-1" style={{color:'#f87171'}}>SSH connection failed</p>
+              <p className="text-[11px] font-mono break-all" style={{color:textMut}}>{errMsg}</p>
+              <div className="mt-2 space-y-0.5 text-[11px]" style={{color:textMut}}>
+                <p>• Make sure SSH is running on the device (port 22)</p>
+                <p>• Check SSH credentials are correct in Device settings</p>
                 <p>• Verify the NetControl server can reach the device IP</p>
               </div>
-              <button onClick={reconnect}
-                className="mt-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
-                style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}>
-                Try again
-              </button>
+              <div className="flex gap-2 mt-2">
+                <button onClick={reconnect} className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                  style={{background:'rgba(239,68,68,0.15)',color:'#f87171',border:'1px solid rgba(239,68,68,0.3)'}}>
+                  Retry SSH
+                </button>
+                <button onClick={useRelay} className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                  style={{background:'rgba(249,115,22,0.12)',color:'#f97316',border:'1px solid rgba(249,115,22,0.3)'}}>
+                  Use HTTP relay (requires agent)
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -375,8 +428,7 @@ export default function TerminalPage() {
 
       {/* ── Terminal ──────────────────────────────────────────────────────── */}
       <div ref={termRef} className="flex-1 overflow-hidden"
-        style={{ padding: '6px 6px 4px 8px', background: termBg }} />
+        style={{padding:'6px 6px 4px 8px', background: termBg}}/>
     </div>
   )
 }
-

@@ -1,0 +1,8 @@
+3. Maintenance mode / device lock
+Add a locked boolean to devices. When locked, all actions (wake/shutdown/restart/SSH/file push) are rejected with a "Device in maintenance" error. Useful during lab exams, patching windows, or hardware work. Show a lock badge on the device card with an unlock button (admin only).
+
+i11. Network topology map
+Groups already represent labs. Add optional location metadata (building, floor, room) to groups, and coordinates or adjacency to devices. A simple SVG canvas page showing groups as nodes and devices as children — click a node to see live status. Useful for a NOC view on a wall monitor.
+12. Per-device bandwidth usage history
+The metrics system stores network rxSec/txSec snapshots. Add a 24-hour rollup table (device_net_hourly) that the metrics route writes to every hour. A bandwidth chart on the device detail view showing yesterday's traffic profile. Useful for spotting data exfiltration or misconfigured backup jobs running at peak hours.11. Network topology map
+Groups already represent labs. Add optional location metadata (building, floor, room) to groups, and coordinates or adjacency to devices. A simple SVG canvas page showing groups as nodes and devices as children — click a node to see live status. Useful for a NOC view on a wall monitor.ter

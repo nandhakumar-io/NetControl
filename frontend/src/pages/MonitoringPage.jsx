@@ -1,657 +1,576 @@
-// pages/MonitoringPage.jsx — Enterprise-grade monitoring for thousands of agents
-// Architecture:
-//  • Fleet overview section: aggregated KPI cards + time-series charts
-//  • Virtualized device list: only renders ~20 visible rows at a time
-//  • Collapsed-by-default rows with expand-on-click for full metrics
-//  • 5s polling with delta-merge (only updates changed entries)
-//  • useMemo everywhere to avoid re-renders on unchanged data
+// pages/MonitoringPage.jsx
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
-  Activity, Cpu, HardDrive, Wifi, Clock, RefreshCw,
-  AlertTriangle, CheckCircle2, Monitor, Search, Server,
-  ArrowDown, ArrowUp, ChevronDown, ChevronUp, MemoryStick,
-  Zap, Filter, LayoutGrid, AlignJustify, TrendingUp,
-  TrendingDown, Circle, Layers, Eye,
+  Activity, Cpu, HardDrive, Wifi, Clock, RefreshCw, AlertTriangle,
+  CheckCircle2, Monitor, Search, Server, ArrowDown, ArrowUp,
+  ChevronDown, ChevronUp, MemoryStick, Filter, TrendingUp,
+  TrendingDown, Thermometer, Radio, Eye, Zap, Network,
 } from 'lucide-react'
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar as RBar,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
-  Legend, ReferenceLine,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from 'recharts'
 import api from '../lib/api'
 import { useThemeStore } from '../store/themeStore'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const fmtUptime = s => {
-  if (!s) return '—'
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60)
-  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`
-}
-const fmtBytes = b => {
-  if (!b || b < 0) return '0 B/s'
-  if (b < 1024) return `${b.toFixed(0)} B/s`
-  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB/s`
-  return `${(b / 1048576).toFixed(1)} MB/s`
-}
-const fmtMB = mb => !mb ? '—' : mb < 1024 ? `${mb.toFixed(0)} MB` : `${(mb / 1024).toFixed(1)} GB`
-const fmtGB = gb => gb == null ? '—' : gb < 1 ? `${(gb * 1024).toFixed(0)} MB` : `${gb.toFixed(1)} GB`
-const secAgo = ts => ts ? Math.floor(Date.now() / 1000) - ts : null
-const isStale = (ts, s = 45) => { const a = secAgo(ts); return a === null || a > s }
-const pct = (u, t) => t ? Math.round((u / t) * 100) : 0
+const fmtUptime  = s => { if (!s) return '—'; const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60); return d>0?`${d}d ${h}h`:h>0?`${h}h ${m}m`:`${m}m` }
+const fmtBps     = b => { if (!b||b<0) return '0 B/s'; if(b<1024) return `${b.toFixed(0)} B/s`; if(b<1048576) return `${(b/1024).toFixed(1)} KB/s`; return `${(b/1048576).toFixed(1)} MB/s` }
+const fmtMB      = mb => !mb?'—':mb<1024?`${mb.toFixed(0)} MB`:`${(mb/1024).toFixed(1)} GB`
+const fmtGB      = gb => gb==null?'—':gb<1?`${(gb*1024).toFixed(0)} MB`:`${gb.toFixed(1)} GB`
+const fmtMs      = ms => ms==null?'—':ms<1000?`${ms}ms`:`${(ms/1000).toFixed(1)}s`
+const secAgo     = ts => ts ? Math.floor(Date.now()/1000)-ts : null
+const isStale    = (ts,s=45) => { const a=secAgo(ts); return a===null||a>s }
+const pct        = (u,t) => t?Math.round(u/t*100):0
+const clamp      = (v,lo,hi) => Math.min(hi,Math.max(lo,v))
 
-const cpuColor  = v => !v && v !== 0 ? '#475569' : v >= 90 ? '#f87171' : v >= 70 ? '#fb923c' : v >= 50 ? '#facc15' : '#34d399'
-const ramColor  = p => p >= 90 ? '#f87171' : p >= 75 ? '#fb923c' : p >= 55 ? '#facc15' : '#818cf8'
-const diskColor = p => p >= 90 ? '#f87171' : p >= 80 ? '#fb923c' : p >= 70 ? '#facc15' : '#34d399'
-const statusColor = s => ({ online: '#34d399', offline: '#f87171', unknown: '#475569' }[s] || '#475569')
+const cpuColor   = v => !v&&v!==0?'#475569':v>=90?'#ef4444':v>=70?'#f97316':v>=50?'#eab308':'#22c55e'
+const ramColor   = p => p>=90?'#ef4444':p>=75?'#f97316':p>=60?'#eab308':'#818cf8'
+const diskColor  = p => p>=90?'#ef4444':p>=80?'#f97316':p>=70?'#eab308':'#22c55e'
+const latColor   = ms => ms==null?'#475569':ms<50?'#22c55e':ms<150?'#eab308':'#ef4444'
+const statusColor= s => ({online:'#22c55e',offline:'#ef4444',unknown:'#475569'}[s]||'#475569')
 
-// ─── Tiny components ──────────────────────────────────────────────────────────
-function Bar({ value, color, h = 4 }) {
+const TT = { background:'rgba(6,6,18,0.98)', border:'1px solid rgba(255,255,255,0.09)', borderRadius:8, fontSize:11, fontFamily:'monospace', padding:'8px 12px' }
+
+// ─── Primitives ───────────────────────────────────────────────────────────────
+function Bar({ value, color, h=4 }) {
   return (
-    <div className="w-full rounded-full overflow-hidden" style={{ height: h, background: 'rgba(255,255,255,0.07)' }}>
+    <div className="w-full rounded-full overflow-hidden" style={{height:h,background:'rgba(255,255,255,0.07)'}}>
       <div className="h-full rounded-full transition-all duration-700"
-        style={{ width: `${Math.min(100, Math.max(0, value || 0))}%`, background: color }} />
+        style={{width:`${clamp(value||0,0,100)}%`,background:color}}/>
     </div>
   )
 }
 
-function Gauge({ value, color, size = 60, label }) {
-  const r = size / 2 - 6, circ = 2 * Math.PI * r
-  const pctVal = Math.min(100, Math.max(0, value || 0))
-  const dash = (pctVal / 100) * circ
+function MiniGauge({ value, color, size=44, label }) {
+  const r=size/2-5, circ=2*Math.PI*r, dash=(clamp(value||0,0,100)/100)*circ
   return (
     <div className="flex flex-col items-center gap-0.5">
-      <div className="relative" style={{ width: size, height: size }}>
-        <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="5" />
-          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="5"
-            strokeDasharray={`${dash} ${circ - dash}`} strokeLinecap="round"
-            style={{ transition: 'stroke-dasharray 0.8s ease' }} />
+      <div className="relative" style={{width:size,height:size}}>
+        <svg width={size} height={size} style={{transform:'rotate(-90deg)'}}>
+          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="4"/>
+          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="4"
+            strokeDasharray={`${dash} ${circ-dash}`} strokeLinecap="round"
+            style={{transition:'stroke-dasharray 0.8s ease'}}/>
         </svg>
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="font-mono font-bold" style={{ color, fontSize: 11 }}>
-            {value == null ? '—' : `${Math.round(pctVal)}%`}
+          <span className="font-mono font-bold" style={{color,fontSize:10}}>
+            {value==null?'—':`${Math.round(value)}%`}
           </span>
         </div>
       </div>
-      {label && <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-faint)' }}>{label}</span>}
+      {label&&<span className="text-[9px] font-mono uppercase" style={{color:'var(--text-faint)'}}>{label}</span>}
     </div>
   )
 }
 
-function SparkLine({ data, color, height = 28 }) {
-  if (!data || data.length < 2) return <div style={{ height }} />
+function Spark({ data, color, height=28 }) {
+  if (!data||data.length<2) return <div style={{height}}/>
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <AreaChart data={data} margin={{ top: 1, right: 0, left: 0, bottom: 1 }}>
+      <AreaChart data={data} margin={{top:1,right:0,left:0,bottom:1}}>
         <defs>
-          <linearGradient id={`sg-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.35} />
-            <stop offset="100%" stopColor={color} stopOpacity={0} />
+          <linearGradient id={`sg${color.replace('#','')}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.35}/>
+            <stop offset="100%" stopColor={color} stopOpacity={0}/>
           </linearGradient>
         </defs>
         <Area type="monotone" dataKey="v" stroke={color} strokeWidth={1.5}
-          fill={`url(#sg-${color.replace('#', '')})`} dot={false} isAnimationActive={false} />
+          fill={`url(#sg${color.replace('#','')})`} dot={false} isAnimationActive={false}/>
       </AreaChart>
     </ResponsiveContainer>
   )
 }
 
-function CustomTooltip({ active, payload, label }) {
-  if (!active || !payload?.length) return null
+function ChartTT({ active, payload }) {
+  if (!active||!payload?.length) return null
   return (
-    <div style={{
-      background: '#0a0a14', border: '1px solid rgba(255,255,255,0.1)',
-      borderRadius: 8, padding: '8px 12px', fontSize: 11, fontFamily: 'monospace',
-    }}>
-      {payload.map((p, i) => (
-        <div key={i} style={{ color: p.color }}>
-          {p.name}: <strong>{typeof p.value === 'number' ? p.value.toFixed(1) : p.value}{p.unit || '%'}</strong>
+    <div style={TT}>
+      {payload.map((p,i)=>(
+        <div key={i} style={{color:p.color}}>
+          {p.name}: <strong>{typeof p.value==='number'?p.value.toFixed(1):p.value}{p.unit||'%'}</strong>
         </div>
       ))}
     </div>
   )
 }
 
-// ─── Fleet Overview Charts ────────────────────────────────────────────────────
-function FleetCharts({ devices, metrics }) {
-  // Build 20-point fleet time series by averaging last N history points
-  const fleetSeries = useMemo(() => {
-    const LEN = 20
-    const series = Array.from({ length: LEN }, (_, i) => ({ t: i, cpu: null, ram: null, net: null, count: 0 }))
+// ─── Fleet Overview ───────────────────────────────────────────────────────────
+function FleetOverview({ devices, metrics, groups }) {
+  const reporting = useMemo(()=>Object.values(metrics).filter(m=>m.latest&&!isStale(m.latest.ts)).length,[metrics])
 
-    for (const [, entry] of Object.entries(metrics)) {
-      const hist = entry.history || []
-      if (!hist.length) continue
-      // Sample evenly from history into LEN buckets
-      for (let i = 0; i < LEN; i++) {
-        const srcIdx = Math.floor((i / LEN) * hist.length)
-        const snap = hist[srcIdx]
-        if (!snap) continue
-        if (snap.cpu != null)  { series[i].cpu = (series[i].cpu || 0) + snap.cpu;  series[i].count++ }
-        if (snap.ram)          { series[i].ram = (series[i].ram || 0) + pct(snap.ram.used, snap.ram.total) }
-        if (snap.network?.rxSec) { series[i].net = (series[i].net || 0) + snap.network.rxSec / 1024 }
+  // Build fleet time series from history — use real timestamps from agent history
+  const series = useMemo(() => {
+    const LEN = 30
+    // Collect all history arrays
+    const allHists = Object.values(metrics).map(e=>e.history||[]).filter(h=>h.length>0)
+    if(!allHists.length) return []
+    // Use the longest history as the time spine
+    const spine = allHists.reduce((a,b)=>a.length>=b.length?a:b,[])
+    const startIdx = Math.max(0, spine.length - LEN)
+    return spine.slice(startIdx).map((src, i) => {
+      // Collect values from all agents for this time index
+      let cpuSum=0, ramSum=0, net=0, cnt=0
+      for(const h of allHists){
+        const hi = Math.floor((i / LEN) * h.length)
+        const s  = h[Math.min(hi, h.length-1)]
+        if(!s) continue
+        if(s.cpu!=null){cpuSum+=s.cpu; cnt++}
+        if(s.ram) ramSum+=pct(s.ram.used,s.ram.total)
+        if(s.network?.rxSec) net+=s.network.rxSec/1024
+      }
+      // Real timestamp from the snapshot
+      const label = src.ts
+        ? new Date(src.ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+        : `t-${LEN - i}`
+      return {
+        t:   label,
+        cpu: cnt ? +(cpuSum/cnt).toFixed(1) : null,
+        ram: cnt ? Math.round(ramSum/cnt)    : null,
+        net: +net.toFixed(1),
+      }
+    })
+  },[metrics])
+
+  // Process-level aggregates: top 5 processes by CPU across all agents
+  const topProcs = useMemo(()=>{
+    const map={}
+    for(const [,e] of Object.entries(metrics)){
+      for(const p of (e.latest?.processes||[])){
+        if(!map[p.name]) map[p.name]={name:p.name,cpu:0,mem:0,cnt:0}
+        map[p.name].cpu+=p.cpu||0
+        map[p.name].mem+=p.mem||0
+        map[p.name].cnt++
       }
     }
-    return series.map(s => ({
-      t: s.t,
-      cpu: s.count ? Math.round(s.cpu / s.count * 10) / 10 : null,
-      ram: s.count ? Math.round(s.ram / s.count) : null,
-      net: Math.round((s.net || 0) * 10) / 10,
-    }))
-  }, [metrics])
+    return Object.values(map).sort((a,b)=>b.cpu-a.cpu).slice(0,8)
+  },[metrics])
 
-  // OS breakdown for bar chart
-  const osCounts = useMemo(() => {
-    const counts = { Linux: 0, Windows: 0, Unknown: 0 }
-    for (const d of devices) {
-      if (d.os_type === 'linux') counts.Linux++
-      else if (d.os_type === 'windows') counts.Windows++
-      else counts.Unknown++
+  // Network totals
+  const netTotals = useMemo(()=>{
+    let rx=0,tx=0
+    for(const [,e] of Object.entries(metrics)){
+      if(!e.latest?.network||isStale(e.latest.ts)) continue
+      rx+=e.latest.network.rxSec||0
+      tx+=e.latest.network.txSec||0
     }
-    return Object.entries(counts).filter(([, v]) => v > 0).map(([k, v]) => ({ name: k, value: v }))
-  }, [devices])
+    return {rx,tx}
+  },[metrics])
 
-  // Status breakdown
-  const statusCounts = useMemo(() => ({
-    online:  devices.filter(d => d.status === 'online').length,
-    offline: devices.filter(d => d.status === 'offline').length,
-    unknown: devices.filter(d => !d.status || d.status === 'unknown').length,
-  }), [devices])
+  const online  = devices.filter(d=>d.status==='online').length
+  const offline = devices.filter(d=>d.status==='offline').length
 
-  // CPU distribution histogram buckets (0-20, 20-40, 40-60, 60-80, 80-100)
-  const cpuDist = useMemo(() => {
-    const buckets = [
-      { range: '0–20%',  count: 0, color: '#34d399' },
-      { range: '20–40%', count: 0, color: '#86efac' },
-      { range: '40–60%', count: 0, color: '#facc15' },
-      { range: '60–80%', count: 0, color: '#fb923c' },
-      { range: '80–100%',count: 0, color: '#f87171' },
-    ]
-    for (const [, entry] of Object.entries(metrics)) {
-      const cpu = entry.latest?.cpu
-      if (cpu == null) continue
-      const idx = Math.min(4, Math.floor(cpu / 20))
-      buckets[idx].count++
-    }
-    return buckets
-  }, [metrics])
-
-  const reporting = Object.values(metrics).filter(m => m.latest && !isStale(m.latest.ts)).length
-
-  if (devices.length === 0) return null
+  const avgCpu = useMemo(()=>{const v=Object.values(metrics).filter(m=>m.latest?.cpu!=null&&!isStale(m.latest.ts)).map(m=>m.latest.cpu);return v.length?+(v.reduce((a,b)=>a+b,0)/v.length).toFixed(1):null},[metrics])
+  const avgRam = useMemo(()=>{const v=Object.values(metrics).filter(m=>m.latest?.ram&&!isStale(m.latest.ts)).map(m=>pct(m.latest.ram.used,m.latest.ram.total));return v.length?Math.round(v.reduce((a,b)=>a+b,0)/v.length):null},[metrics])
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      {/* Fleet CPU + RAM trend */}
-      <div className="lg:col-span-2 glass rounded-2xl p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <TrendingUp size={14} style={{ color: '#818cf8' }} />
-            <span className="text-xs font-body font-semibold" style={{ color: 'var(--text-primary)' }}>
-              Fleet CPU & RAM — {reporting} reporting agents
-            </span>
+    <div className="space-y-4">
+      {/* Row A: KPI cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+        {[
+          {label:'Devices',   v:devices.length, c:'#818cf8', icon:Server},
+          {label:'Online',    v:online,          c:'#22c55e', icon:CheckCircle2},
+          {label:'Offline',   v:offline,         c:offline>0?'#ef4444':'#475569', icon:AlertTriangle},
+          {label:'Reporting', v:reporting,       c:'#06b6d4', icon:Radio, sub:`of ${devices.length}`},
+          {label:'Avg CPU',   v:avgCpu!=null?`${avgCpu}%`:'—', c:cpuColor(avgCpu), icon:Cpu},
+          {label:'Avg RAM',   v:avgRam!=null?`${avgRam}%`:'—', c:ramColor(avgRam), icon:MemoryStick},
+          {label:'Fleet RX',  v:fmtBps(netTotals.rx), c:'#22c55e', icon:ArrowDown},
+          {label:'Fleet TX',  v:fmtBps(netTotals.tx), c:'#f97316', icon:ArrowUp},
+        ].map(({label,v,c,icon:Icon,sub})=>(
+          <div key={label} className="glass rounded-xl p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <Icon size={12} style={{color:c}}/>
+              <span className="text-[9px] font-mono uppercase tracking-wider" style={{color:'var(--text-faint)'}}>{label}</span>
+            </div>
+            <p className="text-lg font-display font-bold leading-none" style={{color:c}}>{v}</p>
+            {sub&&<p className="text-[9px] font-mono mt-0.5" style={{color:'var(--text-faint)'}}>{sub}</p>}
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-[10px] flex items-center gap-1" style={{ color: '#818cf8' }}>
-              <span className="inline-block w-3 h-0.5 rounded" style={{ background: '#818cf8' }} /> CPU
-            </span>
-            <span className="text-[10px] flex items-center gap-1" style={{ color: '#34d399' }}>
-              <span className="inline-block w-3 h-0.5 rounded" style={{ background: '#34d399' }} /> RAM
-            </span>
-          </div>
-        </div>
-        <ResponsiveContainer width="100%" height={140}>
-          <AreaChart data={fleetSeries} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
-            <defs>
-              <linearGradient id="fcpu" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#818cf8" stopOpacity={0.3} />
-                <stop offset="100%" stopColor="#818cf8" stopOpacity={0} />
-              </linearGradient>
-              <linearGradient id="fram" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#34d399" stopOpacity={0.2} />
-                <stop offset="100%" stopColor="#34d399" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-            <XAxis dataKey="t" hide />
-            <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false} />
-            <ReferenceLine y={80} stroke="#f87171" strokeDasharray="4 4" strokeOpacity={0.4} />
-            <Tooltip content={<CustomTooltip />} />
-            <Area type="monotone" dataKey="cpu" name="CPU" unit="%" stroke="#818cf8" strokeWidth={2}
-              fill="url(#fcpu)" dot={false} isAnimationActive={false} />
-            <Area type="monotone" dataKey="ram" name="RAM" unit="%" stroke="#34d399" strokeWidth={2}
-              fill="url(#fram)" dot={false} isAnimationActive={false} />
-          </AreaChart>
-        </ResponsiveContainer>
+        ))}
       </div>
 
-      {/* CPU Distribution histogram */}
-      <div className="glass rounded-2xl p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <Cpu size={14} style={{ color: '#fb923c' }} />
-          <span className="text-xs font-body font-semibold" style={{ color: 'var(--text-primary)' }}>CPU Load Distribution</span>
-        </div>
-        <ResponsiveContainer width="100%" height={140}>
-          <BarChart data={cpuDist} margin={{ top: 4, right: 4, left: -28, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-            <XAxis dataKey="range" tick={{ fontSize: 8, fill: '#475569' }} tickLine={false} axisLine={false} />
-            <YAxis allowDecimals={false} tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false} />
-            <Tooltip content={<CustomTooltip />} />
-            <RBar dataKey="count" name="Devices" radius={[3, 3, 0, 0]} maxBarSize={32}
-              isAnimationActive={false}
-              fill="#818cf8"
-              label={false}>
-              {cpuDist.map((entry, index) => (
-                <rect key={index} fill={entry.color} />
+      {/* Row B: Fleet trend + CPU dist + top processes */}
+      <div className="grid grid-cols-1 gap-4">
+
+        {/* Fleet CPU + RAM trend */}
+        <div className="glass rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-body font-semibold" style={{color:'var(--text-primary)'}}>Fleet CPU & RAM trend</span>
+            <div className="flex items-center gap-3">
+              {[['#818cf8','CPU'],['#06b6d4','RAM'],['#22c55e','Net KB/s']].map(([c,l])=>(
+                <span key={l} className="flex items-center gap-1 text-[9px] font-mono" style={{color:c}}>
+                  <span className="inline-block w-3 h-px" style={{background:c}}/>{l}
+                </span>
               ))}
-            </RBar>
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  )
-}
-
-// ─── Virtualized list row (collapsed) ────────────────────────────────────────
-// Renders a single compact row per device — expandable for full detail
-const DeviceRow = React.memo(function DeviceRow({ device, metrics, expanded, onToggle }) {
-  const m    = metrics?.latest
-  const hist = metrics?.history || []
-  const stale = !m || isStale(m.ts)
-  const active = device.status === 'online' && !stale
-
-  const cpuVal  = m?.cpu ?? null
-  const ramPct  = m?.ram ? pct(m.ram.used, m.ram.total) : null
-  const diskPct = m?.disk?.[0]?.use ?? null
-  const ago     = m ? secAgo(m.ts) : null
-
-  const cc = cpuColor(cpuVal)
-  const rc = ramColor(ramPct)
-  const dc = diskColor(diskPct)
-
-  const cpuHist = useMemo(() =>
-    hist.map((h, i) => ({ i, v: h.cpu })).filter(h => h.v != null).slice(-60),
-  [hist])
-  const ramHist = useMemo(() =>
-    hist.map((h, i) => ({ i, v: h.ram ? pct(h.ram.used, h.ram.total) : null })).filter(h => h.v != null).slice(-60),
-  [hist])
-  const netHist = useMemo(() =>
-    hist.map((h, i) => ({ i, v: (h.network?.rxSec || 0) / 1024 })).slice(-60),
-  [hist])
-
-  const statusDot = active ? '#34d399' : device.status === 'online' ? '#facc15' : '#f87171'
-  const statusGlow = active ? '0 0 6px #34d39966' : 'none'
-
-  return (
-    <div
-      className="rounded-xl overflow-hidden transition-all duration-200"
-      style={{
-        border: `1px solid ${active ? 'rgba(52,211,153,0.18)' : 'var(--border-subtle)'}`,
-        background: 'var(--bg-card)',
-        marginBottom: 6,
-      }}
-    >
-      {/* ── Collapsed row ── */}
-      <div
-        className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none group"
-        onClick={onToggle}
-      >
-        {/* Status dot */}
-        <div className="w-2 h-2 rounded-full shrink-0 transition-all"
-          style={{ background: statusDot, boxShadow: statusGlow }} />
-
-        {/* OS badge */}
-        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 font-bold
-          ${device.os_type === 'windows' ? 'bg-sky-400/10 text-sky-400' : 'bg-violet-400/10 text-violet-400'}`}>
-          {device.os_type === 'windows' ? 'WIN' : 'LNX'}
-        </span>
-
-        {/* Name + IP */}
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-body font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
-            {device.name}
-          </p>
-          <p className="text-[10px] font-mono" style={{ color: 'var(--text-faint)' }}>{device.ip_address}</p>
-        </div>
-
-        {/* Inline metrics — visible on md+ */}
-        {active ? (
-          <div className="hidden md:flex items-center gap-4 shrink-0">
-            {/* CPU gauge + spark */}
-            <div className="flex items-center gap-2 w-[110px]">
-              <div className="flex-1">
-                <div className="flex justify-between mb-1">
-                  <span className="text-[9px] font-bold uppercase" style={{ color: 'var(--text-faint)' }}>CPU</span>
-                  <span className="text-[10px] font-mono font-bold" style={{ color: cc }}>{cpuVal?.toFixed(1)}%</span>
-                </div>
-                <Bar value={cpuVal} color={cc} h={3} />
-              </div>
-              <div style={{ width: 40 }}>
-                <SparkLine data={cpuHist.map(h => ({ v: h.v }))} color={cc} height={20} />
-              </div>
-            </div>
-
-            {/* RAM */}
-            <div className="flex items-center gap-2 w-[90px]">
-              <div className="flex-1">
-                <div className="flex justify-between mb-1">
-                  <span className="text-[9px] font-bold uppercase" style={{ color: 'var(--text-faint)' }}>RAM</span>
-                  <span className="text-[10px] font-mono font-bold" style={{ color: rc }}>{ramPct}%</span>
-                </div>
-                <Bar value={ramPct} color={rc} h={3} />
-              </div>
-            </div>
-
-            {/* Disk */}
-            <div className="hidden lg:flex items-center gap-2 w-[80px]">
-              <div className="flex-1">
-                <div className="flex justify-between mb-1">
-                  <span className="text-[9px] font-bold uppercase" style={{ color: 'var(--text-faint)' }}>DISK</span>
-                  <span className="text-[10px] font-mono font-bold" style={{ color: dc }}>{diskPct?.toFixed(0)}%</span>
-                </div>
-                <Bar value={diskPct} color={dc} h={3} />
-              </div>
-            </div>
-
-            {/* Network RX */}
-            <div className="hidden xl:flex items-center gap-2 w-[80px]">
-              <div className="flex-1">
-                <span className="text-[9px] font-bold uppercase" style={{ color: 'var(--text-faint)' }}>NET RX</span>
-                <p className="text-[10px] font-mono font-bold" style={{ color: '#38bdf8' }}>
-                  {fmtBytes(m?.network?.rxSec)}
-                </p>
-              </div>
-            </div>
-
-            {/* Uptime */}
-            <div className="hidden xl:block w-[60px]">
-              <span className="text-[9px] font-bold uppercase" style={{ color: 'var(--text-faint)' }}>UP</span>
-              <p className="text-[10px] font-mono" style={{ color: 'var(--text-secondary)' }}>{fmtUptime(m?.uptime)}</p>
             </div>
           </div>
-        ) : (
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="text-[11px] font-body px-2 py-0.5 rounded-full"
-              style={{
-                background: device.status === 'online' ? 'rgba(250,204,21,0.10)' : 'rgba(248,113,113,0.10)',
-                color: device.status === 'online' ? '#facc15' : '#f87171',
-                border: `1px solid ${device.status === 'online' ? 'rgba(250,204,21,0.25)' : 'rgba(248,113,113,0.25)'}`,
-              }}>
-              {device.status === 'online' ? 'No agent data' : device.status || 'Unknown'}
-            </span>
-          </div>
-        )}
-
-        {/* Freshness */}
-        {ago != null && (
-          <span className="text-[9px] font-mono shrink-0 hidden lg:block w-8 text-right"
-            style={{ color: ago < 10 ? '#34d399' : ago < 30 ? '#facc15' : '#f87171' }}>
-            {ago < 5 ? 'live' : `${ago}s`}
-          </span>
-        )}
-
-        {/* Expand chevron */}
-        <div className="ml-1 p-1 rounded-lg transition-colors group-hover:bg-white/5 shrink-0"
-          style={{ color: 'var(--text-muted)' }}>
-          {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          <ResponsiveContainer width="100%" height={130}>
+            <AreaChart data={series} margin={{top:4,right:4,left:-22,bottom:0}}>
+              <defs>
+                {[['fcpu','#818cf8'],['fram','#06b6d4'],['fnet','#22c55e']].map(([id,c])=>(
+                  <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={c} stopOpacity={0.25}/>
+                    <stop offset="100%" stopColor={c} stopOpacity={0}/>
+                  </linearGradient>
+                ))}
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false}/>
+              <XAxis dataKey="t" tick={{fontSize:9,fill:'#475569'}} tickLine={false} axisLine={false} interval="preserveStartEnd"/>
+              <YAxis tick={{fontSize:9,fill:'#475569'}} tickLine={false} axisLine={false}/>
+              <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.35}/>
+              <Tooltip content={<ChartTT/>}/>
+              <Area type="monotone" dataKey="cpu" name="CPU"   stroke="#818cf8" strokeWidth={2} fill="url(#fcpu)" dot={false} isAnimationActive={false}/>
+              <Area type="monotone" dataKey="ram" name="RAM"   stroke="#06b6d4" strokeWidth={2} fill="url(#fram)" dot={false} isAnimationActive={false}/>
+              <Area type="monotone" dataKey="net" name="RX"    stroke="#22c55e" unit=" KB/s" strokeWidth={1.5} fill="url(#fnet)" dot={false} isAnimationActive={false}/>
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
+
       </div>
 
-      {/* ── Expanded detail panel ── */}
-      {expanded && (
-        <div className="px-4 pb-4" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-          {(!m || stale) ? (
-            <div className="py-10 flex flex-col items-center gap-2" style={{ opacity: 0.4 }}>
-              <Activity size={22} style={{ color: 'var(--text-muted)' }} />
-              <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
-                {device.status !== 'online' ? 'Device is offline' : 'Waiting for agent metrics…'}
-              </p>
-            </div>
-          ) : (
-            <div className="pt-3 space-y-4">
-              {/* System info strip */}
-              <div className="flex flex-wrap gap-x-4 gap-y-1">
-                {m.hostname && <span className="text-[11px] font-mono" style={{ color: 'var(--text-secondary)' }}>{m.hostname}</span>}
-                {m.os       && <span className="text-[11px] font-body"  style={{ color: 'var(--text-muted)' }}>{m.os}</span>}
-                {m.uptime   && <span className="text-[11px] font-body"  style={{ color: 'var(--text-muted)' }}>Uptime: {fmtUptime(m.uptime)}</span>}
-                {m.network  && <span className="text-[11px] font-mono"  style={{ color: 'var(--text-muted)' }}>
-                  ↓ {fmtBytes(m.network.rxSec)} ↑ {fmtBytes(m.network.txSec)}
-                </span>}
-              </div>
-
-              {/* 4-metric grid */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-
-                {/* CPU */}
-                <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5">
-                      <Cpu size={11} style={{ color: cc }} />
-                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>CPU</span>
-                    </div>
-                    <Gauge value={cpuVal} color={cc} size={44} />
-                  </div>
-                  <Bar value={cpuVal} color={cc} h={4} />
-                  <div className="mt-2" style={{ height: 48 }}>
-                    {cpuHist.length > 3 && (
-                      <ResponsiveContainer width="100%" height={48}>
-                        <AreaChart data={cpuHist} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
-                          <defs>
-                            <linearGradient id={`cg-${device.id}`} x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor={cc} stopOpacity={0.35} />
-                              <stop offset="100%" stopColor={cc} stopOpacity={0} />
-                            </linearGradient>
-                          </defs>
-                          <ReferenceLine y={80} stroke="#f87171" strokeDasharray="3 3" strokeOpacity={0.5} />
-                          <Area type="monotone" dataKey="v" stroke={cc} strokeWidth={1.5}
-                            fill={`url(#cg-${device.id})`} dot={false} isAnimationActive={false} />
-                          <Tooltip content={<CustomTooltip />} />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    )}
-                  </div>
-                </div>
-
-                {/* RAM */}
-                <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5">
-                      <MemoryStick size={11} style={{ color: rc }} />
-                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>RAM</span>
-                    </div>
-                    <Gauge value={ramPct} color={rc} size={44} />
-                  </div>
-                  <Bar value={ramPct} color={rc} h={4} />
-                  <div className="flex justify-between mt-1">
-                    <span className="text-[9px] font-mono" style={{ color: 'var(--text-muted)' }}>{fmtMB(m.ram?.used)}</span>
-                    <span className="text-[9px] font-mono" style={{ color: 'var(--text-faint)' }}>/{fmtMB(m.ram?.total)}</span>
-                  </div>
-                  <div className="mt-2" style={{ height: 40 }}>
-                    {ramHist.length > 3 && (
-                      <ResponsiveContainer width="100%" height={40}>
-                        <AreaChart data={ramHist} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
-                          <defs>
-                            <linearGradient id={`rg-${device.id}`} x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor={rc} stopOpacity={0.35} />
-                              <stop offset="100%" stopColor={rc} stopOpacity={0} />
-                            </linearGradient>
-                          </defs>
-                          <Area type="monotone" dataKey="v" stroke={rc} strokeWidth={1.5}
-                            fill={`url(#rg-${device.id})`} dot={false} isAnimationActive={false} />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    )}
-                  </div>
-                </div>
-
-                {/* Disk */}
-                <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
-                  <div className="flex items-center gap-1.5 mb-3">
-                    <HardDrive size={11} style={{ color: '#818cf8' }} />
-                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Disk</span>
-                  </div>
-                  {(m.disk || []).slice(0, 4).map((d, i) => (
-                    <div key={i} className="mb-2.5 last:mb-0">
-                      <div className="flex justify-between mb-1">
-                        <span className="text-[9px] font-mono truncate" style={{ color: 'var(--text-secondary)', maxWidth: 60 }}>{d.mount}</span>
-                        <span className="text-[9px] font-mono font-bold" style={{ color: diskColor(d.use) }}>{d.use?.toFixed(0)}%</span>
-                      </div>
-                      <Bar value={d.use} color={diskColor(d.use)} h={4} />
-                      <div className="flex justify-between mt-0.5">
-                        <span className="text-[8px] font-mono" style={{ color: 'var(--text-faint)' }}>{fmtGB(d.used)}</span>
-                        <span className="text-[8px] font-mono" style={{ color: 'var(--text-faint)' }}>{fmtGB(d.total)}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Network */}
-                <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
-                  <div className="flex items-center gap-1.5 mb-3">
-                    <Wifi size={11} style={{ color: '#38bdf8' }} />
-                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Network</span>
-                  </div>
-                  <div className="space-y-2 mb-3">
-                    <div className="flex justify-between items-center">
-                      <div className="flex items-center gap-1">
-                        <ArrowDown size={9} style={{ color: '#34d399' }} />
-                        <span className="text-[9px] font-body" style={{ color: 'var(--text-muted)' }}>RX</span>
-                      </div>
-                      <span className="text-[10px] font-mono font-bold" style={{ color: '#34d399' }}>
-                        {fmtBytes(m.network?.rxSec)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <div className="flex items-center gap-1">
-                        <ArrowUp size={9} style={{ color: '#fb923c' }} />
-                        <span className="text-[9px] font-body" style={{ color: 'var(--text-muted)' }}>TX</span>
-                      </div>
-                      <span className="text-[10px] font-mono font-bold" style={{ color: '#fb923c' }}>
-                        {fmtBytes(m.network?.txSec)}
-                      </span>
-                    </div>
-                  </div>
-                  <div style={{ height: 48 }}>
-                    {netHist.length > 3 && (
-                      <ResponsiveContainer width="100%" height={48}>
-                        <AreaChart data={netHist} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
-                          <defs>
-                            <linearGradient id={`ng-${device.id}`} x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor="#38bdf8" stopOpacity={0.3} />
-                              <stop offset="100%" stopColor="#38bdf8" stopOpacity={0} />
-                            </linearGradient>
-                          </defs>
-                          <Area type="monotone" dataKey="v" stroke="#38bdf8" strokeWidth={1.5}
-                            fill={`url(#ng-${device.id})`} dot={false} isAnimationActive={false} />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    )}
-                  </div>
+      {/* Row C: Top processes fleet-wide */}
+      {topProcs.length>0 && (
+        <div className="glass rounded-2xl overflow-hidden">
+          <div className="px-5 py-3 flex items-center gap-2" style={{borderBottom:'1px solid var(--border-subtle)'}}>
+            <Zap size={13} style={{color:'#f97316'}}/>
+            <span className="text-xs font-body font-semibold" style={{color:'var(--text-primary)'}}>Top Processes — Fleet-wide CPU</span>
+            <span className="ml-auto text-[10px] font-mono" style={{color:'var(--text-faint)'}}>aggregated across {reporting} agents</span>
+          </div>
+          <div className="grid" style={{gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))'}}>
+            {topProcs.map((p,i)=>(
+              <div key={p.name} className="flex items-center gap-3 px-5 py-2.5 transition-colors"
+                style={{borderRight:i%2===0?'1px solid var(--border-subtle)':'none', borderBottom:'1px solid var(--border-subtle)'}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-hover)'}
+                onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                <span className="text-[10px] font-mono w-4 shrink-0" style={{color:'var(--text-faint)'}}>{i+1}</span>
+                <span className="text-xs font-mono flex-1 truncate" style={{color:'var(--text-primary)'}}>{p.name}</span>
+                <div className="text-right shrink-0">
+                  <p className="text-[11px] font-mono font-bold" style={{color:cpuColor(p.cpu/Math.max(p.cnt,1))}}>{(p.cpu).toFixed(1)}%</p>
+                  <p className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>{p.cnt} inst</p>
                 </div>
               </div>
-
-              {/* Top processes */}
-              {m.processes?.length > 0 && (
-                <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
-                  <div className="grid px-3 py-2 text-[9px] font-bold uppercase tracking-wider"
-                    style={{ gridTemplateColumns: '48px 1fr 56px 56px', background: 'var(--bg-input)', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-faint)' }}>
-                    <span>PID</span><span>Process</span><span className="text-right">CPU</span><span className="text-right">MEM</span>
-                  </div>
-                  {m.processes.slice(0, 8).map((p, i) => (
-                    <div key={i} className="grid px-3 py-1.5 items-center"
-                      style={{ gridTemplateColumns: '48px 1fr 56px 56px', borderBottom: i < m.processes.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
-                      <span className="text-[9px] font-mono" style={{ color: 'var(--text-faint)' }}>{p.pid}</span>
-                      <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-primary)' }}>{p.name}</span>
-                      <span className="text-[9px] font-mono text-right font-bold" style={{ color: cpuColor(p.cpu) }}>{(p.cpu || 0).toFixed(1)}%</span>
-                      <span className="text-[9px] font-mono text-right" style={{ color: 'var(--text-muted)' }}>{(p.mem || 0).toFixed(1)}%</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+            ))}
+          </div>
         </div>
       )}
     </div>
   )
-})
+}
 
-// ─── Virtual scroll container ─────────────────────────────────────────────────
-// Renders only visible rows + a buffer of 5 above/below. Each row is ~48px collapsed.
-// When expanded, we fall back to showing all — expansion is rare (1-2 at a time).
-const ROW_HEIGHT = 58 // approximate collapsed row height px
+// ─── Expanded device detail ───────────────────────────────────────────────────
+function DeviceDetail({ device, m, hist }) {
+  const cpuVal  = m?.cpu ?? null
+  const ramPct  = m?.ram ? pct(m.ram.used,m.ram.total) : null
+  const cc = cpuColor(cpuVal), rc = ramColor(ramPct)
 
-function VirtualList({ items, metrics, expanded, onToggle }) {
-  const containerRef = useRef(null)
-  const [scrollTop, setScrollTop] = useState(0)
-  const [containerHeight, setContainerHeight] = useState(800)
+  const cpuHist = useMemo(()=>hist.map((h,i)=>({i,v:h.cpu})).filter(h=>h.v!=null).slice(-80),[hist])
+  const ramHist = useMemo(()=>hist.map((h,i)=>({i,v:h.ram?pct(h.ram.used,h.ram.total):null})).filter(h=>h.v!=null).slice(-80),[hist])
+  const netHist = useMemo(()=>hist.map((h,i)=>({i,rx:(h.network?.rxSec||0)/1024,tx:(h.network?.txSec||0)/1024})).slice(-80),[hist])
 
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    const ro = new ResizeObserver(() => setContainerHeight(el.clientHeight))
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-
-  const anyExpanded = expanded.size > 0
-
-  // If any rows are expanded, skip virtualization (expanded rows have variable height)
-  if (anyExpanded) {
-    return (
-      <div>
-        {items.map(d => (
-          <DeviceRow key={d.id} device={d} metrics={metrics[d.id]}
-            expanded={expanded.has(d.id)} onToggle={() => onToggle(d.id)} />
-        ))}
-      </div>
-    )
-  }
-
-  // Pure virtualization for collapsed rows only
-  const totalHeight = items.length * ROW_HEIGHT
-  const BUFFER = 5
-  const startIdx = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER)
-  const endIdx   = Math.min(items.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT) + BUFFER)
-  const visible  = items.slice(startIdx, endIdx)
+  if (!m || isStale(m.ts)) return (
+    <div className="py-10 flex flex-col items-center gap-2 opacity-40">
+      <Activity size={20} style={{color:'var(--text-muted)'}}/>
+      <p className="text-sm font-body" style={{color:'var(--text-muted)'}}>
+        {device.status!=='online'?'Device is offline — no metrics available':'Agent not reporting — waiting for heartbeat'}
+      </p>
+    </div>
+  )
 
   return (
-    <div
-      ref={containerRef}
-      onScroll={e => setScrollTop(e.currentTarget.scrollTop)}
-      style={{ height: Math.min(totalHeight, 600), overflowY: 'auto', position: 'relative' }}
-    >
-      <div style={{ height: totalHeight, position: 'relative' }}>
-        <div style={{ position: 'absolute', top: startIdx * ROW_HEIGHT, left: 0, right: 0 }}>
-          {visible.map(d => (
-            <DeviceRow key={d.id} device={d} metrics={metrics[d.id]}
-              expanded={false} onToggle={() => onToggle(d.id)} />
+    <div className="p-4 space-y-4" style={{borderTop:'1px solid var(--border-subtle)'}}>
+
+      {/* System info strip */}
+      <div className="flex flex-wrap gap-x-5 gap-y-1 px-1">
+        {[
+          m.hostname && ['Host',     m.hostname],
+          m.os       && ['OS',       m.os],
+          m.uptime   && ['Uptime',   fmtUptime(m.uptime)],
+          m.network  && ['RX',       fmtBps(m.network.rxSec)],
+          m.network  && ['TX',       fmtBps(m.network.txSec)],
+        ].filter(Boolean).map(([k,v])=>(
+          <div key={k} className="flex items-center gap-1.5">
+            <span className="text-[9px] font-mono uppercase tracking-wider" style={{color:'var(--text-faint)'}}>{k}</span>
+            <span className="text-[11px] font-mono" style={{color:'var(--text-secondary)'}}>{v}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* CPU + RAM + Disk + Network */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+
+        {/* CPU */}
+        <div className="rounded-xl p-3 space-y-2" style={{background:'var(--bg-input)',border:'1px solid var(--border-subtle)'}}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Cpu size={11} style={{color:cc}}/>
+              <span className="text-[9px] font-bold uppercase tracking-wider" style={{color:'var(--text-muted)'}}>CPU</span>
+            </div>
+            <MiniGauge value={cpuVal} color={cc} size={40}/>
+          </div>
+          <Bar value={cpuVal} color={cc} h={4}/>
+          <div style={{height:52}}>
+            {cpuHist.length>3&&(
+              <ResponsiveContainer width="100%" height={52}>
+                <AreaChart data={cpuHist} margin={{top:2,right:0,left:0,bottom:0}}>
+                  <defs><linearGradient id={`cg${device.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={cc} stopOpacity={0.35}/><stop offset="100%" stopColor={cc} stopOpacity={0}/></linearGradient></defs>
+                  <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.5}/>
+                  <Area type="monotone" dataKey="v" stroke={cc} strokeWidth={1.5} fill={`url(#cg${device.id})`} dot={false} isAnimationActive={false}/>
+                  <Tooltip content={<ChartTT/>}/>
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* RAM */}
+        <div className="rounded-xl p-3 space-y-2" style={{background:'var(--bg-input)',border:'1px solid var(--border-subtle)'}}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <MemoryStick size={11} style={{color:rc}}/>
+              <span className="text-[9px] font-bold uppercase tracking-wider" style={{color:'var(--text-muted)'}}>RAM</span>
+            </div>
+            <MiniGauge value={ramPct} color={rc} size={40}/>
+          </div>
+          <Bar value={ramPct} color={rc} h={4}/>
+          <div className="flex justify-between">
+            <span className="text-[9px] font-mono" style={{color:'var(--text-muted)'}}>{fmtMB(m.ram?.used)}</span>
+            <span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>/{fmtMB(m.ram?.total)}</span>
+          </div>
+          <div style={{height:40}}>
+            {ramHist.length>3&&(
+              <ResponsiveContainer width="100%" height={40}>
+                <AreaChart data={ramHist} margin={{top:2,right:0,left:0,bottom:0}}>
+                  <defs><linearGradient id={`rg${device.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={rc} stopOpacity={0.35}/><stop offset="100%" stopColor={rc} stopOpacity={0}/></linearGradient></defs>
+                  <Area type="monotone" dataKey="v" stroke={rc} strokeWidth={1.5} fill={`url(#rg${device.id})`} dot={false} isAnimationActive={false}/>
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* Disk volumes */}
+        <div className="rounded-xl p-3 space-y-2.5" style={{background:'var(--bg-input)',border:'1px solid var(--border-subtle)'}}>
+          <div className="flex items-center gap-1.5 mb-1">
+            <HardDrive size={11} style={{color:'#a855f7'}}/>
+            <span className="text-[9px] font-bold uppercase tracking-wider" style={{color:'var(--text-muted)'}}>Disk Volumes</span>
+          </div>
+          {(m.disk||[]).slice(0,4).map((d,i)=>(
+            <div key={i}>
+              <div className="flex justify-between mb-1">
+                <span className="text-[9px] font-mono truncate max-w-[70px]" style={{color:'var(--text-secondary)'}}>{d.mount}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>{fmtGB(d.used)}/{fmtGB(d.total)}</span>
+                  <span className="text-[10px] font-mono font-bold" style={{color:diskColor(d.use)}}>{d.use?.toFixed(0)}%</span>
+                </div>
+              </div>
+              <Bar value={d.use} color={diskColor(d.use)} h={3}/>
+            </div>
           ))}
+          {(!m.disk||m.disk.length===0)&&<p className="text-[10px] font-mono opacity-30" style={{color:'var(--text-muted)'}}>No disk data</p>}
+        </div>
+
+        {/* Network */}
+        <div className="rounded-xl p-3" style={{background:'var(--bg-input)',border:'1px solid var(--border-subtle)'}}>
+          <div className="flex items-center gap-1.5 mb-3">
+            <Network size={11} style={{color:'#06b6d4'}}/>
+            <span className="text-[9px] font-bold uppercase tracking-wider" style={{color:'var(--text-muted)'}}>Network I/O</span>
+          </div>
+          <div className="flex justify-between mb-3">
+            <div>
+              <div className="flex items-center gap-1 mb-0.5"><ArrowDown size={9} style={{color:'#22c55e'}}/><span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>RX</span></div>
+              <span className="text-[12px] font-mono font-bold" style={{color:'#22c55e'}}>{fmtBps(m.network?.rxSec)}</span>
+            </div>
+            <div className="text-right">
+              <div className="flex items-center gap-1 mb-0.5 justify-end"><ArrowUp size={9} style={{color:'#f97316'}}/><span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>TX</span></div>
+              <span className="text-[12px] font-mono font-bold" style={{color:'#f97316'}}>{fmtBps(m.network?.txSec)}</span>
+            </div>
+          </div>
+          <div style={{height:52}}>
+            {netHist.length>3&&(
+              <ResponsiveContainer width="100%" height={52}>
+                <LineChart data={netHist} margin={{top:2,right:0,left:0,bottom:0}}>
+                  <Line type="monotone" dataKey="rx" name="RX" stroke="#22c55e" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
+                  <Line type="monotone" dataKey="tx" name="TX" stroke="#f97316" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
+                  <Tooltip content={<ChartTT/>}/>
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Top processes */}
+      {m.processes?.length>0 && (
+        <div className="rounded-xl overflow-hidden" style={{border:'1px solid var(--border-subtle)'}}>
+          <div className="grid px-4 py-2 text-[9px] font-bold uppercase tracking-wider"
+            style={{gridTemplateColumns:'52px 1fr 64px 64px 80px', background:'var(--bg-input)', borderBottom:'1px solid var(--border-subtle)', color:'var(--text-faint)'}}>
+            <span>PID</span><span>Process</span><span className="text-right">CPU</span><span className="text-right">MEM</span><span className="text-right">CPU Bar</span>
+          </div>
+          {m.processes.slice(0,8).map((p,i)=>(
+            <div key={i} className="grid px-4 py-2 items-center transition-colors"
+              style={{gridTemplateColumns:'52px 1fr 64px 64px 80px', borderBottom:i<m.processes.length-1?'1px solid var(--border-subtle)':'none'}}
+              onMouseEnter={e=>e.currentTarget.style.background='var(--bg-hover)'}
+              onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+              <span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>{p.pid}</span>
+              <span className="text-[11px] font-mono truncate" style={{color:'var(--text-primary)'}}>{p.name}</span>
+              <span className="text-[10px] font-mono text-right font-bold" style={{color:cpuColor(p.cpu)}}>{(p.cpu||0).toFixed(1)}%</span>
+              <span className="text-[10px] font-mono text-right" style={{color:'var(--text-muted)'}}>{(p.mem||0).toFixed(1)}%</span>
+              <div className="pl-2"><Bar value={p.cpu||0} color={cpuColor(p.cpu)} h={4}/></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Device row ───────────────────────────────────────────────────────────────
+const DeviceRow = React.memo(function DeviceRow({ device, metrics, expanded, onToggle }) {
+  const m    = metrics?.latest
+  const hist = metrics?.history || []
+  const stale = !m || isStale(m.ts)
+  const live  = device.status==='online' && !stale
+
+  const cpuVal  = m?.cpu ?? null
+  const ramPct  = m?.ram ? pct(m.ram.used,m.ram.total) : null
+  const diskPct = m?.disk?.[0]?.use ?? null
+  const ago     = m ? secAgo(m.ts) : null
+  const cc=cpuColor(cpuVal), rc=ramColor(ramPct), dc=diskColor(diskPct)
+
+  const cpuHist = useMemo(()=>hist.map((h,i)=>({i,v:h.cpu})).filter(h=>h.v!=null).slice(-40),[hist])
+
+  return (
+    <div className="rounded-xl overflow-hidden mb-1.5 transition-all"
+      style={{border:`1px solid ${live?'rgba(34,197,94,0.15)':'var(--border-subtle)'}`, background:'var(--bg-card)'}}>
+
+      {/* Collapsed row */}
+      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none group" onClick={onToggle}>
+
+        {/* Status dot */}
+        <div className="w-2 h-2 rounded-full shrink-0"
+          style={{background:statusColor(device.status), boxShadow:live?`0 0 5px ${statusColor(device.status)}55`:'none'}}/>
+
+        {/* OS badge */}
+        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 font-bold
+          ${device.os_type==='windows'?'bg-sky-400/10 text-sky-400':'bg-violet-400/10 text-violet-400'}`}>
+          {device.os_type==='windows'?'WIN':'LNX'}
+        </span>
+
+        {/* Name + IP + group */}
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-body font-semibold truncate" style={{color:'var(--text-primary)'}}>{device.name}</p>
+          <p className="text-[10px] font-mono" style={{color:'var(--text-faint)'}}>{device.ip_address}</p>
+        </div>
+
+        {/* Live metrics inline */}
+        {live ? (
+          <div className="hidden md:flex items-center gap-4 shrink-0">
+
+            {/* CPU with spark */}
+            <div className="flex items-center gap-2 w-[120px]">
+              <div className="flex-1">
+                <div className="flex justify-between mb-1">
+                  <span className="text-[9px] font-mono uppercase" style={{color:'var(--text-faint)'}}>CPU</span>
+                  <span className="text-[10px] font-mono font-bold" style={{color:cc}}>{cpuVal?.toFixed(1)}%</span>
+                </div>
+                <Bar value={cpuVal} color={cc} h={3}/>
+              </div>
+              <div style={{width:36}}>
+                <Spark data={cpuHist.map(h=>({v:h.v}))} color={cc} height={18}/>
+              </div>
+            </div>
+
+            {/* RAM */}
+            <div className="w-[80px]">
+              <div className="flex justify-between mb-1">
+                <span className="text-[9px] font-mono uppercase" style={{color:'var(--text-faint)'}}>RAM</span>
+                <span className="text-[10px] font-mono font-bold" style={{color:rc}}>{ramPct}%</span>
+              </div>
+              <Bar value={ramPct} color={rc} h={3}/>
+            </div>
+
+            {/* Disk */}
+            <div className="hidden lg:block w-[72px]">
+              <div className="flex justify-between mb-1">
+                <span className="text-[9px] font-mono uppercase" style={{color:'var(--text-faint)'}}>DSK</span>
+                <span className="text-[10px] font-mono font-bold" style={{color:dc}}>{diskPct?.toFixed(0)}%</span>
+              </div>
+              <Bar value={diskPct} color={dc} h={3}/>
+            </div>
+
+            {/* Network RX/TX */}
+            <div className="hidden xl:block w-[90px]">
+              <div className="flex items-center gap-1 mb-0.5">
+                <ArrowDown size={8} style={{color:'#22c55e'}}/>
+                <span className="text-[9px] font-mono font-bold" style={{color:'#22c55e'}}>{fmtBps(m?.network?.rxSec)}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <ArrowUp size={8} style={{color:'#f97316'}}/>
+                <span className="text-[9px] font-mono font-bold" style={{color:'#f97316'}}>{fmtBps(m?.network?.txSec)}</span>
+              </div>
+            </div>
+
+            {/* Uptime */}
+            <div className="hidden xl:block w-[56px] text-right">
+              <span className="text-[9px] font-mono uppercase block" style={{color:'var(--text-faint)'}}>uptime</span>
+              <span className="text-[10px] font-mono" style={{color:'var(--text-secondary)'}}>{fmtUptime(m?.uptime)}</span>
+            </div>
+          </div>
+        ) : (
+          <span className="text-[11px] font-body px-2 py-0.5 rounded-full shrink-0"
+            style={{
+              background: device.status==='online'?'rgba(234,179,8,0.10)':'rgba(239,68,68,0.10)',
+              color:       device.status==='online'?'#eab308':'#ef4444',
+              border:`1px solid ${device.status==='online'?'rgba(234,179,8,0.25)':'rgba(239,68,68,0.25)'}`,
+            }}>
+            {device.status==='online'?'Agent silent':device.status||'Unknown'}
+          </span>
+        )}
+
+        {/* Freshness */}
+        {ago!=null && (
+          <span className="text-[9px] font-mono w-8 text-right shrink-0 hidden lg:block"
+            style={{color:ago<10?'#22c55e':ago<30?'#eab308':'#ef4444'}}>
+            {ago<5?'live':`${ago}s`}
+          </span>
+        )}
+
+        <div className="ml-1 p-1 rounded-lg shrink-0 group-hover:bg-white/5 transition-colors" style={{color:'var(--text-muted)'}}>
+          {expanded?<ChevronUp size={12}/>:<ChevronDown size={12}/>}
+        </div>
+      </div>
+
+      {/* Expanded detail */}
+      {expanded && <DeviceDetail device={device} m={m} hist={hist}/>}
+    </div>
+  )
+})
+
+// ─── Virtual list ─────────────────────────────────────────────────────────────
+const ROW_H = 60
+function VirtualList({ items, metrics, expanded, onToggle }) {
+  const ref = useRef(null)
+  const [top, setTop] = useState(0)
+  const [height, setHeight] = useState(700)
+  useEffect(()=>{
+    const el=ref.current; if(!el) return
+    const ro=new ResizeObserver(()=>setHeight(el.clientHeight)); ro.observe(el); return()=>ro.disconnect()
+  },[])
+  if(expanded.size>0) return <div>{items.map(d=><DeviceRow key={d.id} device={d} metrics={metrics[d.id]} expanded={expanded.has(d.id)} onToggle={()=>onToggle(d.id)}/>)}</div>
+  const total=items.length*ROW_H, BUF=5
+  const si=Math.max(0,Math.floor(top/ROW_H)-BUF)
+  const ei=Math.min(items.length,Math.ceil((top+height)/ROW_H)+BUF)
+  return (
+    <div ref={ref} onScroll={e=>setTop(e.currentTarget.scrollTop)} style={{height:Math.min(total,680),overflowY:'auto',position:'relative'}}>
+      <div style={{height:total,position:'relative'}}>
+        <div style={{position:'absolute',top:si*ROW_H,left:0,right:0}}>
+          {items.slice(si,ei).map(d=><DeviceRow key={d.id} device={d} metrics={metrics[d.id]} expanded={false} onToggle={()=>onToggle(d.id)}/>)}
         </div>
       </div>
     </div>
   )
 }
 
-// ─── KPI strip ────────────────────────────────────────────────────────────────
-function KpiCard({ label, value, sub, color, icon: Icon, onClick, active }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`glass rounded-2xl p-4 text-left transition-all ${onClick ? 'cursor-pointer hover:scale-[1.015]' : 'cursor-default'}`}
-      style={active ? { borderColor: color, boxShadow: `0 0 0 1px ${color}40` } : {}}
-    >
-      <div className="flex items-start justify-between mb-2">
-        <Icon size={14} style={{ color }} />
-        <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>{label}</span>
-      </div>
-      <p className="text-2xl font-display font-bold leading-none" style={{ color }}>{value}</p>
-      {sub && <p className="text-[10px] font-body mt-1" style={{ color: 'var(--text-faint)' }}>{sub}</p>}
-    </button>
-  )
-}
-
-// ─── Main page ────────────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 export default function MonitoringPage() {
   const [devices,      setDevices]      = useState([])
   const [groups,       setGroups]       = useState([])
@@ -660,285 +579,227 @@ export default function MonitoringPage() {
   const [search,       setSearch]       = useState('')
   const [filterGroup,  setFilterGroup]  = useState('all')
   const [filterStatus, setFilterStatus] = useState('all')
-  const [sortBy,       setSortBy]       = useState('name') // 'name' | 'cpu' | 'ram' | 'status'
+  const [sortBy,       setSortBy]       = useState('name')
   const [loading,      setLoading]      = useState(true)
   const [refreshing,   setRefreshing]   = useState(false)
   const [lastRefresh,  setLastRefresh]  = useState(null)
-  const { theme } = useThemeStore()
-  const isLight = theme === 'light'
+  const [showOverview, setShowOverview] = useState(true)
 
-  // Delta-merge metrics: only update entries that changed
   const metricsRef = useRef({})
-  const mergeMetrics = useCallback((incoming) => {
-    const prev   = metricsRef.current
-    const merged = { ...prev }
-    let changed  = false
+
+  // Accept incoming metrics — always replace history (fixes "empty on remount" bug)
+  const mergeMetrics = useCallback((incoming, isSnapshot=false) => {
+    const prev = metricsRef.current
+    const merged = isSnapshot ? {} : { ...prev }
+    let changed = false
     for (const [id, entry] of Object.entries(incoming)) {
-      const prevTs = prev[id]?.latest?.ts
-      const newTs  = entry?.latest?.ts
-      if (newTs !== prevTs) {
+      // Always accept if ts changed OR it's a full snapshot replacement
+      if (isSnapshot || entry?.latest?.ts !== prev[id]?.latest?.ts) {
         merged[id] = entry
         changed = true
       }
     }
-    if (changed) {
-      metricsRef.current = merged
-      setMetrics(merged)
-    }
+    if (changed) { metricsRef.current = merged; setMetrics(merged) }
   }, [])
 
-  const load = useCallback(async (quiet = false) => {
+  // Full load: devices + groups + metrics snapshot
+  const load = useCallback(async (quiet=false) => {
     if (!quiet) setLoading(true); else setRefreshing(true)
     try {
-      const [d, g, m] = await Promise.all([
-        api.get('/devices'),
-        api.get('/groups'),
-        api.get('/metrics'),
-      ])
+      const [d, g, m] = await Promise.all([api.get('/devices'), api.get('/groups'), api.get('/metrics')])
       setDevices(d.data || [])
       setGroups(g.data || [])
-      mergeMetrics(m.data || {})
+      metricsRef.current = {} // clear before snapshot so history is always fresh
+      mergeMetrics(m.data || {}, true)
       setLastRefresh(Date.now())
-    } catch {
-      // silent fail on poll
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
+    } catch (e) {
+      if (!quiet) console.error('[Monitoring] load error:', e.message)
+    } finally { setLoading(false); setRefreshing(false) }
   }, [mergeMetrics])
 
   useEffect(() => { load() }, [load])
 
-  // 5s quiet poll for metrics only
+  // SSE stream — receives pushed updates the instant agents send data
+  // Falls back to 10s polling if SSE connection drops
+  const failCount = useRef(0)
   useEffect(() => {
-    const t = setInterval(async () => {
+    const token = localStorage.getItem('nc_token') || ''
+    const es = new EventSource(
+      `${api.defaults.baseURL}/metrics/stream?token=${encodeURIComponent(token)}`
+    )
+
+    es.onmessage = (e) => {
       try {
-        const { data } = await api.get('/metrics')
-        mergeMetrics(data || {})
+        const msg = JSON.parse(e.data)
+        failCount.current = 0
+
+        if (msg.type === 'snapshot') {
+          // Full snapshot on connect — replaces everything
+          metricsRef.current = {}
+          mergeMetrics(msg.data || {}, true)
+        } else if (msg.deviceId && msg.latest) {
+          // Single-device push — merge into existing
+          const prev = metricsRef.current
+          const entry = prev[msg.deviceId] || { latest: null, history: [] }
+          // Append to local history (backend sends latest only in push events)
+          const hist = [...(entry.history || []), msg.latest]
+          if (hist.length > 300) hist.shift()
+          mergeMetrics({ [msg.deviceId]: { latest: msg.latest, history: hist } })
+        }
         setLastRefresh(Date.now())
       } catch {}
-    }, 5000)
-    return () => clearInterval(t)
+    }
+
+    es.onerror = () => {
+      // SSE dropped — fall back to polling until it reconnects
+      failCount.current++
+      if (failCount.current >= 3) {
+        metricsRef.current = {}
+        setMetrics({})
+      }
+    }
+
+    // Fallback poll every 10s in case SSE is blocked by a proxy
+    const fallback = setInterval(async () => {
+      if (es.readyState === EventSource.OPEN) return // SSE is working, skip poll
+      try {
+        const { data } = await api.get('/metrics')
+        failCount.current = 0
+        mergeMetrics(data || {})
+        setLastRefresh(Date.now())
+      } catch {
+        failCount.current++
+        if (failCount.current >= 3) { metricsRef.current = {}; setMetrics({}) }
+      }
+    }, 10000)
+
+    return () => { es.close(); clearInterval(fallback) }
   }, [mergeMetrics])
 
-  const toggle = useCallback(id => {
-    setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
-  }, [])
+  const toggle = useCallback(id=>{ setExpanded(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n }) },[])
 
-  // Aggregated stats
-  const reporting = useMemo(() =>
-    Object.values(metrics).filter(m => m.latest && !isStale(m.latest.ts)).length,
-  [metrics])
+  const reporting = useMemo(()=>Object.values(metrics).filter(m=>m.latest&&!isStale(m.latest.ts)).length,[metrics])
 
-  const avgCpu = useMemo(() => {
-    const v = Object.values(metrics).map(m => m.latest?.cpu).filter(x => x != null)
-    return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length * 10) / 10 : null
-  }, [metrics])
-
-  const avgRam = useMemo(() => {
-    const v = Object.values(metrics)
-      .map(m => m.latest?.ram ? pct(m.latest.ram.used, m.latest.ram.total) : null)
-      .filter(x => x != null)
-    return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null
-  }, [metrics])
-
-  const criticalDevices = useMemo(() =>
-    Object.entries(metrics).filter(([, m]) => {
-      const cpu = m.latest?.cpu
-      const rp  = m.latest?.ram ? pct(m.latest.ram.used, m.latest.ram.total) : null
-      return (cpu != null && cpu >= 90) || (rp != null && rp >= 90)
-    }).length,
-  [metrics])
-
-  // Filtered + sorted list
-  const filtered = useMemo(() => {
-    let list = devices.filter(d => {
-      if (search && !d.name.toLowerCase().includes(search.toLowerCase()) && !d.ip_address.includes(search)) return false
-      if (filterGroup !== 'all' && String(d.group_id) !== filterGroup) return false
-      if (filterStatus === 'online'    && d.status !== 'online') return false
-      if (filterStatus === 'offline'   && d.status !== 'offline') return false
-      if (filterStatus === 'reporting' && (!metrics[d.id]?.latest || isStale(metrics[d.id].latest.ts))) return false
-      if (filterStatus === 'critical') {
-        const m = metrics[d.id]?.latest
-        const cpu = m?.cpu, rp = m?.ram ? pct(m.ram.used, m.ram.total) : null
-        if (!((cpu != null && cpu >= 90) || (rp != null && rp >= 90))) return false
+  const filtered = useMemo(()=>{
+    let list=devices.filter(d=>{
+      if(search&&!d.name.toLowerCase().includes(search.toLowerCase())&&!d.ip_address.includes(search)) return false
+      if(filterGroup!=='all'&&String(d.group_id)!==filterGroup) return false
+      if(filterStatus==='online'    &&d.status!=='online') return false
+      if(filterStatus==='offline'   &&d.status!=='offline') return false
+      if(filterStatus==='reporting' &&(!metrics[d.id]?.latest||isStale(metrics[d.id].latest.ts))) return false
+      if(filterStatus==='silent'    &&(metrics[d.id]?.latest&&!isStale(metrics[d.id].latest.ts))) return false
+      if(filterStatus==='critical'){
+        const m=metrics[d.id]?.latest
+        const cpu=m?.cpu, rp=m?.ram?pct(m.ram.used,m.ram.total):null
+        if(!((cpu!=null&&cpu>=90)||(rp!=null&&rp>=90))) return false
       }
       return true
     })
-
-    // Sort
-    list = [...list].sort((a, b) => {
-      if (sortBy === 'cpu') {
-        const ca = metrics[a.id]?.latest?.cpu ?? -1
-        const cb = metrics[b.id]?.latest?.cpu ?? -1
-        return cb - ca
-      }
-      if (sortBy === 'ram') {
-        const ra = metrics[a.id]?.latest?.ram ? pct(metrics[a.id].latest.ram.used, metrics[a.id].latest.ram.total) : -1
-        const rb = metrics[b.id]?.latest?.ram ? pct(metrics[b.id].latest.ram.used, metrics[b.id].latest.ram.total) : -1
-        return rb - ra
-      }
-      if (sortBy === 'status') {
-        const sv = s => s === 'online' ? 0 : s === 'offline' ? 2 : 1
-        return sv(a.status) - sv(b.status)
-      }
+    return [...list].sort((a,b)=>{
+      if(sortBy==='cpu'){const ca=metrics[a.id]?.latest?.cpu??-1,cb=metrics[b.id]?.latest?.cpu??-1;return cb-ca}
+      if(sortBy==='ram'){const ra=metrics[a.id]?.latest?.ram?pct(metrics[a.id].latest.ram.used,metrics[a.id].latest.ram.total):-1,rb=metrics[b.id]?.latest?.ram?pct(metrics[b.id].latest.ram.used,metrics[b.id].latest.ram.total):-1;return rb-ra}
+      if(sortBy==='disk'){const da=metrics[a.id]?.latest?.disk?.[0]?.use??-1,db=metrics[b.id]?.latest?.disk?.[0]?.use??-1;return db-da}
+      if(sortBy==='status'){const sv=s=>s==='online'?0:s==='offline'?2:1;return sv(a.status)-sv(b.status)}
       return a.name.localeCompare(b.name)
     })
+  },[devices,search,filterGroup,filterStatus,sortBy,metrics])
 
-    return list
-  }, [devices, search, filterGroup, filterStatus, sortBy, metrics])
-
-  if (loading) return (
-    <div className="flex items-center justify-center" style={{ minHeight: '60vh' }}>
+  if(loading) return (
+    <div className="flex items-center justify-center min-h-screen">
       <div className="flex flex-col items-center gap-3">
-        <Activity size={28} className="animate-pulse" style={{ color: '#818cf8' }} />
-        <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>Loading monitoring…</p>
+        <Activity size={24} className="animate-pulse" style={{color:'#818cf8'}}/>
+        <p className="text-xs font-mono" style={{color:'var(--text-muted)'}}>Loading monitoring data…</p>
       </div>
     </div>
   )
 
   return (
-    <div className="p-6 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
+    <div className="p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
 
-      {/* ── Header ── */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0
-            ${isLight ? 'bg-[#6c5ce7] text-white' : 'bg-brand-500/20 border border-brand-500/30 text-brand-400'}`}>
-            <Activity size={18} />
-          </div>
-          <div>
-            <h1 className="text-xl font-display font-bold" style={{ color: 'var(--text-primary)' }}>
-              Live Monitoring
-            </h1>
-            <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
-              Real-time agent metrics · {reporting}/{devices.length} reporting · 5s refresh
-            </p>
-          </div>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-display font-bold" style={{color:'var(--text-primary)'}}>Live Monitoring</h1>
+          <p className="text-[11px] font-mono mt-0.5" style={{color:'var(--text-muted)'}}>
+            {reporting}/{devices.length} agents reporting · 5s refresh
+            {lastRefresh&&<span className="ml-3 opacity-50">· {new Date(lastRefresh).toLocaleTimeString()}</span>}
+          </p>
         </div>
         <div className="flex items-center gap-2">
-          {lastRefresh && (
-            <span className="text-[10px] font-mono" style={{ color: 'var(--text-faint)' }}>
-              Updated {new Date(lastRefresh).toLocaleTimeString()}
-            </span>
-          )}
-          <button onClick={() => load(true)} disabled={refreshing} className="icon-btn" title="Refresh">
-            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+          <button onClick={()=>setShowOverview(v=>!v)}
+            className={`text-xs px-3 py-1.5 rounded-lg font-body transition-all ${showOverview?'bg-brand-500/15 text-brand-400 border border-brand-500/25':'btn-ghost'}`}>
+            Fleet Overview
+          </button>
+          <button onClick={()=>load(true)} disabled={refreshing} className="icon-btn">
+            <RefreshCw size={13} className={refreshing?'animate-spin':''}/>
           </button>
         </div>
       </div>
 
-      {/* ── KPI strip ── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <KpiCard label="Total Devices" value={devices.length} color="var(--text-secondary)"
-          icon={Server} sub={`${groups.length} groups`} />
-        <KpiCard label="Online" value={devices.filter(d => d.status === 'online').length}
-          color="#34d399" icon={CheckCircle2}
-          onClick={() => setFilterStatus(s => s === 'online' ? 'all' : 'online')}
-          active={filterStatus === 'online'} />
-        <KpiCard label="Offline" value={devices.filter(d => d.status === 'offline').length}
-          color="#f87171" icon={AlertTriangle}
-          onClick={() => setFilterStatus(s => s === 'offline' ? 'all' : 'offline')}
-          active={filterStatus === 'offline'} />
-        <KpiCard label="Reporting" value={reporting} color="#818cf8" icon={Activity}
-          onClick={() => setFilterStatus(s => s === 'reporting' ? 'all' : 'reporting')}
-          active={filterStatus === 'reporting'} sub="Agent active" />
-        <KpiCard label="Avg CPU" value={avgCpu != null ? `${avgCpu}%` : '—'}
-          color={cpuColor(avgCpu)} icon={Cpu}
-          sub={avgRam != null ? `RAM avg ${avgRam}%` : undefined} />
-        <KpiCard label="Critical" value={criticalDevices} color={criticalDevices > 0 ? '#f87171' : '#34d399'}
-          icon={criticalDevices > 0 ? AlertTriangle : CheckCircle2}
-          onClick={() => setFilterStatus(s => s === 'critical' ? 'all' : 'critical')}
-          active={filterStatus === 'critical'} sub=">90% CPU or RAM" />
-      </div>
+      {/* Fleet overview toggle section */}
+      {showOverview && devices.length>0 && (
+        <FleetOverview devices={devices} metrics={metrics} groups={groups}/>
+      )}
 
-      {/* ── Fleet charts ── */}
-      {reporting > 0 && <FleetCharts devices={devices} metrics={metrics} />}
-
-      {/* ── Filters + Sort ── */}
+      {/* Filters */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* Search */}
         <div className="relative flex-1 min-w-[160px] max-w-xs">
-          <Search size={11} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
-          <input value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search devices…" className="input-field pl-8 py-1.5 text-xs h-8" />
+          <Search size={11} className="absolute left-3 top-1/2 -translate-y-1/2" style={{color:'var(--text-muted)'}}/>
+          <input value={search} onChange={e=>setSearch(e.target.value)}
+            placeholder="Search name or IP…" className="input-field pl-8 py-1.5 text-xs h-8"/>
         </div>
-
-        {/* Group filter */}
-        <select value={filterGroup} onChange={e => setFilterGroup(e.target.value)}
-          className="input-field text-xs h-8 py-0" style={{ minWidth: 130 }}>
+        <select value={filterGroup} onChange={e=>setFilterGroup(e.target.value)}
+          className="input-field text-xs h-8 py-0" style={{minWidth:130}}>
           <option value="all">All groups</option>
-          {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          {groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
-
-        {/* Status chips */}
-        <div className="flex gap-1">
-          {['all', 'online', 'offline', 'reporting', 'critical'].map(s => (
-            <button key={s} onClick={() => setFilterStatus(s)}
-              className={`chip h-8 px-2.5 text-xs capitalize ${filterStatus === s ? 'chip-selected' : ''}`}>
+        <div className="flex gap-1 flex-wrap">
+          {['all','online','offline','reporting','silent','critical'].map(s=>(
+            <button key={s} onClick={()=>setFilterStatus(s)}
+              className={`chip h-8 px-2.5 text-xs capitalize ${filterStatus===s?'chip-selected':''}`}>
               {s}
             </button>
           ))}
         </div>
-
-        {/* Sort */}
         <div className="flex items-center gap-1 ml-auto">
-          <span className="text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>Sort:</span>
-          {[['name', 'Name'], ['cpu', 'CPU'], ['ram', 'RAM'], ['status', 'Status']].map(([k, l]) => (
-            <button key={k} onClick={() => setSortBy(k)}
+          <span className="text-[10px] font-mono" style={{color:'var(--text-faint)'}}>Sort:</span>
+          {[['name','Name'],['cpu','CPU'],['ram','RAM'],['disk','Disk'],['status','Status']].map(([k,l])=>(
+            <button key={k} onClick={()=>setSortBy(k)}
               className={`text-[10px] px-2 py-1 rounded-lg font-body font-medium transition-all
-                ${sortBy === k ? 'bg-brand-500/15 text-brand-400 border border-brand-500/25' : 'text-slate-500 hover:text-slate-300'}`}>
+                ${sortBy===k?'bg-brand-500/15 text-brand-400 border border-brand-500/25':'text-slate-500 hover:text-slate-300'}`}>
               {l}
             </button>
           ))}
         </div>
-
-        {/* Expand / collapse all */}
-        <button
-          onClick={() => setExpanded(expanded.size > 0 ? new Set() : new Set(filtered.map(d => d.id)))}
+        <button onClick={()=>setExpanded(expanded.size>0?new Set():new Set(filtered.map(d=>d.id)))}
           className="btn-ghost text-xs py-1 px-2.5 h-8 flex items-center gap-1.5">
-          <Eye size={11} />
-          {expanded.size > 0 ? 'Collapse all' : 'Expand all'}
+          <Eye size={11}/>{expanded.size>0?'Collapse all':'Expand all'}
         </button>
       </div>
 
-      {/* ── Device list ── */}
-      {filtered.length === 0 ? (
-        <div className="glass rounded-2xl p-12 flex flex-col items-center gap-2" style={{ opacity: 0.5 }}>
-          <Monitor size={24} style={{ color: 'var(--text-muted)' }} />
-          <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>No devices match your filters</p>
+      {/* Column headers */}
+      {filtered.length>0 && (
+        <div className="hidden md:grid px-4 py-1.5 text-[9px] font-bold uppercase tracking-widest rounded-lg"
+          style={{gridTemplateColumns:'auto auto 1fr 120px 90px 80px 90px 80px auto auto',gap:'0 12px',color:'var(--text-faint)',background:'var(--bg-input)',border:'1px solid var(--border-subtle)'}}>
+          <span/><span/><span>Device</span><span>CPU</span><span>RAM</span>
+          <span className="hidden lg:block">Disk</span>
+          <span className="hidden xl:block">Network</span>
+          <span className="hidden xl:block">Uptime</span>
+          <span className="hidden lg:block">Age</span><span/>
+        </div>
+      )}
+
+      {/* Device list */}
+      {filtered.length===0 ? (
+        <div className="glass rounded-2xl p-12 flex flex-col items-center gap-2 opacity-50">
+          <Monitor size={22} style={{color:'var(--text-muted)'}}/>
+          <p className="text-sm font-body" style={{color:'var(--text-muted)'}}>No devices match your filters</p>
         </div>
       ) : (
         <>
-          {/* Column headers */}
-          <div className="hidden md:grid px-4 py-1.5 text-[9px] font-bold uppercase tracking-widest rounded-lg"
-            style={{
-              gridTemplateColumns: 'auto auto 1fr 110px 90px 80px 80px auto auto',
-              gap: '0 12px',
-              color: 'var(--text-faint)',
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border-subtle)',
-            }}>
-            <span />
-            <span />
-            <span>Device</span>
-            <span>CPU</span>
-            <span>RAM</span>
-            <span className="hidden lg:block">Disk</span>
-            <span className="hidden xl:block">Net RX</span>
-            <span className="hidden xl:block">Uptime</span>
-            <span className="hidden lg:block">Age</span>
-          </div>
-
-          <VirtualList
-            items={filtered}
-            metrics={metrics}
-            expanded={expanded}
-            onToggle={toggle}
-          />
-
-          <p className="text-center text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>
-            Showing {filtered.length} of {devices.length} devices · {reporting} reporting agents · auto-updates every 5s
+          <VirtualList items={filtered} metrics={metrics} expanded={expanded} onToggle={toggle}/>
+          <p className="text-center text-[10px] font-mono" style={{color:'var(--text-faint)'}}>
+            {filtered.length} of {devices.length} devices · {reporting} reporting · auto-updates every 5s
           </p>
         </>
       )}

@@ -62,24 +62,24 @@ function getTargetSub(log) {
 
 function getMeta(action) {
   return ACTION_META[action] || {
-    icon: Shield, color: 'text-slate-400', bg: 'bg-surface-4 border-white/10', label: action || '—',
+    icon: Shield, color: 'text-slate-500', bg: '', label: action || '—',
   }
 }
 
 // ── Skeleton row ─────────────────────────────────────────────────────────────
 function SkeletonRow() {
   return (
-    <div className="grid items-center gap-4 px-5 py-3.5 border-b border-white/5 animate-pulse"
+    <div className="grid items-center gap-4 px-5 py-3.5 border-b animate-pulse"
       style={{ gridTemplateColumns: '160px 110px 130px 1fr 140px 90px' }}>
-      <div className="h-3 bg-surface-4 rounded w-5/6" />
-      <div className="h-3 bg-surface-4 rounded w-3/4" />
+      <div className="h-3 rounded w-5/6" style={{background:"var(--bg-input)"}} />
+      <div className="h-3 rounded w-3/4" style={{background:"var(--bg-input)"}} />
       <div className="flex items-center gap-2">
-        <div className="w-6 h-6 rounded-md bg-surface-4 shrink-0" />
+        <div className="w-6 h-6 rounded-md shrink-0" style={{background:"var(--bg-input)"}} />
         <div className="h-3 bg-surface-4 rounded w-16" />
       </div>
-      <div className="h-3 bg-surface-4 rounded w-2/3" />
-      <div className="h-3 bg-surface-4 rounded w-4/5" />
-      <div className="h-5 bg-surface-4 rounded-full w-20" />
+      <div className="h-3 rounded w-2/3" style={{background:"var(--bg-input)"}} />
+      <div className="h-3 rounded w-4/5" style={{background:"var(--bg-input)"}} />
+      <div className="h-5 rounded-full w-20" style={{background:"var(--bg-input)"}} />
     </div>
   )
 }

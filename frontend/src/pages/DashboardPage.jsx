@@ -3,11 +3,11 @@ import {
   Activity, RefreshCw, Wifi, WifiOff, AlertTriangle,
   Clock, ScrollText, ChevronRight, TrendingUp, TrendingDown,
   Minus, Server, Cpu, MemoryStick, HardDrive, Bell,
-  CheckCircle, XCircle, AlertCircle, Radio, Zap, Shield
+  CheckCircle, XCircle, AlertCircle, Radio, Zap, Shield, Layers
 } from 'lucide-react'
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar,
-  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
@@ -17,27 +17,21 @@ import { useAuthStore } from '../store/authStore'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const UPTIME_BUCKETS   = 90   // 90 × 20s = 30 min of uptime history per device
-const FLEET_HISTORY    = 60   // fleet-wide metric rolling window
-const REFRESH_MS       = 15000
+const UPTIME_BUCKETS = 90
+const FLEET_HISTORY  = 60
+const REFRESH_MS     = 15000
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const fmtTime       = ts => ts ? new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—'
-const fmtDateTime   = ts => ts ? new Date(ts*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'
-const fmtUptime     = s => {
-  if (!s) return '—'
-  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60)
-  if (d>0) return `${d}d ${h}h`
-  if (h>0) return `${h}h ${m}m`
-  return `${m}m`
-}
-const fmtBytes      = b => { if(!b) return '—'; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<4){b/=1024;i++} return `${b.toFixed(1)}${u[i]}` }
-const pct           = (u,t) => t ? Math.round(u/t*100) : 0
-const isStale       = (ts,s=35) => !ts||(Math.floor(Date.now()/1000)-ts)>s
-const cpuColor      = v => !v?'#475569':v>=90?'#ef4444':v>=70?'#f97316':v>=50?'#eab308':'#22c55e'
-const ramColor      = v => v>=90?'#ef4444':v>=75?'#f97316':v>=60?'#eab308':'#22c55e'
-const statusColor   = s => s==='online'?'#22c55e':s==='offline'?'#ef4444':'#475569'
-const sevColor      = s => s==='critical'?'#ef4444':s==='warning'?'#f97316':'#38bdf8'
+const fmtTime     = ts => ts ? new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—'
+const fmtUptime   = s => { if(!s) return '—'; const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60); if(d>0) return `${d}d ${h}h`; if(h>0) return `${h}h ${m}m`; return `${m}m` }
+const fmtBytes    = b => { if(!b) return '—'; const u=['B','KB','MB','GB']; let i=0; while(b>=1024&&i<3){b/=1024;i++} return `${b.toFixed(1)}${u[i]}` }
+const pct         = (u,t) => t ? Math.round(u/t*100) : 0
+const isStale     = (ts,s=35) => !ts||(Math.floor(Date.now()/1000)-ts)>s
+const cpuColor    = v => !v?'#475569':v>=90?'#ef4444':v>=70?'#f97316':v>=50?'#eab308':'#22c55e'
+const ramColor    = v => v>=90?'#ef4444':v>=75?'#f97316':v>=60?'#eab308':'#22c55e'
+const statusColor = s => s==='online'?'#22c55e':s==='offline'?'#ef4444':'#475569'
+const sevColor    = s => s==='critical'?'#ef4444':s==='warning'?'#f97316':'#38bdf8'
+const healthColor = p => p==null?'#475569':p>=90?'#22c55e':p>=70?'#eab308':'#ef4444'
 
 const TT_STYLE = {
   background:'rgba(8,8,20,0.97)', border:'1px solid rgba(255,255,255,0.08)',
@@ -56,33 +50,26 @@ function Spark({ data, color='#818cf8', height=28 }) {
   )
 }
 
-// ─── Uptime pill strip (Statuspage-style) ─────────────────────────────────────
-function UptimeStrip({ buckets = [], height = 20 }) {
-  // buckets: array of 'online'|'offline'|'unknown', oldest→newest
+// ─── Uptime pill strip ────────────────────────────────────────────────────────
+function UptimeStrip({ buckets = [], height = 18 }) {
   const display = [...Array(UPTIME_BUCKETS)].map((_, i) => buckets[buckets.length - UPTIME_BUCKETS + i] ?? 'unknown')
-  const uptimePct = (() => {
-    const known = display.filter(b => b !== 'unknown')
-    if (!known.length) return null
-    return Math.round(known.filter(b => b === 'online').length / known.length * 100)
-  })()
-
+  const known = display.filter(b => b !== 'unknown')
+  const uptimePct = known.length ? Math.round(known.filter(b => b==='online').length / known.length * 100) : null
+  const color = uptimePct==null?'#475569':uptimePct>=99?'#22c55e':uptimePct>=90?'#eab308':'#ef4444'
   return (
     <div>
       <div className="flex gap-px items-end" style={{height}}>
         {display.map((b, i) => (
-          <div key={i} className="flex-1 rounded-[2px] transition-opacity"
+          <div key={i} className="flex-1 rounded-[2px]"
             style={{
-              height: b === 'offline' ? height * 0.5 : b === 'unknown' ? height * 0.3 : height,
-              background: b === 'online' ? '#22c55e' : b === 'offline' ? '#ef4444' : 'rgba(255,255,255,0.08)',
-              opacity: b === 'unknown' ? 0.4 : 1,
-            }}
-          />
+              height: b==='offline'?height*0.5 : b==='partial'?height*0.65 : b==='unknown'?height*0.3 : height,
+              background: b==='online'?'#22c55e' : b==='partial'?'#eab308' : b==='offline'?'#ef4444' : 'rgba(255,255,255,0.08)',
+              opacity: b==='unknown'?0.4:1,
+            }}/>
         ))}
       </div>
       {uptimePct !== null && (
-        <p className="text-[9px] font-mono mt-1" style={{color: uptimePct>=99?'#22c55e':uptimePct>=95?'#eab308':'#ef4444'}}>
-          {uptimePct}% uptime
-        </p>
+        <p className="text-[9px] font-mono mt-1" style={{color}}>{uptimePct}% uptime</p>
       )}
     </div>
   )
@@ -90,9 +77,7 @@ function UptimeStrip({ buckets = [], height = 20 }) {
 
 // ─── Gauge ring ───────────────────────────────────────────────────────────────
 function Gauge({ value, color, size=56, label }) {
-  const r = size/2 - 5
-  const circ = 2*Math.PI*r
-  const dash  = (Math.min(100, value||0)/100)*circ
+  const r = size/2-5; const circ = 2*Math.PI*r; const dash = (Math.min(100,value||0)/100)*circ
   return (
     <div className="flex flex-col items-center gap-1">
       <div className="relative" style={{width:size,height:size}}>
@@ -103,9 +88,7 @@ function Gauge({ value, color, size=56, label }) {
             style={{transition:'stroke-dasharray 0.6s ease'}}/>
         </svg>
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-[11px] font-mono font-bold" style={{color}}>
-            {value==null?'—':`${Math.round(value)}%`}
-          </span>
+          <span className="text-[11px] font-mono font-bold" style={{color}}>{value==null?'—':`${Math.round(value)}%`}</span>
         </div>
       </div>
       {label && <span className="text-[9px] font-mono uppercase tracking-wider" style={{color:'var(--text-muted)'}}>{label}</span>}
@@ -148,6 +131,88 @@ function StatCard({ icon: Icon, label, value, sub, color='#818cf8', trend, spark
   )
 }
 
+// ─── Group availability card ──────────────────────────────────────────────────
+function GroupAvailCard({ group, devices, uptimeBuckets, onAction, navigate }) {
+  const online  = devices.filter(d=>d.status==='online').length
+  const offline = devices.filter(d=>d.status==='offline').length
+  const total   = devices.length
+  const pctVal  = total ? Math.round(online/total*100) : null
+  const color   = healthColor(pctVal)
+
+  // Build combined uptime strip across all devices in group
+  const combinedBuckets = useMemo(() => {
+    if (!total) return []
+    return [...Array(UPTIME_BUCKETS)].map((_,i) => {
+      const slice = devices.map(d => {
+        const b = uptimeBuckets[d.id] || []
+        return b[b.length - UPTIME_BUCKETS + i]
+      }).filter(Boolean)
+      if (!slice.length) return 'unknown'
+      const onCnt = slice.filter(s=>s==='online').length
+      if (onCnt===slice.length) return 'online'
+      if (onCnt===0) return 'offline'
+      return 'partial'
+    })
+  }, [devices, uptimeBuckets])
+
+  return (
+    <div className="p-4 rounded-xl" style={{background:'var(--bg-surface-3)',border:'1px solid var(--border-subtle)'}}>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <Layers size={12} style={{color:'#a855f7',flexShrink:0}}/>
+          <span className="text-xs font-body font-semibold truncate" style={{color:'var(--text-primary)'}}>{group.name}</span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0 ml-2">
+          <span className="text-[10px] font-mono" style={{color:'var(--text-muted)'}}>{online}/{total}</span>
+          <span className="text-sm font-mono font-bold" style={{color}}>{pctVal!=null?`${pctVal}%`:'—'}</span>
+        </div>
+      </div>
+
+      {/* Uptime strip */}
+      <UptimeStrip buckets={combinedBuckets} height={18}/>
+
+      {/* Device status pills */}
+      {total > 0 && (
+        <div className="flex items-center gap-3 mt-3 pt-3" style={{borderTop:'1px solid var(--border-subtle)'}}>
+          <div className="flex items-center gap-1.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-accent-green"/>
+            <span className="text-[10px] font-mono font-bold text-accent-green">{online}</span>
+            <span className="text-[10px] font-body" style={{color:'var(--text-faint)'}}>online</span>
+          </div>
+          {offline > 0 && (
+            <div className="flex items-center gap-1.5">
+              <div className="w-1.5 h-1.5 rounded-full bg-accent-red"/>
+              <span className="text-[10px] font-mono font-bold text-accent-red">{offline}</span>
+              <span className="text-[10px] font-body" style={{color:'var(--text-faint)'}}>offline</span>
+            </div>
+          )}
+          <div className="flex-1"/>
+          {/* Action buttons */}
+          <button onClick={()=>onAction({type:'wake',target:{groupId:group.id},label:`Wake ${group.name}`,danger:false})}
+            title="Wake all" className="p-1 rounded-lg transition-all"
+            style={{background:'rgba(34,197,94,0.1)',border:'1px solid rgba(34,197,94,0.2)',color:'#22c55e'}}
+            onMouseEnter={e=>e.currentTarget.style.background='rgba(34,197,94,0.2)'}
+            onMouseLeave={e=>e.currentTarget.style.background='rgba(34,197,94,0.1)'}>
+            <Zap size={10}/>
+          </button>
+          <button onClick={()=>navigate('/groups')} title="View group"
+            className="p-1 rounded-lg transition-all"
+            style={{background:'var(--bg-surface-4)',border:'1px solid var(--border-subtle)',color:'var(--text-muted)'}}
+            onMouseEnter={e=>e.currentTarget.style.color='var(--text-primary)'}
+            onMouseLeave={e=>e.currentTarget.style.color='var(--text-muted)'}>
+            <ChevronRight size={10}/>
+          </button>
+        </div>
+      )}
+
+      {total === 0 && (
+        <p className="text-[10px] font-body mt-2" style={{color:'var(--text-faint)'}}>No devices in this group</p>
+      )}
+    </div>
+  )
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const [devices,    setDevices]    = useState([])
@@ -160,16 +225,71 @@ export default function DashboardPage() {
   const [lastRefresh,setLastRefresh]= useState(null)
   const [actionModal,setActionModal]= useState(null)
 
-  // Uptime buckets: deviceId → string[] of 'online'|'offline'|'unknown'
-  const uptimeBuckets = useRef({})
-  // Fleet history: [{t, online, offline, cpu, ram}]
-  const fleetHistory  = useRef([])
+  // ── Persistent refs — NEVER wiped on refresh, only appended to ────────────
+  // This prevents the chart blank-flash between refreshes.
+  const uptimeBuckets = useRef({})   // deviceId → string[]
+  const fleetHistory  = useRef([])   // [{t, online, offline, cpu, ram}]
+  // Stable snapshot for derived values — avoids stale closure issues
+  const metricsRef    = useRef({})
+  const devicesRef    = useRef([])
 
   const navigate = useNavigate()
   const { theme } = useThemeStore()
   const user = useAuthStore(s => s.user)
 
-  // ── Data fetching ──────────────────────────────────────────────────────────
+  // ── Append one bucket to fleet history (never resets history) ─────────────
+  const appendFleetBucket = useCallback((devs, mets) => {
+    // Update uptime buckets per device
+    for (const d of devs) {
+      if (!uptimeBuckets.current[d.id]) uptimeBuckets.current[d.id] = []
+      uptimeBuckets.current[d.id].push(d.status || 'unknown')
+      if (uptimeBuckets.current[d.id].length > UPTIME_BUCKETS * 2)
+        uptimeBuckets.current[d.id].shift()
+    }
+
+    const onlineN  = devs.filter(d=>d.status==='online').length
+    const offlineN = devs.filter(d=>d.status==='offline').length
+    const metVals  = Object.values(mets).map(m=>m.latest).filter(m=>m&&!isStale(m.ts))
+    const avgCpu   = metVals.length ? metVals.reduce((s,m)=>s+(m.cpu||0),0)/metVals.length : null
+    const avgRam   = metVals.length ? metVals.reduce((s,m)=>s+(m.ram?pct(m.ram.used,m.ram.total):0),0)/metVals.length : null
+
+    const hist = fleetHistory.current
+    hist.push({
+      t:       new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
+      online:  onlineN, offline: offlineN,
+      cpu:     avgCpu!=null ? Math.round(avgCpu*10)/10 : null,
+      ram:     avgRam!=null ? Math.round(avgRam) : null,
+    })
+    if (hist.length > FLEET_HISTORY) hist.shift()
+  }, [])
+
+  // ── Bootstrap from agent history on first load ────────────────────────────
+  const bootstrapFleetHistory = useCallback((mets, devs) => {
+    if (fleetHistory.current.length > 0) return // don't re-bootstrap — preserve history
+    const allHists = Object.values(mets).map(e=>e.history||[]).filter(h=>h.length>0)
+    if (!allHists.length) return
+    const len = Math.min(FLEET_HISTORY, Math.max(...allHists.map(h=>h.length)))
+    const onlineIds = new Set(devs.filter(d=>d.status==='online').map(d=>d.id))
+    for (let i=0; i<len; i++) {
+      const vals = []
+      for (const [devId, entry] of Object.entries(mets)) {
+        const h = entry.history||[]
+        const idx = Math.floor((i/len)*h.length)
+        if (h[idx] && onlineIds.has(devId)) vals.push(h[idx])
+      }
+      if (!vals.length) continue
+      const avgCpu = vals.reduce((s,v)=>s+(v.cpu||0),0)/vals.length
+      const avgRam = vals.reduce((s,v)=>s+(v.ram?pct(v.ram.used,v.ram.total):0),0)/vals.length
+      const label  = vals[0]?.ts
+        ? new Date(vals[0].ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+        : `t-${len-i}`
+      fleetHistory.current.push({
+        t: label, online: onlineIds.size, offline: devs.length-onlineIds.size,
+        cpu: Math.round(avgCpu*10)/10, ram: Math.round(avgRam),
+      })
+    }
+  }, [])
+
   const fetchAll = useCallback(async (quiet=false) => {
     if (!quiet) setLoading(true); else setRefreshing(true)
     try {
@@ -181,128 +301,113 @@ export default function DashboardPage() {
         api.get('/audit?limit=10'),
       ])
 
-      const devs  = devR.status==='fulfilled' ? (devR.value.data||[])  : devices
-      const grps  = grpR.status==='fulfilled' ? (grpR.value.data||[])  : groups
-      const mets  = metR.status==='fulfilled' ? (metR.value.data||{})  : metrics
-      const alts  = altR.status==='fulfilled' ? (Array.isArray(altR.value.data)?altR.value.data:altR.value.data?.logs||[]) : alerts
-      const auds  = audR.status==='fulfilled' ? (audR.value.data?.logs||audR.value.data||[]) : auditLog
+      // Fall back to previous state on error — never wipe to empty
+      const devs = devR.status==='fulfilled' ? (devR.value.data||[])  : devicesRef.current
+      const grps = grpR.status==='fulfilled' ? (grpR.value.data||[])  : groups
+      const mets = metR.status==='fulfilled' ? (metR.value.data||{})  : metricsRef.current
+      const alts = altR.status==='fulfilled' ? (Array.isArray(altR.value.data)?altR.value.data:altR.value.data?.logs||[]) : alerts
+      const auds = audR.status==='fulfilled' ? (audR.value.data?.logs||audR.value.data||[]) : auditLog
 
-      setDevices(devs)
-      setGroups(grps)
-      setMetrics(mets)
-      setAlerts(alts)
-      setAuditLog(auds)
+      metricsRef.current = mets
+      devicesRef.current = devs
+      setDevices(devs); setGroups(grps); setMetrics(mets)
+      setAlerts(alts);  setAuditLog(auds)
 
-      // ── Record uptime bucket per device ──────────────────────────────────
-      const now = Date.now()
-      const buckets = uptimeBuckets.current
-      for (const d of devs) {
-        if (!buckets[d.id]) buckets[d.id] = []
-        buckets[d.id].push(d.status || 'unknown')
-        if (buckets[d.id].length > UPTIME_BUCKETS * 2) buckets[d.id].shift()
-      }
-
-      // ── Fleet history snapshot ────────────────────────────────────────────
-      const online  = devs.filter(d=>d.status==='online').length
-      const offline = devs.filter(d=>d.status==='offline').length
-      const metVals = Object.values(mets).map(m=>m.latest).filter(m=>m&&!isStale(m.ts))
-      const avgCpu  = metVals.length ? metVals.reduce((s,m)=>s+(m.cpu||0),0)/metVals.length : null
-      const avgRam  = metVals.length ? metVals.reduce((s,m)=>s+(m.ram?pct(m.ram.used,m.ram.total):0),0)/metVals.length : null
-
-      const hist = fleetHistory.current
-      hist.push({
-        t: new Date(now).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
-        online, offline,
-        cpu: avgCpu!=null ? Math.round(avgCpu*10)/10 : null,
-        ram: avgRam!=null ? Math.round(avgRam) : null,
-      })
-      if (hist.length > FLEET_HISTORY) hist.shift()
-
-      setLastRefresh(now)
+      // Bootstrap only on first load, then keep appending
+      bootstrapFleetHistory(mets, devs)
+      appendFleetBucket(devs, mets)
+      setLastRefresh(Date.now())
     } catch(e) {
       if (!quiet) toast.error('Failed to load dashboard')
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
-  }, []) // eslint-disable-line
+    } finally { setLoading(false); setRefreshing(false) }
+  }, [appendFleetBucket, bootstrapFleetHistory]) // eslint-disable-line
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // SSE for real-time metric updates
   useEffect(() => {
-    const t = setInterval(() => fetchAll(true), REFRESH_MS)
-    return () => clearInterval(t)
+    const token = localStorage.getItem('nc_token') || ''
+    const es = new EventSource(
+      `${api.defaults.baseURL}/metrics/stream?token=${encodeURIComponent(token)}`
+    )
+    es.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.type === 'snapshot') {
+          metricsRef.current = msg.data || {}
+          setMetrics(msg.data || {})
+        } else if (msg.deviceId && msg.latest) {
+          const prev  = metricsRef.current
+          const entry = prev[msg.deviceId] || { latest: null, history: [] }
+          const hist  = [...(entry.history||[]), msg.latest]
+          if (hist.length > 300) hist.shift()
+          const updated = { ...prev, [msg.deviceId]: { latest: msg.latest, history: hist } }
+          metricsRef.current = updated
+          setMetrics(updated)
+        }
+        setLastRefresh(Date.now())
+      } catch {}
+    }
+    const t = setInterval(() => {
+      if (es.readyState === EventSource.OPEN) return
+      fetchAll(true)
+    }, REFRESH_MS)
+    return () => { es.close(); clearInterval(t) }
   }, [fetchAll])
 
-  // ── Derived metrics ────────────────────────────────────────────────────────
-  const online  = devices.filter(d=>d.status==='online').length
-  const offline = devices.filter(d=>d.status==='offline').length
-  const unknown = devices.filter(d=>!d.status||d.status==='unknown').length
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const online   = devices.filter(d=>d.status==='online').length
+  const offline  = devices.filter(d=>d.status==='offline').length
+  const unknown  = devices.filter(d=>!d.status||d.status==='unknown').length
   const fleetPct = devices.length ? Math.round(online/devices.length*100) : 0
 
   const metVals = useMemo(() =>
     Object.entries(metrics).map(([id,m])=>({id,...m.latest})).filter(m=>m.ts&&!isStale(m.ts)),
   [metrics])
 
-  const avgCpu = metVals.length ? metVals.reduce((s,m)=>s+(m.cpu||0),0)/metVals.length : null
-  const avgRam = metVals.length ? metVals.reduce((s,m)=>s+(m.ram?pct(m.ram.used,m.ram.total):0),0)/metVals.length : null
+  const avgCpu  = metVals.length ? metVals.reduce((s,m)=>s+(m.cpu||0),0)/metVals.length : null
+  const avgRam  = metVals.length ? metVals.reduce((s,m)=>s+(m.ram?pct(m.ram.used,m.ram.total):0),0)/metVals.length : null
   const avgDisk = useMemo(() => {
-    const withDisk = metVals.filter(m=>m.disk?.length)
-    if (!withDisk.length) return null
-    const p = withDisk.map(m=>m.disk.reduce((s,d)=>s+pct(d.used,d.total),0)/m.disk.length)
+    const wd = metVals.filter(m=>m.disk?.length)
+    if (!wd.length) return null
+    const p = wd.map(m=>m.disk.reduce((s,d)=>s+pct(d.used,d.total),0)/m.disk.length)
     return p.reduce((a,b)=>a+b,0)/p.length
   }, [metVals])
 
   const critAlerts = alerts.filter(a=>a.severity==='critical').length
 
-  // top cpu, ram consumers
   const topCpu = useMemo(() =>
     [...metVals].sort((a,b)=>(b.cpu||0)-(a.cpu||0)).slice(0,6)
-      .map(m=>({...m, device: devices.find(d=>d.id===m.id)}))
-      .filter(m=>m.device),
+      .map(m=>({...m,device:devices.find(d=>d.id===m.id)})).filter(m=>m.device),
   [metVals, devices])
 
   const topRam = useMemo(() =>
     [...metVals].filter(m=>m.ram).sort((a,b)=>pct(b.ram.used,b.ram.total)-pct(a.ram.used,a.ram.total)).slice(0,5)
-      .map(m=>({...m, ramPct: pct(m.ram.used,m.ram.total), device: devices.find(d=>d.id===m.id)}))
-      .filter(m=>m.device),
+      .map(m=>({...m,ramPct:pct(m.ram.used,m.ram.total),device:devices.find(d=>d.id===m.id)})).filter(m=>m.device),
   [metVals, devices])
 
-  // offline devices sorted by last_seen desc
   const offlineDevices = useMemo(() =>
     devices.filter(d=>d.status==='offline').sort((a,b)=>(b.last_seen||0)-(a.last_seen||0)).slice(0,8),
   [devices])
 
-  // per-group uptime
-  const groupUptime = useMemo(() =>
-    groups.map(g => {
-      const gDevs = devices.filter(d=>d.group_id===g.id)
-      const on = gDevs.filter(d=>d.status==='online').length
-      const pctVal = gDevs.length ? Math.round(on/gDevs.length*100) : null
-      const color = pctVal==null?'#475569':pctVal>=90?'#22c55e':pctVal>=70?'#eab308':'#ef4444'
-      const combinedBuckets = gDevs.length ? (() => {
-        const len = UPTIME_BUCKETS
-        return [...Array(len)].map((_,i) => {
-          const slice = gDevs.map(d=>(uptimeBuckets.current[d.id]||[])[
-            (uptimeBuckets.current[d.id]||[]).length - len + i
-          ]).filter(Boolean)
-          if (!slice.length) return 'unknown'
-          const onCnt = slice.filter(s=>s==='online').length
-          if (onCnt===slice.length) return 'online'
-          if (onCnt===0) return 'offline'
-          return 'partial'
-        })
-      })() : []
-      return { ...g, gDevs, on, pctVal, color, combinedBuckets }
-    }),
+  // Per-group stats for the availability section
+  const groupStats = useMemo(() =>
+    groups.map(g => ({
+      group: g,
+      devices: devices.filter(d=>d.group_id===g.id),
+    })),
   [groups, devices])
 
-  // fleet history for charts
-  const histData = fleetHistory.current
+  // Unassigned devices
+  const unassigned = useMemo(() => devices.filter(d=>!d.group_id), [devices])
 
-  // sparklines per stat card
+  // Chart data — read from ref so it persists across renders
+  const histData   = fleetHistory.current
   const onlineSpark = histData.map(h=>({v:h.online}))
   const cpuSpark    = histData.map(h=>({v:h.cpu})).filter(h=>h.v!=null)
   const ramSpark    = histData.map(h=>({v:h.ram})).filter(h=>h.v!=null)
+
+  const fleetColor = fleetPct>=90?'#22c55e':fleetPct>=60?'#eab308':'#ef4444'
 
   const executeAction = async (pin) => {
     const {type,target} = actionModal
@@ -327,12 +432,11 @@ export default function DashboardPage() {
 
   const hour = new Date().getHours()
   const greeting = hour<12?'Good morning':hour<17?'Good afternoon':'Good evening'
-  const fleetColor = fleetPct>=90?'#22c55e':fleetPct>=60?'#eab308':'#ef4444'
 
   return (
     <div className="p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
 
-      {/* ── Header ──────────────────────────────────────────────────────── */}
+      {/* ── Header ────────────────────────────────────────────────────────── */}
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-lg font-display font-bold" style={{color:'var(--text-primary)'}}>
@@ -343,13 +447,12 @@ export default function DashboardPage() {
             {lastRefresh && <span className="ml-3 opacity-50">· refreshed {fmtTime(lastRefresh/1000)}</span>}
           </p>
         </div>
-        <button onClick={()=>fetchAll(true)} disabled={refreshing}
-          className="icon-btn" title="Refresh">
+        <button onClick={()=>fetchAll(true)} disabled={refreshing} className="icon-btn" title="Refresh">
           <RefreshCw size={13} className={refreshing?'animate-spin':''}/>
         </button>
       </div>
 
-      {/* ── Critical banner ──────────────────────────────────────────────── */}
+      {/* ── Critical banner ───────────────────────────────────────────────── */}
       {critAlerts>0 && (
         <button onClick={()=>navigate('/alerts')} className="w-full text-left">
           <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl"
@@ -363,31 +466,29 @@ export default function DashboardPage() {
         </button>
       )}
 
-      {/* ── Row 1: KPI stat cards ─────────────────────────────────────────── */}
+      {/* ── KPI stat cards ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <StatCard icon={Server}       label="Fleet"      value={devices.length}
-          sub={`${groups.length} groups`} color="#818cf8" spark={onlineSpark}/>
-        <StatCard icon={Wifi}         label="Online"     value={online}
-          sub={`${fleetPct}% healthy`}   color="#22c55e" spark={onlineSpark}
+        <StatCard icon={Server}      label="Devices"   value={devices.length}
+          sub={`${groups.length} groups`}           color="#818cf8" spark={onlineSpark}/>
+        <StatCard icon={Wifi}        label="Online"    value={online}
+          sub={`${fleetPct}% healthy`}              color="#22c55e" spark={onlineSpark}
           trend={histData.length>2?(online-(histData[histData.length-3]?.online||online)):null}/>
-        <StatCard icon={WifiOff}      label="Offline"    value={offline}
-          sub={`${unknown} unknown`}     color={offline>0?'#ef4444':'#475569'}/>
-        <StatCard icon={Cpu}          label="Avg CPU"    value={avgCpu!=null?`${avgCpu.toFixed(1)}%`:'—'}
-          sub={`${metVals.length} reporting`} color={cpuColor(avgCpu)} spark={cpuSpark}/>
-        <StatCard icon={MemoryStick}  label="Avg RAM"    value={avgRam!=null?`${Math.round(avgRam)}%`:'—'}
-          sub="memory used"              color={avgRam!=null?ramColor(avgRam):'#475569'} spark={ramSpark}/>
-        <StatCard icon={Bell}         label="Alerts"     value={alerts.length}
-          sub={`${critAlerts} critical`} color={critAlerts>0?'#ef4444':'#eab308'}/>
+        <StatCard icon={WifiOff}     label="Offline"   value={offline}
+          sub={`${unknown} unknown`}                color={offline>0?'#ef4444':'#475569'}/>
+        <StatCard icon={Cpu}         label="Avg CPU"   value={avgCpu!=null?`${avgCpu.toFixed(1)}%`:'—'}
+          sub={`${metVals.length} reporting`}       color={cpuColor(avgCpu)} spark={cpuSpark}/>
+        <StatCard icon={MemoryStick} label="Avg RAM"   value={avgRam!=null?`${Math.round(avgRam)}%`:'—'}
+          sub="memory used"                         color={avgRam!=null?ramColor(avgRam):'#475569'} spark={ramSpark}/>
+        <StatCard icon={Bell}        label="Alerts"    value={alerts.length}
+          sub={`${critAlerts} critical`}            color={critAlerts>0?'#ef4444':'#eab308'}/>
       </div>
 
-      {/* ── Row 2: Fleet health + uptime timeline ──────────────────────────── */}
+      {/* ── Fleet health + chart ──────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
 
-        {/* Fleet status bar + gauges */}
+        {/* Fleet health ring + gauges */}
         <div className="glass rounded-2xl p-5">
           <SectionLabel>Fleet Health</SectionLabel>
-
-          {/* Big uptime % with ring */}
           <div className="flex items-center gap-6 mb-5">
             <div className="relative">
               <svg width={88} height={88} style={{transform:'rotate(-90deg)'}}>
@@ -418,8 +519,6 @@ export default function DashboardPage() {
               ))}
             </div>
           </div>
-
-          {/* Resource gauges */}
           <div className="grid grid-cols-3 gap-3 pt-4" style={{borderTop:'1px solid var(--border-subtle)'}}>
             <Gauge value={avgCpu!=null?Math.round(avgCpu):null} color={cpuColor(avgCpu)} label="CPU" size={52}/>
             <Gauge value={avgRam!=null?Math.round(avgRam):null} color={avgRam!=null?ramColor(avgRam):'#475569'} label="RAM" size={52}/>
@@ -427,7 +526,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Fleet history chart */}
+        {/* Fleet history chart — persists across refreshes, never goes blank */}
         <div className="lg:col-span-2 glass rounded-2xl p-5">
           <SectionLabel action={{label:'Monitoring',fn:()=>navigate('/monitoring')}}>
             Fleet History — Online / CPU / RAM
@@ -453,9 +552,9 @@ export default function DashboardPage() {
                 <XAxis dataKey="t" tick={{fontSize:9,fill:'#475569'}} tickLine={false} axisLine={false} interval="preserveStartEnd"/>
                 <YAxis tick={{fontSize:9,fill:'#475569'}} tickLine={false} axisLine={false}/>
                 <Tooltip contentStyle={TT_STYLE} labelStyle={{color:'#94a3b8',marginBottom:4,fontSize:10}}/>
-                <Area type="monotone" dataKey="online" name="Online" stroke="#22c55e" strokeWidth={2} fill="url(#gOnline)" dot={false}/>
-                <Area type="monotone" dataKey="cpu"    name="CPU %"  stroke="#818cf8" strokeWidth={1.5} fill="url(#gCpu)" dot={false}/>
-                <Area type="monotone" dataKey="ram"    name="RAM %"  stroke="#06b6d4" strokeWidth={1.5} fill="url(#gRam)" dot={false}/>
+                <Area type="monotone" dataKey="online" name="Online" stroke="#22c55e" strokeWidth={2} fill="url(#gOnline)" dot={false} isAnimationActive={false}/>
+                <Area type="monotone" dataKey="cpu"    name="CPU %"  stroke="#818cf8" strokeWidth={1.5} fill="url(#gCpu)"    dot={false} isAnimationActive={false}/>
+                <Area type="monotone" dataKey="ram"    name="RAM %"  stroke="#06b6d4" strokeWidth={1.5} fill="url(#gRam)"    dot={false} isAnimationActive={false}/>
               </AreaChart>
             </ResponsiveContainer>
           ) : (
@@ -469,48 +568,53 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Row 3: Group uptime strips ────────────────────────────────────── */}
-      {groupUptime.length > 0 && (
+      {/* ── GROUP AVAILABILITY — per-group cards, not fleet-wide ─────────── */}
+      {groupStats.length > 0 && (
         <div className="glass rounded-2xl p-5">
-          <SectionLabel action={{label:'Groups',fn:()=>navigate('/groups')}}>
-            Group Availability — Last {Math.round(UPTIME_BUCKETS*REFRESH_MS/60000)} min
+          <SectionLabel action={{label:'All Groups',fn:()=>navigate('/groups')}}>
+            Group Availability
+            <span className="ml-2 text-[9px] font-mono opacity-50 normal-case tracking-normal">
+              last {Math.round(UPTIME_BUCKETS*REFRESH_MS/60000)} min per group
+            </span>
           </SectionLabel>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-            {groupUptime.map(g => (
-              <div key={g.id} className="p-3 rounded-xl" style={{background:'var(--bg-surface-4)',border:'1px solid var(--border-subtle)'}}>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{background:g.color}}/>
-                    <span className="text-xs font-body font-semibold truncate" style={{color:'var(--text-primary)'}}>{g.name}</span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-[10px] font-mono" style={{color:'var(--text-muted)'}}>{g.on}/{g.gDevs.length}</span>
-                    <span className="text-[11px] font-mono font-bold" style={{color:g.color}}>
-                      {g.pctVal!=null?`${g.pctVal}%`:'—'}
-                    </span>
-                  </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            {groupStats.map(({ group, devices: gDevs }) => (
+              <GroupAvailCard
+                key={group.id}
+                group={group}
+                devices={gDevs}
+                uptimeBuckets={uptimeBuckets.current}
+                onAction={setActionModal}
+                navigate={navigate}
+              />
+            ))}
+            {/* Unassigned block */}
+            {unassigned.length > 0 && (
+              <div className="p-4 rounded-xl" style={{background:'var(--bg-surface-3)',border:'1px dashed var(--border-subtle)'}}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[10px] font-body font-bold uppercase tracking-widest" style={{color:'var(--text-faint)'}}>Unassigned</span>
+                  <span className="text-[10px] font-mono ml-auto" style={{color:'var(--text-faint)'}}>{unassigned.length} devices</span>
                 </div>
-                {/* Statuspage-style strip using combined group buckets */}
-                <div className="flex gap-px items-end" style={{height:18}}>
-                  {(g.combinedBuckets.length ? g.combinedBuckets : Array(UPTIME_BUCKETS).fill('unknown')).map((b,i)=>(
-                    <div key={i} className="flex-1 rounded-[2px]"
-                      style={{
-                        height: b==='offline'?9 : b==='partial'?13 : b==='unknown'?5 : 18,
-                        background: b==='online'?'#22c55e' : b==='partial'?'#eab308' : b==='offline'?'#ef4444' : 'rgba(255,255,255,0.08)',
-                      }}
-                    />
+                <div className="flex flex-wrap gap-1">
+                  {unassigned.slice(0,10).map(d=>(
+                    <span key={d.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-mono"
+                      style={{background:'var(--bg-surface-4)',border:'1px solid var(--border-subtle)',color:'var(--text-muted)'}}>
+                      <span className="w-1.5 h-1.5 rounded-full" style={{background:statusColor(d.status),flexShrink:0}}/>
+                      {d.name}
+                    </span>
                   ))}
+                  {unassigned.length > 10 && <span className="text-[10px] font-mono" style={{color:'var(--text-faint)'}}>+{unassigned.length-10}</span>}
                 </div>
               </div>
-            ))}
+            )}
           </div>
         </div>
       )}
 
-      {/* ── Row 4: Top consumers + offline devices ───────────────────────── */}
+      {/* ── Top consumers ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
-        {/* Top CPU consumers */}
+        {/* Top CPU */}
         <div className="glass rounded-2xl overflow-hidden">
           <div className="px-5 py-3 flex items-center justify-between" style={{borderBottom:'1px solid var(--border-subtle)'}}>
             <SectionLabel>Top CPU Consumers</SectionLabel>
@@ -546,7 +650,7 @@ export default function DashboardPage() {
           })}
         </div>
 
-        {/* Top RAM consumers */}
+        {/* Top RAM */}
         <div className="glass rounded-2xl overflow-hidden">
           <div className="px-5 py-3 flex items-center justify-between" style={{borderBottom:'1px solid var(--border-subtle)'}}>
             <SectionLabel>Top RAM Consumers</SectionLabel>
@@ -584,13 +688,16 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Row 5: Offline devices + recent alerts + audit ───────────────── */}
+      {/* ── Offline + alerts + audit ──────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
 
         {/* Offline devices */}
         <div className="glass rounded-2xl overflow-hidden">
           <div className="px-5 py-3" style={{borderBottom:'1px solid var(--border-subtle)'}}>
-            <SectionLabel>Offline Devices {offlineDevices.length>0&&<span className="ml-1 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold bg-accent-red/15 text-accent-red">{offlineDevices.length}</span>}</SectionLabel>
+            <SectionLabel>
+              Offline Devices
+              {offlineDevices.length>0&&<span className="ml-1 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold bg-accent-red/15 text-accent-red">{offlineDevices.length}</span>}
+            </SectionLabel>
           </div>
           {offlineDevices.length===0 ? (
             <div className="py-8 flex flex-col items-center gap-2 opacity-50">
@@ -611,8 +718,7 @@ export default function DashboardPage() {
                 <p className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>last seen</p>
                 <p className="text-[10px] font-mono" style={{color:'var(--text-muted)'}}>{fmtTime(d.last_seen)}</p>
               </div>
-              <button
-                onClick={()=>setActionModal({type:'wake',target:d,label:`Wake ${d.name}`,danger:false})}
+              <button onClick={()=>setActionModal({type:'wake',target:d,label:`Wake ${d.name}`,danger:false})}
                 className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg shrink-0"
                 style={{background:'rgba(34,197,94,0.12)',border:'1px solid rgba(34,197,94,0.25)',color:'#22c55e'}}>
                 <Zap size={10}/>
@@ -686,4 +792,3 @@ export default function DashboardPage() {
     </div>
   )
 }
-

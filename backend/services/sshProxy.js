@@ -141,18 +141,23 @@ function sshConnect(device, cols, rows) {
 // ── Attach proxy ──────────────────────────────────────────────────────────────
 function attachSSHProxy(httpServer) {
   const wss = new WebSocketServer({
-    server: httpServer,        // attach directly to http server
-    path:   /^\/ws\/terminal\//,  // only handle /ws/terminal/* paths
+    server: httpServer,
+    // FIX: ws library path option only accepts a STRING — regex is silently
+    // coerced to '/^\/ws\/terminal\//' which never matches any real path,
+    // meaning ZERO WebSocket connections were ever accepted before this fix.
+    path: '/ws/terminal',
 
-    // Auth gate — runs before the connection is accepted
-    // SECURITY FIX: Now does async check for user enabled + operator device access
+    // Auth gate — verifyClient rejects non-matching device paths + bad tokens
     verifyClient({ req }, done) {
       if (!deviceIdFromUrl(req)) return done(false, 400, 'Bad path');
       const token    = extractToken(req);
       const deviceId = deviceIdFromUrl(req);
       verifyUserAndAccess(token, deviceId)
         .then(() => done(true))
-        .catch(() => done(false, 401, 'Unauthorized'));
+        .catch((err) => {
+          console.error('[SSHProxy] Auth rejected:', err.message);
+          done(false, 401, 'Unauthorized');
+        });
     },
   });
 

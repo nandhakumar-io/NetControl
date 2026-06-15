@@ -16,6 +16,7 @@ import RemoteAccessPage from './pages/RemoteAccessPage'
 import FilePushPage    from './pages/FilePushPage'
 import UsersPage       from './pages/UsersPage'
 import MonitoringPage  from './pages/MonitoringPage'
+import SecurityPage    from './pages/SecurityPage'
 import AlertsPage      from './pages/AlertsPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
@@ -95,8 +96,17 @@ export default function App() {
               </RequireRole>
             }
           />
+          <Route
+            path="security"
+            element={
+              <RequireRole roles={['admin']}>
+                <SecurityPage />
+              </RequireRole>
+            }
+          />
         </Route>
       </Routes>
     </BrowserRouter>
   )
 }
+

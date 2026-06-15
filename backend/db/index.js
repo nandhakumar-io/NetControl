@@ -24,8 +24,6 @@ function getPool() {
 
       // ── Timeouts ──────────────────────────────────────────────────────
       connectTimeout:    10000,
-      acquireTimeout:    10000,         // wait up to 10s to get a connection
-
       // ── Connection health ─────────────────────────────────────────────
       enableKeepAlive:   true,
       keepAliveInitialDelay: 30000,

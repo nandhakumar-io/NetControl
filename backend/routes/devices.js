@@ -388,16 +388,22 @@ router.post('/poll-all', async (req, res) => {
 router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
+    // BUG FIX: Select all fields needed by pollDevice (agent_key_hash, last_seen were missing)
     const device = await queryOne(
-      'SELECT id, name, ip_address, os_type, status FROM devices WHERE id = ?',
+      'SELECT id, name, ip_address, os_type, status, last_seen, agent_key_hash FROM devices WHERE id = ?',
       [req.params.id]
     );
     if (!device) return res.status(404).json({ error: 'Device not found' });
-    const { pollDevice } = require('../services/statusPoller');
-    const result = await pollDevice(device);
+    const { pollDevice, flushToDB } = require('../services/statusPoller');
+    // BUG FIX: Pass nowSec — without it, ageSec is NaN and agent grace check always fails,
+    // causing all agent devices to be incorrectly marked offline via TCP probe.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const result = await pollDevice(device, nowSec);
+    // BUG FIX: Flush the result to DB — previously the status was never persisted,
+    // so devices stayed "online" in the DB even when the poll detected them as offline.
+    await flushToDB([result], nowSec);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;
-

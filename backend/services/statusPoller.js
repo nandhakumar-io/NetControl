@@ -18,7 +18,7 @@
 const net     = require('net');
 const { query, execute, queryOne } = require('../db');
 
-const POLL_INTERVAL_MS = 20 * 1000;  // base tick
+const POLL_INTERVAL_MS = 20 * 500;  // base tick
 const TCP_TIMEOUT_MS   = 2000;
 const MAX_CONCURRENT   = 50;          // max simultaneous open sockets
 const AGENT_GRACE_SEC  = 45;          // trust agent heartbeat for this long
@@ -231,5 +231,5 @@ function stop() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, pollAll, pollDevice };
+module.exports = { start, stop, pollAll, pollDevice, flushToDB };
 
