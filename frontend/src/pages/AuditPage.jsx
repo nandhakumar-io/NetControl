@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react'
 import {
   ScrollText, Search, RefreshCw, Zap, Power, RotateCcw,
   Shield, ChevronLeft, ChevronRight, Monitor, UserCheck,
@@ -64,6 +64,61 @@ function getMeta(action) {
   return ACTION_META[action] || {
     icon: Shield, color: 'text-slate-500', bg: '', label: action || '—',
   }
+}
+
+// ── Expandable cell ─────────────────────────────────────────────────────────
+// Content stays truncated to fit its column. If (and only if) it actually
+// overflows, the cell becomes clickable and toggles to full, wrapped text —
+// no "…" is ever shown as the final state, it's just an affordance to expand.
+function ExpandableCell({ text, className = '', mono = false, sub = null }) {
+  const ref = useRef(null)
+  const [overflowing, setOverflowing] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+
+  useLayoutEffect(() => {
+    setExpanded(false)
+    const el = ref.current
+    if (!el) return
+    setOverflowing(el.scrollWidth > el.clientWidth + 1)
+  }, [text])
+
+  if (text === null || text === undefined || text === '') {
+    return <span className="text-slate-600 text-xs">—</span>
+  }
+
+  return (
+    <div className="min-w-0">
+      <div
+        role={overflowing ? 'button' : undefined}
+        tabIndex={overflowing ? 0 : undefined}
+        onClick={() => overflowing && setExpanded(v => !v)}
+        onKeyDown={e => { if (overflowing && (e.key === 'Enter' || e.key === ' ')) setExpanded(v => !v) }}
+        className={[
+          'text-xs',
+          mono ? 'font-mono' : 'font-body',
+          className,
+          expanded ? 'whitespace-normal break-words' : 'truncate',
+          overflowing ? 'cursor-pointer hover:text-brand-300 decoration-dotted decoration-1 underline-offset-2 hover:underline' : '',
+        ].join(' ')}
+      >
+        <span ref={ref} className={expanded ? '' : 'block truncate'}>
+          {text}
+        </span>
+      </div>
+      {sub && (
+        <p className={`text-[10px] font-body text-slate-600 capitalize ${expanded ? 'break-words' : 'truncate'}`}>{sub}</p>
+      )}
+      {overflowing && (
+        <button
+          type="button"
+          onClick={() => setExpanded(v => !v)}
+          className="text-[9px] font-body text-brand-400/80 hover:text-brand-300 mt-0.5"
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </div>
+  )
 }
 
 // ── Skeleton row ─────────────────────────────────────────────────────────────
@@ -242,58 +297,40 @@ export default function AuditPage() {
               return (
                 <div
                   key={log.id ?? i}
-                  className="grid items-center gap-4 px-5 py-3 hover:bg-surface-3/40 transition-colors group"
+                  className="grid items-start gap-4 px-5 py-3 hover:bg-surface-3/40 transition-colors group"
                   style={{ gridTemplateColumns: '160px 110px 130px 1fr 140px 90px' }}
                 >
                   {/* Timestamp */}
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <Clock size={10} className="text-slate-600 shrink-0" />
-                    <span className="text-[11px] font-mono text-slate-400 truncate">
-                      {formatTime(log.timestamp)}
-                    </span>
+                    <Clock size={10} className="text-slate-600 shrink-0 mt-px" />
+                    <ExpandableCell text={formatTime(log.timestamp)} mono className="text-slate-400" />
                   </div>
 
                   {/* User */}
-                  <div className="min-w-0">
-                    <p className="text-xs font-body font-medium text-slate-200 truncate">
-                      {log.username || '—'}
-                    </p>
-                    {log.user_id && (
-                      <p className="text-[10px] font-mono text-slate-600 truncate">{log.user_id.slice(0, 8)}…</p>
-                    )}
-                  </div>
+                  <ExpandableCell
+                    text={log.username || '—'}
+                    className="font-medium text-slate-200"
+                    sub={log.user_id ? log.user_id : null}
+                  />
 
                   {/* Action badge */}
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={`w-6 h-6 rounded-md border flex items-center justify-center shrink-0 ${meta.bg}`}>
                       <ActionIcon size={11} className={meta.color} />
                     </span>
-                    <span className={`text-xs font-body font-medium truncate ${meta.color}`}>
-                      {meta.label}
-                    </span>
+                    <ExpandableCell text={meta.label} className={`font-medium ${meta.color}`} />
                   </div>
 
                   {/* Target */}
-                  <div className="min-w-0">
-                    <p className="text-xs font-mono text-slate-300 truncate">
-                      {getTarget(log)}
-                    </p>
-                    {getTargetSub(log) && (
-                      <p className="text-[10px] font-body text-slate-600 capitalize truncate">
-                        {getTargetSub(log)}
-                      </p>
-                    )}
-                    {log.details && (
-                      <p className="text-[10px] font-body text-slate-600 truncate" title={log.details}>
-                        {log.details}
-                      </p>
-                    )}
-                  </div>
+                  <ExpandableCell
+                    text={getTarget(log)}
+                    mono
+                    className="text-slate-300"
+                    sub={[getTargetSub(log), log.details].filter(Boolean).join(' — ') || null}
+                  />
 
                   {/* Source IP — column is `ip_source` in DB ── */}
-                  <span className="text-xs font-mono text-slate-500 truncate">
-                    {log.ip_source || '—'}
-                  </span>
+                  <ExpandableCell text={log.ip_source || '—'} mono className="text-slate-500" />
 
                   {/* Result */}
                   {resMeta ? (
