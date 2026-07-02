@@ -10,10 +10,14 @@ services:
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "3306:3306"
+      # SECURITY FIX: was "3306:3306", which binds to 0.0.0.0 and exposes
+      # MySQL to the internet on any host with a public IP. The backend
+      # reaches this container over the docker network, not via this port
+      # mapping, so it's only needed for local admin/debug access — bind it
+      # to loopback only. Remove this ports block entirely if you don't need
+      # host-side DB access at all.
+      - "127.0.0.1:3306:3306"
     volumes:
       - netcontrol_db_data:/var/lib/mysql 
 volumes:
   netcontrol_db_data:
-
-

@@ -1,1 +1,8 @@
 *.zip
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+node_modules/
+backend/logs/

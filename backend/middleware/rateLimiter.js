@@ -80,8 +80,20 @@ const registerLimiter = rateLimit({
   keyGenerator:   (req) => req.ip,
 });
 
+// ── Network discovery ────────────────────────────────────────────────────────
+// Starting a scan spins up dozens of concurrent ping/SNMP/nmap probes — cap
+// how often a user can kick one off, independent of the general API limiter.
+const discoveryLimiter = rateLimit({
+  windowMs:       15 * 60 * 1000,
+  max:            parseInt(process.env.DISCOVERY_RATE_LIMIT_MAX) || 6,
+  standardHeaders: true, legacyHeaders: false,
+  message:        { error: 'Too many discovery scans requested — please wait before starting another' },
+  keyGenerator:   (req) => req.user?.id || req.ip,
+});
+
 module.exports = {
   apiLimiter, actionLimiter, authLimiter,
   bulkImportLimiter, agentIngestLimiter,
   agentRelayLimiter, registerLimiter,
+  discoveryLimiter,
 };

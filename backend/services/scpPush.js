@@ -105,7 +105,9 @@ function scpPushOne(device, fileBuffer, remotePath, mode = 0o644) {
     // Uses the original SCP protocol (scp -t) which works even when SFTP
     // subsystem is disabled on the remote SSH server.
     function tryScpExec(reason) {
-      const scpCmd = `scp -t '${remotePath.replace(/'/g, "'\\''")}'`;
+      // BUG FIX: scp -t expects the remote directory as sink; filename comes from C-header.
+      const remoteDir = path.posix.dirname(remotePath);
+      const scpCmd = `scp -t '${remoteDir.replace(/'/g, "'\\''")}'`;
       conn.exec(scpCmd, (err, stream) => {
         if (err) {
           clearTimeout(timer);
@@ -174,8 +176,10 @@ function scpPushOne(device, fileBuffer, remotePath, mode = 0o644) {
 
     // ── Connect ───────────────────────────────────────────────────────────
     conn.on('ready', () => {
-      clearTimeout(timer);
-      // Try SFTP first; fall back to SCP exec if SFTP fails
+      // BUG FIX: Do NOT clear the timer on ready — the inner SFTP/SCP operations
+      // still need the timeout. The old code cleared it here, then tryScpExec
+      // called clearTimeout(timer) on an already-cleared handle, giving no timeout
+      // protection at all for the SCP exec fallback path, causing indefinite hangs.
       trySftp((sftpFailReason) => {
         tryScpExec(sftpFailReason);
       });

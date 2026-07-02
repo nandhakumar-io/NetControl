@@ -3,7 +3,7 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
-  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert
+  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -182,6 +182,7 @@ export default function Layout() {
     { to: '/audit',         icon: ScrollText,      label: 'Audit Log',     show: can(128) },
     { to: '/monitoring',    icon: Activity,        label: 'Monitoring',    show: can(1) },
     { to: '/alerts',        icon: Bell,            label: 'Alerts',        show: can(1) },
+    { to: '/discovery',     icon: Radar,           label: 'Discovery',     show: can(1024) },
   ].filter(n => n.show)
 
   const ADMIN_NAV = [

@@ -46,6 +46,7 @@ const MIGRATIONS = [
         enabled     TINYINT(1)   NOT NULL DEFAULT 1,
         permissions INT UNSIGNED NOT NULL DEFAULT 255,
         display_name VARCHAR(100) DEFAULT NULL,
+        must_change_password TINYINT(1) NOT NULL DEFAULT 0,
         created_at  INT UNSIGNED NOT NULL DEFAULT (UNIX_TIMESTAMP()),
         last_login  INT UNSIGNED
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -273,6 +274,13 @@ run()
       console.log('  ✓ security_tables (ip_allowlist, webhooks)');
     } catch (e) {
       console.warn('  ⚠  security_tables:', e.message);
+    }
+    try {
+      const { migrateDiscoveryTables } = require('./migrate-discovery');
+      await migrateDiscoveryTables();
+      console.log('  ✓ discovery_tables (discovery_scans, discovery_results)');
+    } catch (e) {
+      console.warn('  ⚠  discovery_tables:', e.message);
     }
     console.log('\n✅ All done.\n');
   })

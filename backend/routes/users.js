@@ -16,6 +16,39 @@ function sanitizeUser(u) {
   return safe;
 }
 
+// ── POST /api/users/me/change-password — any authenticated user ──────────────
+// Used to satisfy must_change_password after the random one-time admin
+// password is generated at setup, and generally available so any user can
+// rotate their own password without admin involvement.
+router.post('/me/change-password',
+  body('currentPassword').notEmpty(),
+  body('newPassword').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.user.id]);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      const valid = await bcrypt.compare(req.body.currentPassword, user.password || '');
+      if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+
+      const hash = await bcrypt.hash(req.body.newPassword, 12);
+      await execute(
+        'UPDATE users SET password = ?, must_change_password = 0 WHERE id = ?',
+        [hash, req.user.id]
+      );
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'change_own_password', targetType: 'user', targetId: req.user.id,
+        targetName: req.user.username, ipSource: req.realIp, result: 'success',
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
 // ── GET /api/users — list all users (admin only) ─────────────────────────────
 router.get('/', requireRole('admin'), async (req, res) => {
   try {

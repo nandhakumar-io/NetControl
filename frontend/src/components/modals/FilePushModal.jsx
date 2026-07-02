@@ -101,7 +101,7 @@ function ResultRow({ r }) {
 
 export default function FilePushModal({ open, onClose, devices, groups, selectedIds }) {
   const [file, setFile]             = useState(null)
-  const [remotePath, setRemotePath] = useState('/tmp/')
+  const [remotePath, setRemotePath] = useState('')
   const [fileMode, setFileMode]     = useState('0644')
   const [targetMode, setTargetMode] = useState('selected') // 'selected' | 'group' | 'all'
   const [groupId, setGroupId]       = useState('')
@@ -141,11 +141,19 @@ export default function FilePushModal({ open, onClose, devices, groups, selected
 
   const handlePush = async () => {
     if (!canSubmit) return
+
+    // BUG FIX: Reject bare directory paths — remotePath must include a filename.
+    const trimmedPath = remotePath.trim()
+    if (trimmedPath.endsWith('/')) {
+      toast.error('Remote path must include a filename (e.g. /tmp/myfile.sh)')
+      return
+    }
+
     setStep('pushing')
 
     const form = new FormData()
     form.append('file', file)
-    form.append('remotePath', remotePath.trim())
+    form.append('remotePath', trimmedPath)
     form.append('actionPin', pin)
     form.append('fileMode', fileMode)
 

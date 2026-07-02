@@ -13,6 +13,7 @@ export const PERM = {
   VIEW_AUDIT:      128,
   MANAGE_USERS:    256,
   MANAGE_ROLES:    512,
+  DISCOVER_NETWORK:1024,
 }
 
 const ROLE_PERMS = {

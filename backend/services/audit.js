@@ -30,7 +30,12 @@ async function log(opts) {
     target_id:   opts.targetId   || null,
     target_name: opts.targetName || null,
     ip_source:   opts.ipSource   || null,
-    result: opts.result === 'failure' ? 'failure' : 'success',
+    // SECURITY FIX: the schema's result column is ENUM('success','failure',
+    // 'partial'), but this used to collapse anything not exactly 'failure'
+    // into 'success' — so callers logging a partial multi-device outcome
+    // (some devices succeeded, some failed) had it recorded as a full
+    // success, hiding real failures from the audit trail.
+    result: ['failure', 'partial'].includes(opts.result) ? opts.result : 'success',
     details:     opts.details    || null,
   };
 
@@ -51,4 +56,3 @@ async function log(opts) {
 }
 
 module.exports = { log };
-

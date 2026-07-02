@@ -3,11 +3,17 @@ const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 const audit = require('../services/audit');
 
 const router = express.Router();
 router.use(requireAuth);
+
+// SECURITY FIX: POST/PUT/DELETE below previously had no role/permission
+// check beyond requireAuth, so any authenticated user — including viewers —
+// could create, rename, or delete groups. manage_groups (bit 16) restricts
+// this to admins (custom roles with the bit set also pass).
+const requireManageGroups = requirePermission(16);
 
 // GET /api/groups
 router.get('/', async (req, res) => {
@@ -54,6 +60,7 @@ router.get('/:id/devices', param('id').isUUID(), async (req, res) => {
 
 // POST /api/groups
 router.post('/',
+  requireManageGroups,
   body('name').trim().notEmpty().isLength({ max: 100 }),
   body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
   async (req, res) => {
@@ -77,6 +84,7 @@ router.post('/',
 
 // PUT /api/groups/:id
 router.put('/:id',
+  requireManageGroups,
   param('id').isUUID(),
   body('name').trim().notEmpty().isLength({ max: 100 }),
   body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
@@ -95,7 +103,7 @@ router.put('/:id',
 );
 
 // DELETE /api/groups/:id
-router.delete('/:id', param('id').isUUID(), async (req, res) => {
+router.delete('/:id', requireManageGroups, param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
     const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [req.params.id]);
@@ -108,4 +116,4 @@ router.delete('/:id', param('id').isUUID(), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-module.exports = router;
+module.exports = router;1

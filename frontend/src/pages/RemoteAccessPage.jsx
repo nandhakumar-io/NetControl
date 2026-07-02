@@ -222,7 +222,7 @@ function EmbeddedTerminal({ device, onClose }) {
   }, [connect])
 
   const openNewTab = () => {
-    window.open(`/terminal/${device.id}`, '_blank')
+    window.open(`/terminal/${device.id}`, '_blank', 'noopener,noreferrer')
   }
 
   return (

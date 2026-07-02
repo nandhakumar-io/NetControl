@@ -78,8 +78,13 @@ function requireRole(...roles) {
  *   32  - view_schedules
  *   64  - manage_schedules
  *   128 - view_audit
- *   256 - manage_users        (admin only by convention)
- *   512 - manage_roles        (admin only by convention)
+ *   256  - manage_users        (admin only by convention)
+ *   512  - manage_roles        (admin only by convention)
+ *   1024 - discover_network    (ping sweep / SNMP / nmap / LLDP-CDP scans —
+ *                                admin only by convention; deliberately not
+ *                                granted to operator/viewer by default since
+ *                                network scanning is more sensitive than
+ *                                routine device management)
  *
  * Admins always pass; operators pass bits 1|4|8|32; viewers pass 1|8|32|128.
  */
@@ -127,4 +132,3 @@ async function requireActionPin(req, res, next) {
 }
 
 module.exports = { requireAuth, requireRole, requirePermission, requireActionPin, ROLE_PERMISSIONS };
-

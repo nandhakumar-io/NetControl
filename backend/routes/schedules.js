@@ -4,12 +4,45 @@ const { body, param, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const cron = require('node-cron');
 const { query, queryOne, execute } = require('../db');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePermission } = require('../middleware/auth');
 const { registerSchedule, unregisterSchedule } = require('../services/scheduler');
 const audit = require('../services/audit');
 
 const router = express.Router();
 router.use(requireAuth);
+
+// SECURITY FIX: manage_schedules (bit 64) gate — previously any authenticated
+// user, including viewers, could hit POST/PUT/PATCH/DELETE below.
+const requireManageSchedules = requirePermission(64);
+
+// SECURITY FIX: even with manage_schedules, POST/PUT never verified that an
+// operator's target (device or group) was one they actually have access to.
+// A viewer/operator could create a schedule with any arbitrary target_id and
+// have it silently wake/shutdown/restart a device outside their group access
+// (IDOR + privilege escalation, since the schedule executes with system
+// privilege rather than the creator's). Admins are exempt — they can target
+// anything, matching the visibility rule already used in GET /.
+async function verifyTargetAccess(req, res, next) {
+  if (req.user.role === 'admin') return next();
+  const { target_type, target_id } = req.body;
+  try {
+    if (target_type === 'group') {
+      const access = await queryOne(
+        'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+        [req.user.id, target_id]
+      );
+      if (!access) return res.status(403).json({ error: 'Access denied to this group' });
+    } else if (target_type === 'device') {
+      const access = await queryOne(
+        'SELECT 1 FROM devices d INNER JOIN user_group_access uga ' +
+        'ON uga.group_id = d.group_id AND uga.user_id = ? WHERE d.id = ?',
+        [req.user.id, target_id]
+      );
+      if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+    }
+    next();
+  } catch (e) { res.status(500).json({ error: e.message }); }
+}
 
 // GET /api/schedules
 router.get('/', async (req, res) => {
@@ -76,7 +109,7 @@ const scheduleValidation = [
 ];
 
 // POST /api/schedules
-router.post('/', scheduleValidation, async (req, res) => {
+router.post('/', requireManageSchedules, scheduleValidation, verifyTargetAccess, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
@@ -95,7 +128,7 @@ router.post('/', scheduleValidation, async (req, res) => {
 });
 
 // PUT /api/schedules/:id
-router.put('/:id', param('id').isUUID(), scheduleValidation, async (req, res) => {
+router.put('/:id', requireManageSchedules, param('id').isUUID(), scheduleValidation, verifyTargetAccess, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
@@ -115,7 +148,7 @@ router.put('/:id', param('id').isUUID(), scheduleValidation, async (req, res) =>
 });
 
 // PATCH /api/schedules/:id/toggle
-router.patch('/:id/toggle', param('id').isUUID(), async (req, res) => {
+router.patch('/:id/toggle', requireManageSchedules, param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
     const s = await queryOne('SELECT * FROM schedules WHERE id = ?', [req.params.id]);
@@ -130,7 +163,7 @@ router.patch('/:id/toggle', param('id').isUUID(), async (req, res) => {
 });
 
 // DELETE /api/schedules/:id
-router.delete('/:id', param('id').isUUID(), async (req, res) => {
+router.delete('/:id', requireManageSchedules, param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
     const owned = await queryOne('SELECT created_by FROM schedules WHERE id = ?', [req.params.id]);

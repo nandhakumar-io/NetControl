@@ -139,7 +139,7 @@ export default function FilePushPage() {
   const [groups, setGroups]           = useState([])
   const [loading, setLoading]         = useState(true)
   const [file, setFile]               = useState(null)
-  const [remotePath, setRemotePath]   = useState('/tmp/')
+  const [remotePath, setRemotePath]   = useState('')
   const [fileMode, setFileMode]       = useState('0644')
   const [targetMode, setTargetMode]   = useState('devices')
   const [groupId, setGroupId]         = useState('')
@@ -181,10 +181,19 @@ export default function FilePushPage() {
 
   const handlePush = async () => {
     if (!canSubmit) return
+
+    // BUG FIX: Validate remotePath has a filename component — a trailing slash
+    // means the remote side gets a directory path as the file target which fails.
+    const trimmedPath = remotePath.trim()
+    if (trimmedPath.endsWith('/')) {
+      toast.error('Remote path must include a filename, not just a directory (e.g. /tmp/myfile.sh)')
+      return
+    }
+
     setPushing(true); setResult(null)
     const form = new FormData()
     form.append('file', file)
-    form.append('remotePath', remotePath.trim())
+    form.append('remotePath', trimmedPath)
     form.append('actionPin', pin)
     form.append('fileMode', fileMode)
     if (targetMode === 'group') form.append('groupId', groupId)
@@ -195,6 +204,8 @@ export default function FilePushPage() {
         timeout: 120000,
       })
       setResult(data)
+      // BUG FIX: Clear PIN after push so it doesn't persist into the next push attempt
+      setPin('')
       toast.success(`Push complete — ${data.pushed} succeeded, ${data.failed} failed`)
     } catch (err) {
       toast.error(err.response?.data?.error || 'File push failed')

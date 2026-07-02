@@ -18,11 +18,11 @@
 const net     = require('net');
 const { query, execute, queryOne } = require('../db');
 
-const POLL_INTERVAL_MS = 20 * 500;  // base tick
+const POLL_INTERVAL_MS = 5 * 1000;   // poll every 5 seconds (was 20s — too slow)
 const TCP_TIMEOUT_MS   = 2000;
 const MAX_CONCURRENT   = 50;          // max simultaneous open sockets
-const AGENT_GRACE_SEC  = 45;          // trust agent heartbeat for this long
-const NON_AGENT_POLL_S = 60;          // TCP-probe non-agent devices at most this often
+const AGENT_GRACE_SEC  = 15;          // 3 missed 5s heartbeats = dead (was 45 — way too lenient)
+const NON_AGENT_POLL_S = 10;          // TCP-probe non-agent devices every 10s (was 60 — too stale)
 
 // Track last TCP probe time per device (in-memory, reset on restart)
 const lastProbed = new Map();
@@ -232,4 +232,3 @@ function stop() {
 }
 
 module.exports = { start, stop, pollAll, pollDevice, flushToDB };
-

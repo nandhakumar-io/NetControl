@@ -121,7 +121,33 @@ router.get('/stream', (req, res) => {
 });
 
 // ── POST /api/metrics/register ─────────────────────────────────────────────────
+// SECURITY FIX: This endpoint used to be reachable by anyone (rate-limited
+// only). Since matching is done on ip+hostname (or mac), an attacker who
+// knew — or guessed/scanned — an existing device's ip/hostname could POST
+// here and receive a brand-new agent api_key for that device, silently
+// overwriting agent_key_hash. That's a device-identity takeover: the
+// attacker becomes the trusted metrics source for that device and can push
+// fake metrics or trigger false alerts. Agent self-registration now requires
+// a shared secret (AGENT_REGISTRATION_SECRET in .env) sent via the
+// x-registration-secret header, same pattern used for provisioning agents.
+function timingSafeEqualStr(a, b) {
+  const bufA = Buffer.from(String(a || ''));
+  const bufB = Buffer.from(String(b || ''));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 router.post('/register', registerLimiter, async (req, res) => {
+  const regSecret = process.env.AGENT_REGISTRATION_SECRET;
+  if (!regSecret) {
+    console.error('[metrics/register] AGENT_REGISTRATION_SECRET is not set — refusing all registrations');
+    return res.status(500).json({ error: 'Agent registration is not configured on the server' });
+  }
+  const provided = req.headers['x-registration-secret'];
+  if (!provided || !timingSafeEqualStr(provided, regSecret)) {
+    return res.status(401).json({ error: 'Invalid or missing registration secret' });
+  }
+
   const { hostname, ip, mac, os_type, os_version, arch } = req.body;
   if (!hostname || !ip) return res.status(400).json({ error: 'hostname and ip are required' });
 

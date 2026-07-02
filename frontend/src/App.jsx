@@ -18,6 +18,7 @@ import UsersPage       from './pages/UsersPage'
 import MonitoringPage  from './pages/MonitoringPage'
 import SecurityPage    from './pages/SecurityPage'
 import AlertsPage      from './pages/AlertsPage'
+import DiscoveryPage   from './pages/DiscoveryPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,7 @@ export default function App() {
           <Route path="audit"         element={<AuditPage />} />
           <Route path="monitoring"     element={<MonitoringPage />} />
           <Route path="alerts"          element={<AlertsPage />} />
+          <Route path="discovery"       element={<DiscoveryPage />} />
 
           {/* Admin-only routes */}
           <Route

@@ -5,6 +5,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
 async function setup() {
   const conn = await mysql.createConnection({
@@ -113,16 +114,31 @@ async function setup() {
 
   console.log('✅ Schema created.');
 
+  // Ensure must_change_password exists even for databases created before
+  // this fix (base schema in migrate.js also has it now, for fresh installs).
+  const [cols] = await conn.query("SHOW COLUMNS FROM users LIKE 'must_change_password'");
+  if (cols.length === 0) {
+    await conn.query('ALTER TABLE users ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0');
+  }
+
   // Seed default admin if no users exist
+  // SECURITY FIX: the old hardcoded "admin123" password is a well-known
+  // default that would let anyone who can reach the login page take over
+  // the instance before the operator ever logs in. We now generate a
+  // strong random one-time password, print it once, and require it be
+  // changed on first login (must_change_password).
   const [rows] = await conn.query('SELECT COUNT(*) as c FROM users');
   if (rows[0].c === 0) {
-    const hash = await bcrypt.hash('admin123', 12);
+    const tempPassword = crypto.randomBytes(18).toString('base64url'); // ~24 chars, high entropy
+    const hash = await bcrypt.hash(tempPassword, 12);
     await conn.query(
-      'INSERT INTO users (id, username, password, role) VALUES (?, ?, ?, ?)',
+      'INSERT INTO users (id, username, password, role, must_change_password) VALUES (?, ?, ?, ?, 1)',
       [uuidv4(), 'admin', hash, 'admin']
     );
-    console.log('✅ Default admin created: username=admin  password=admin123');
-    console.log('⚠  CHANGE THE DEFAULT PASSWORD IMMEDIATELY after first login!');
+    console.log('✅ Default admin created: username=admin');
+    console.log(`✅ Temporary password: ${tempPassword}`);
+    console.log('⚠  This password is shown only once. Log in and change it immediately.');
+    console.log('⚠  (must_change_password is set — enforce this in the login/auth flow.)');
   }
 
   await conn.end();

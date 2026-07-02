@@ -116,6 +116,7 @@ app.use('/api/users',     require('./routes/users'));
 app.use('/api/security',   require('./routes/security'));
 app.use('/api/metrics',   require('./routes/metrics'));
 app.use('/api/alerts',    require('./routes/alerts').router);
+app.use('/api/discovery', require('./routes/discovery'));
 
 // SECURITY FIX: Health endpoint no longer exposes PID, memory, or uptime
 // to unauthenticated callers — those are recon aids for an attacker.

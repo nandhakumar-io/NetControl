@@ -111,7 +111,11 @@ router.post('/login', authLimiter, async (req, res) => {
     await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success' });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip}` }).catch(() => {});
 
-    res.json({ accessToken, user: { id: user.id, username: user.username, role: user.role } });
+    res.json({
+      accessToken,
+      user: { id: user.id, username: user.username, role: user.role },
+      mustChangePassword: !!user.must_change_password,
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Internal server error' });
