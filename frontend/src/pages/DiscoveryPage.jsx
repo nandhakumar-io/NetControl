@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Radar, Plus, X, Loader2, RefreshCw, Play, Square, Trash2,
   ChevronDown, ChevronRight, Download,
-  CheckCircle2, XCircle, Waypoints, Lock, AlertTriangle,
+  CheckCircle2, XCircle, Lock, AlertTriangle,
+  Server, Eye, EyeOff, Layers, Key, User, Monitor, Network,
+  Info, Tag,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -12,16 +14,16 @@ import { usePermissions } from '../hooks/usePermissions'
 import { useThemeStore } from '../store/themeStore'
 
 const METHODS = [
-  { key: 'ping',     label: 'ICMP Ping Sweep',    desc: 'Find live hosts across the range' },
-  { key: 'snmp',     label: 'SNMP Discovery',     desc: 'sysDescr / sysName via community string' },
+  { key: 'ping',     label: 'ICMP Ping Sweep',      desc: 'Find live hosts across the range' },
+  { key: 'snmp',     label: 'SNMP Discovery',        desc: 'sysDescr / sysName via community string' },
   { key: 'lldp_cdp', label: 'LLDP / CDP Neighbors', desc: 'Switch/router neighbor tables (needs SNMP)' },
-  { key: 'nmap',     label: 'Nmap Port Scan',     desc: 'Open ports, service + OS fingerprinting' },
+  { key: 'nmap',     label: 'Nmap Port Scan',        desc: 'Open ports, service + OS fingerprinting' },
 ]
 
 const STATUS_CFG = {
-  queued:    { color: '#94a3b8', icon: Loader2,      label: 'Queued' },
-  running:   { color: '#38bdf8', icon: Loader2,      label: 'Running' },
-  completed: { color: '#34d399', icon: CheckCircle2, label: 'Completed' },
+  queued:    { color: '#94a3b8', icon: Loader2,       label: 'Queued' },
+  running:   { color: '#38bdf8', icon: Loader2,       label: 'Running' },
+  completed: { color: '#34d399', icon: CheckCircle2,  label: 'Completed' },
   cancelled: { color: '#fbbf24', icon: Square,        label: 'Cancelled' },
   failed:    { color: '#f87171', icon: XCircle,       label: 'Failed' },
 }
@@ -38,18 +40,50 @@ function StatusPill({ status }) {
   )
 }
 
+// ── Determine os_type from an nmap/SNMP OS guess string ─────────────────────
+function osGuessToType(osGuess) {
+  if (!osGuess) return 'linux'
+  const s = osGuess.toLowerCase()
+  if (s.includes('windows') || s.includes('microsoft')) return 'windows'
+  return 'linux'
+}
+
+// ── OS type badge (matches DeviceModal style) ─────────────────────────────────
+function OsBadge({ type }) {
+  const isWin = type === 'windows'
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold shrink-0 ${
+      isWin ? 'bg-sky-400/10 text-sky-400' : 'bg-emerald-400/10 text-emerald-400'
+    }`}>
+      {isWin ? 'WIN' : 'LNX'}
+    </span>
+  )
+}
+
+// ── Field wrapper with label (mirrors DeviceModal's <F> component) ────────────
+function Field({ label, children, hint }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <label className="text-[10px] font-body font-semibold uppercase tracking-wider"
+        style={{ color: 'var(--text-muted)' }}>{label}</label>
+      {children}
+      {hint && <p className="text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>{hint}</p>}
+    </div>
+  )
+}
+
 // ── New scan form modal ───────────────────────────────────────────────────────
 function NewScanModal({ open, onClose, onCreated }) {
-  const [name, setName]           = useState('')
-  const [cidr, setCidr]           = useState('')
-  const [methods, setMethods]     = useState(['ping'])
+  const [name, setName]               = useState('')
+  const [cidr, setCidr]               = useState('')
+  const [methods, setMethods]         = useState(['ping'])
   const [communities, setCommunities] = useState('public')
   const [nmapTopPorts, setNmapTopPorts] = useState(100)
-  const [nmapPorts, setNmapPorts] = useState('')
+  const [nmapPorts, setNmapPorts]     = useState('')
   const [osDetection, setOsDetection] = useState(false)
   const [serviceDetection, setServiceDetection] = useState(true)
   const [pinModalOpen, setPinModalOpen] = useState(false)
-  const [errors, setErrors] = useState({})
+  const [errors, setErrors]           = useState({})
 
   useEffect(() => {
     if (open) {
@@ -74,12 +108,7 @@ function NewScanModal({ open, onClose, onCreated }) {
   const openConfirm = () => { if (validateForm()) setPinModalOpen(true) }
 
   const submit = async (pin) => {
-    const payload = {
-      name: name.trim(),
-      cidr: cidr.trim(),
-      methods,
-      actionPin: pin,
-    }
+    const payload = { name: name.trim(), cidr: cidr.trim(), methods, actionPin: pin }
     if (methods.includes('snmp')) {
       payload.snmpCommunities = communities.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5)
     }
@@ -211,33 +240,308 @@ function NewScanModal({ open, onClose, onCreated }) {
 
 // ── Result row ────────────────────────────────────────────────────────────────
 function ResultRow({ r, selected, onToggle }) {
-  const ports = r.open_ports || []
-  const neighbors = r.neighbors || []
+  const ports  = r.open_ports || []
+  const osType = osGuessToType(r.os_guess)
   return (
-    <div className="grid items-center gap-3 px-4 py-3 text-xs font-body transition-colors"
-      style={{ gridTemplateColumns: '24px 130px 150px 150px 90px 1fr 1fr', borderBottom: '1px solid var(--border-subtle)' }}>
+    <div className="grid items-center gap-2 px-4 py-2.5 text-xs font-body transition-colors hover:bg-white/[0.02]"
+      style={{ gridTemplateColumns: '24px 36px 130px 150px 150px 1fr', borderBottom: '1px solid var(--border-subtle)' }}>
       <input type="checkbox" checked={selected} disabled={r.imported} onChange={() => onToggle(r.id)} />
+      <OsBadge type={osType} />
       <span className="font-mono" style={{ color: 'var(--text-primary)' }}>{r.ip_address}</span>
       <span className="font-mono text-[11px]" style={{ color: 'var(--text-muted)' }}>{r.mac_address || '—'}</span>
       <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{r.vendor || '—'}</span>
-      <span style={{ color: 'var(--text-secondary)' }}>{r.os_guess || '—'}</span>
       <span className="truncate" style={{ color: 'var(--text-muted)' }}>
-        {ports.length ? ports.map(p => `${p.port}/${p.proto}${p.service ? ` (${p.service})` : ''}`).join(', ') : '—'}
-      </span>
-      <span className="truncate flex items-center gap-1" style={{ color: 'var(--text-muted)' }}>
-        {neighbors.length > 0 && <Waypoints size={11} style={{ color: '#818cf8' }} />}
-        {neighbors.length ? neighbors.map(n => `${n.protocol.toUpperCase()}:${n.name}`).join(', ') : (r.imported ? 'Imported ✓' : '—')}
+        {ports.length ? ports.map(p => `${p.port}/${p.proto}${p.service ? ` (${p.service})` : ''}`).join(', ') : (r.imported ? '✓ Imported' : '—')}
       </span>
     </div>
   )
 }
 
-// ── Scan card ─────────────────────────────────────────────────────────────────
+// ── Import config modal ───────────────────────────────────────────────────────
+function ImportModal({ open, onClose, onDone, scanId, results }) {
+  const [groups,  setGroups]  = useState([])
+  const [specs,   setSpecs]   = useState([])
+  const [saving,  setSaving]  = useState(false)
+  const [showPw,  setShowPw]  = useState({})
+
+  useEffect(() => {
+    if (!open) return
+    api.get('/groups').then(r => setGroups(r.data)).catch(() => {})
+    setSpecs(results.map(r => ({
+      resultId:       r.id,
+      ip:             r.ip_address,
+      mac:            r.mac_address,
+      hostname:       r.hostname,
+      osGuess:        r.os_guess,
+      name:           r.hostname && r.hostname !== r.ip_address ? r.hostname : r.ip_address,
+      // BUG FIX: Use osGuessToType() so "Microsoft Windows Server 2022" → 'windows'
+      // Previously only checked /windows/i directly which is fine, but centralising
+      // the logic means future changes only need to happen in one place.
+      os_type:        osGuessToType(r.os_guess),
+      group_id:       '',
+      ssh_username:   '',
+      ssh_password:   '',
+      winrm_username: '',
+      winrm_password: '',
+    })))
+  }, [open, results])
+
+  const setField = (resultId, field, value) =>
+    setSpecs(prev => prev.map(s => s.resultId === resultId ? { ...s, [field]: value } : s))
+
+  const applyAll = (field, value) =>
+    setSpecs(prev => prev.map(s => ({ ...s, [field]: value })))
+
+  const handleSubmit = async () => {
+    const invalid = specs.find(s => !s.name.trim())
+    if (invalid) { toast.error(`Device at ${invalid.ip} needs a name`); return }
+    setSaving(true)
+    try {
+      const payload = specs.map(s => ({
+        resultId:       s.resultId,
+        name:           s.name.trim(),
+        os_type:        s.os_type,
+        group_id:       s.group_id || null,
+        ssh_username:   s.ssh_username   || null,
+        ssh_password:   s.ssh_password   || null,
+        winrm_username: s.winrm_username || null,
+        winrm_password: s.winrm_password || null,
+      }))
+      const { data } = await api.post(`/discovery/scans/${scanId}/import`, { devices: payload })
+      toast.success(`Imported ${data.imported.length} device${data.imported.length !== 1 ? 's' : ''}` +
+        (data.skipped.length ? `, ${data.skipped.length} skipped` : ''))
+      onDone()
+      onClose()
+    } catch (e) { toast.error(e.response?.data?.error || 'Import failed') }
+    finally { setSaving(false) }
+  }
+
+  if (!open) return null
+
+  const inp = 'input-field text-xs py-1.5'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/65 backdrop-blur-md" />
+      <div className="relative z-10 w-full max-w-6xl animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="glass rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(255,255,255,0.1)', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
+          {/* Accent bar */}
+          <div style={{ height: 2, background: 'linear-gradient(90deg,#38bdf8,#818cf8,#34d399)' }} />
+
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 shrink-0" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center"
+                style={{ background: 'rgba(56,189,248,0.12)', border: '1px solid rgba(56,189,248,0.25)' }}>
+                <Download size={16} className="text-sky-400" />
+              </div>
+              <div>
+                <h3 className="font-display text-base" style={{ color: 'var(--text-primary)' }}>Import Devices</h3>
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  Review and configure {specs.length} device{specs.length !== 1 ? 's' : ''} before adding to inventory
+                </p>
+              </div>
+            </div>
+            <button onClick={onClose} className="icon-btn p-1.5"><X size={15} /></button>
+          </div>
+
+          {/* Bulk-apply toolbar */}
+          <div className="px-6 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 shrink-0"
+            style={{ borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-surface-3)' }}>
+            <span className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>Apply to all:</span>
+
+            <div className="flex items-center gap-2">
+              <Layers size={12} style={{ color: 'var(--text-muted)' }} />
+              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Group</span>
+              <select className="input-field text-xs py-1 w-36"
+                onChange={e => applyAll('group_id', e.target.value)}>
+                <option value="">No group</option>
+                {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Monitor size={12} style={{ color: 'var(--text-muted)' }} />
+              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>OS Type</span>
+              <select className="input-field text-xs py-1 w-28"
+                onChange={e => applyAll('os_type', e.target.value)}>
+                <option value="linux">Linux</option>
+                <option value="windows">Windows</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <User size={12} style={{ color: 'var(--text-muted)' }} />
+              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>SSH user</span>
+              <input className="input-field text-xs py-1 w-28" placeholder="e.g. ubuntu"
+                onChange={e => applyAll('ssh_username', e.target.value)} />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Key size={12} style={{ color: 'var(--text-muted)' }} />
+              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>SSH pass</span>
+              <input type="password" className="input-field text-xs py-1 w-28" placeholder="••••••"
+                onChange={e => applyAll('ssh_password', e.target.value)} />
+            </div>
+          </div>
+
+          {/* Column headers — match row grid exactly */}
+          <div className="grid px-4 py-2.5 shrink-0 sticky top-0 z-10"
+            style={{
+              gridTemplateColumns: '120px 90px 90px 150px 1fr 1fr',
+              background: 'var(--bg-surface-2)',
+              borderBottom: '1px solid var(--border-subtle)',
+            }}>
+            {[
+              { icon: Tag,     label: 'Device Name *' },
+              { icon: Monitor, label: 'OS Type' },
+              { icon: Layers,  label: 'Group / Lab' },
+              { icon: Network, label: 'IP Address' },
+              { icon: User,    label: 'SSH Credentials' },
+              { icon: User,    label: 'WinRM Credentials' },
+            ].map((col, i) => (
+              <div key={i} className="flex items-center gap-1">
+                <col.icon size={10} style={{ color: 'var(--text-muted)' }} />
+                <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                  {col.label}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Device rows */}
+          <div className="overflow-y-auto flex-1 divide-y" style={{ '--divide-color': 'var(--border-subtle)' }}>
+            {specs.map((s, idx) => (
+              <div key={s.resultId}
+                className="grid px-4 py-3 items-start gap-3 transition-colors hover:bg-white/[0.015]"
+                style={{ gridTemplateColumns: '120px 90px 90px 150px 1fr 1fr' }}>
+
+                {/* ── Device Name ────────────────────────────────────── */}
+                <Field label="">
+                  <input className={`${inp} ${!s.name.trim() ? 'border-rose-500/50' : ''}`}
+                    value={s.name}
+                    onChange={e => setField(s.resultId, 'name', e.target.value)}
+                    placeholder="Device name" />
+                  {s.hostname && s.hostname !== s.ip && (
+                    <p className="text-[10px] mt-0.5 font-mono truncate" style={{ color: 'var(--text-faint)' }}
+                       title={s.hostname}>{s.hostname}</p>
+                  )}
+                </Field>
+
+                {/* ── OS Type ───────────────────────────────────────── */}
+                <Field label="">
+                  <select className={inp} value={s.os_type}
+                    onChange={e => setField(s.resultId, 'os_type', e.target.value)}>
+                    <option value="linux">Linux</option>
+                    <option value="windows">Windows</option>
+                  </select>
+                </Field>
+
+                {/* ── Group ─────────────────────────────────────────── */}
+                <Field label="">
+                  <select className={inp} value={s.group_id}
+                    onChange={e => setField(s.resultId, 'group_id', e.target.value)}>
+                    <option value="">No group</option>
+                    {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                </Field>
+
+                {/* ── IP (read-only info) ───────────────────────────── */}
+                <div className="flex flex-col gap-1 pt-1">
+                  <span className="text-xs font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>{s.ip}</span>
+                  {s.mac && (
+                    <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>{s.mac}</span>
+                  )}
+                </div>
+
+                {/* ── SSH Credentials ───────────────────────────────── */}
+                <div className="flex flex-col gap-1.5">
+                  <Field label="Username">
+                    <div className="relative">
+                      <User size={10} className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: 'var(--text-faint)' }} />
+                      <input className={`${inp} pl-5`} placeholder="e.g. ubuntu"
+                        value={s.ssh_username}
+                        onChange={e => setField(s.resultId, 'ssh_username', e.target.value)} />
+                    </div>
+                  </Field>
+                  <Field label="Password">
+                    <div className="relative">
+                      <Key size={10} className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: 'var(--text-faint)' }} />
+                      <input className={`${inp} pl-5 pr-6`}
+                        type={showPw[s.resultId + '_ssh'] ? 'text' : 'password'}
+                        placeholder="SSH password"
+                        value={s.ssh_password}
+                        onChange={e => setField(s.resultId, 'ssh_password', e.target.value)} />
+                      <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2"
+                        style={{ color: 'var(--text-faint)' }}
+                        onClick={() => setShowPw(p => ({ ...p, [s.resultId + '_ssh']: !p[s.resultId + '_ssh'] }))}>
+                        {showPw[s.resultId + '_ssh'] ? <EyeOff size={10} /> : <Eye size={10} />}
+                      </button>
+                    </div>
+                  </Field>
+                </div>
+
+                {/* ── WinRM Credentials ─────────────────────────────── */}
+                <div className="flex flex-col gap-1.5">
+                  <Field label="Username">
+                    <div className="relative">
+                      <User size={10} className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: 'var(--text-faint)' }} />
+                      <input className={`${inp} pl-5`} placeholder="e.g. Administrator"
+                        value={s.winrm_username}
+                        onChange={e => setField(s.resultId, 'winrm_username', e.target.value)} />
+                    </div>
+                  </Field>
+                  <Field label="Password">
+                    <div className="relative">
+                      <Key size={10} className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: 'var(--text-faint)' }} />
+                      <input className={`${inp} pl-5 pr-6`}
+                        type={showPw[s.resultId + '_winrm'] ? 'text' : 'password'}
+                        placeholder="WinRM password"
+                        value={s.winrm_password}
+                        onChange={e => setField(s.resultId, 'winrm_password', e.target.value)} />
+                      <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2"
+                        style={{ color: 'var(--text-faint)' }}
+                        onClick={() => setShowPw(p => ({ ...p, [s.resultId + '_winrm']: !p[s.resultId + '_winrm'] }))}>
+                        {showPw[s.resultId + '_winrm'] ? <EyeOff size={10} /> : <Eye size={10} />}
+                      </button>
+                    </div>
+                  </Field>
+                </div>
+
+              </div>
+            ))}
+          </div>
+
+          {/* Security note */}
+          <div className="px-6 py-2.5 shrink-0 flex items-center gap-2"
+            style={{ borderTop: '1px solid var(--border-subtle)', background: 'rgba(99,102,241,0.05)' }}>
+            <Info size={11} style={{ color: '#818cf8' }} />
+            <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>
+              Credentials are AES-256 encrypted at rest and never exposed back to the browser.
+            </p>
+          </div>
+
+          {/* Footer */}
+          <div className="flex gap-3 px-6 py-4 shrink-0" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+            <button onClick={onClose} className="btn-ghost flex-1 justify-center">Cancel</button>
+            <button onClick={handleSubmit} disabled={saving || specs.length === 0} className="btn-primary flex-1 justify-center">
+              {saving
+                ? <><Loader2 size={14} className="animate-spin" /> Importing…</>
+                : <><Download size={14} /> Import {specs.length} Device{specs.length !== 1 ? 's' : ''}</>}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ScanCard({ scan, expanded, onToggleExpand, onCancel, onDelete, onImported, canManageDevices }) {
-  const [results, setResults] = useState([])
+  const [results,       setResults]       = useState([])
   const [loadingResults, setLoadingResults] = useState(false)
-  const [selected, setSelected] = useState(new Set())
-  const [importing, setImporting] = useState(false)
+  const [selected,      setSelected]      = useState(new Set())
+  const [importModalOpen, setImportModalOpen] = useState(false)
+  const [importTargets, setImportTargets] = useState([])
 
   const loadResults = useCallback(async () => {
     setLoadingResults(true)
@@ -261,20 +565,12 @@ function ScanCard({ scan, expanded, onToggleExpand, onCancel, onDelete, onImport
     return next
   })
 
-  const selectAll = () => setSelected(new Set(results.filter(r => !r.imported && r.mac_address).map(r => r.id)))
+  const selectAll = () => setSelected(new Set(results.filter(r => !r.imported).map(r => r.id)))
 
-  const doImport = async () => {
+  const openImportModal = () => {
     if (selected.size === 0) return
-    setImporting(true)
-    try {
-      const { data } = await api.post(`/discovery/scans/${scan.id}/import`, { resultIds: [...selected] })
-      toast.success(`Imported ${data.imported.length} device${data.imported.length !== 1 ? 's' : ''}` +
-        (data.skipped.length ? `, skipped ${data.skipped.length}` : ''))
-      setSelected(new Set())
-      loadResults()
-      onImported()
-    } catch (e) { toast.error(e.response?.data?.error || 'Import failed') }
-    finally { setImporting(false) }
+    setImportTargets(results.filter(r => selected.has(r.id)))
+    setImportModalOpen(true)
   }
 
   const pct = scan.total_hosts > 0 ? Math.min(100, Math.round((scan.scanned_hosts / scan.total_hosts) * 100)) : 0
@@ -315,6 +611,14 @@ function ScanCard({ scan, expanded, onToggleExpand, onCancel, onDelete, onImport
         </div>
       </div>
 
+      <ImportModal
+        open={importModalOpen}
+        onClose={() => setImportModalOpen(false)}
+        onDone={() => { setSelected(new Set()); loadResults(); onImported() }}
+        scanId={scan.id}
+        results={importTargets}
+      />
+
       {expanded && (
         <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
           {scan.error && (
@@ -323,22 +627,29 @@ function ScanCard({ scan, expanded, onToggleExpand, onCancel, onDelete, onImport
             </div>
           )}
           <div className="flex items-center justify-between px-5 py-3" style={{ background: 'var(--bg-input)' }}>
-            <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>{results.length} host{results.length !== 1 ? 's' : ''} discovered</p>
+            <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>
+              {results.length} host{results.length !== 1 ? 's' : ''} discovered
+            </p>
             {canManageDevices && (
               <div className="flex items-center gap-2">
-                <button onClick={selectAll} className="text-[11px] font-body hover:underline" style={{ color: '#38bdf8' }}>Select all importable</button>
-                <button onClick={doImport} disabled={selected.size === 0 || importing}
+                <button onClick={selectAll} className="text-[11px] font-body hover:underline" style={{ color: '#38bdf8' }}>
+                  Select all
+                </button>
+                <button onClick={openImportModal} disabled={selected.size === 0}
                   className="btn-primary text-xs px-3 py-1.5 disabled:opacity-40">
-                  {importing ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                  Import {selected.size > 0 ? `(${selected.size})` : ''}
+                  <Download size={12} />
+                  Configure & Import {selected.size > 0 ? `(${selected.size})` : ''}
                 </button>
               </div>
             )}
           </div>
-          <div className="grid gap-3 px-4 py-2 text-[10px] font-body font-bold uppercase tracking-wider"
-            style={{ gridTemplateColumns: '24px 130px 150px 150px 90px 1fr 1fr', background: 'var(--bg-input)', color: 'var(--text-muted)' }}>
-            <span /><span>IP</span><span>MAC</span><span>Vendor</span><span>OS Guess</span><span>Open Ports</span><span>Neighbors</span>
+
+          {/* Results table header */}
+          <div className="grid gap-2 px-4 py-2 text-[10px] font-body font-bold uppercase tracking-wider"
+            style={{ gridTemplateColumns: '24px 36px 130px 150px 150px 1fr', background: 'var(--bg-input)', color: 'var(--text-muted)' }}>
+            <span /><span>OS</span><span>IP</span><span>MAC</span><span>Vendor</span><span>Open Ports</span>
           </div>
+
           {loadingResults ? (
             <div className="py-10 flex justify-center"><Loader2 size={16} className="animate-spin" style={{ color: 'var(--text-muted)' }} /></div>
           ) : results.length === 0 ? (
@@ -356,15 +667,15 @@ function ScanCard({ scan, expanded, onToggleExpand, onCancel, onDelete, onImport
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function DiscoveryPage() {
-  const [scans, setScans] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [scans,       setScans]       = useState([])
+  const [loading,     setLoading]     = useState(true)
   const [newScanOpen, setNewScanOpen] = useState(false)
-  const [expandedId, setExpandedId] = useState(null)
+  const [expandedId,  setExpandedId]  = useState(null)
   const [cancelTarget, setCancelTarget] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
 
   const { can } = usePermissions()
-  const canDiscover = can(1024)
+  const canDiscover      = can(1024)
   const canManageDevices = can(2)
 
   const load = useCallback(async () => {
@@ -377,7 +688,6 @@ export default function DiscoveryPage() {
 
   useEffect(() => { load() }, [load])
 
-  // Poll while any scan is active
   useEffect(() => {
     const hasActive = scans.some(s => s.status === 'running' || s.status === 'queued')
     if (!hasActive) return

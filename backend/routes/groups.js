@@ -102,6 +102,25 @@ router.put('/:id',
   }
 );
 
+// DELETE /api/groups — delete ALL groups (devices become unassigned, not deleted)
+router.delete('/', requireManageGroups, async (req, res) => {
+  try {
+    const { c: count } = await queryOne('SELECT COUNT(*) as c FROM `groups`');
+    if (!count) return res.json({ message: 'No groups to delete', deleted: 0 });
+
+    await execute('DELETE FROM `groups`');
+
+    await audit.log({
+      userId: req.user.id, username: req.user.username,
+      action: 'delete_all_groups', targetType: 'group', targetId: null,
+      targetName: `${count} group(s)`, ipSource: req.realIp, result: 'success',
+      details: `Deleted all ${count} group(s); devices unassigned`,
+    });
+
+    res.json({ message: `${count} group(s) deleted`, deleted: count });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // DELETE /api/groups/:id
 router.delete('/:id', requireManageGroups, param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });

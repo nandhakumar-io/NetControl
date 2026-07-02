@@ -118,6 +118,15 @@ app.use('/api/metrics',   require('./routes/metrics'));
 app.use('/api/alerts',    require('./routes/alerts').router);
 app.use('/api/discovery', require('./routes/discovery'));
 
+// BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
+// by the terminal page (/api/terminal/open/:id, the SSE output stream, and
+// the agent polling endpoints) but was never mounted here. Only the direct
+// WebSocket SSH proxy (attachSSHProxy, below) was attached. That meant any
+// time the WebSocket SSH path failed and the frontend fell back to the HTTP
+// relay, every relay call hit the catch-all 404 handler below — exactly the
+// "Relay failed: Not found" / "status code 404" error shown in the UI.
+app.use('/api/terminal',  require('./services/webTerminal').router);
+
 // SECURITY FIX: Health endpoint no longer exposes PID, memory, or uptime
 // to unauthenticated callers — those are recon aids for an attacker.
 // Full diagnostics are available to admins only via /api/health/full.

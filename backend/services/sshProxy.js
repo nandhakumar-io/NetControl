@@ -114,6 +114,37 @@ function sshConnect(device, cols, rows) {
       readyTimeout:       15000,
       keepaliveInterval:  10000,
       keepaliveCountMax:  3,
+      // BUG FIX: Accept all host keys — ssh2 rejects connections when the
+      // host key is unknown (no known_hosts in this process), silently
+      // failing with the same error you see as a "yes/no" prompt in a
+      // terminal. hostVerifier: () => true disables that check.
+      hostVerifier: () => true,
+      algorithms: {
+        kex: [
+          'ecdh-sha2-nistp256',
+          'ecdh-sha2-nistp384',
+          'ecdh-sha2-nistp521',
+          'diffie-hellman-group14-sha256',
+          'diffie-hellman-group-exchange-sha256',
+          'diffie-hellman-group14-sha1',
+        ],
+        serverHostKey: [
+          'ssh-ed25519',
+          'ecdsa-sha2-nistp256',
+          'ecdsa-sha2-nistp384',
+          'ecdsa-sha2-nistp521',
+          'rsa-sha2-512',
+          'rsa-sha2-256',
+          'ssh-rsa',
+        ],
+        cipher: [
+          'aes128-gcm@openssh.com',
+          'aes256-gcm@openssh.com',
+          'aes128-ctr',
+          'aes192-ctr',
+          'aes256-ctr',
+        ],
+      },
     };
 
     if (_key) {
@@ -142,10 +173,17 @@ function sshConnect(device, cols, rows) {
 function attachSSHProxy(httpServer) {
   const wss = new WebSocketServer({
     server: httpServer,
-    // FIX: ws library path option only accepts a STRING — regex is silently
-    // coerced to '/^\/ws\/terminal\//' which never matches any real path,
-    // meaning ZERO WebSocket connections were ever accepted before this fix.
-    path: '/ws/terminal',
+    // BUG FIX: the `ws` library's `path` option does an EXACT string match
+    // against the request path — it has no prefix/wildcard support. Setting
+    // path: '/ws/terminal' here rejected every real connection, since actual
+    // clients connect to '/ws/terminal/<deviceId>' (never just '/ws/terminal').
+    // That rejection happens inside `ws` itself, before verifyClient below
+    // ever runs — so it fails as a raw HTTP 400 / abnormal WebSocket close
+    // (code 1006) with no application-level error message, which is exactly
+    // why the terminal appeared to fail instantly regardless of credentials.
+    // verifyClient() below already validates the '/ws/terminal/<id>' shape
+    // via deviceIdFromUrl() and rejects anything else with 400 — so no
+    // `path` option is needed here; verifyClient is the only gate required.
 
     // Auth gate — verifyClient rejects non-matching device paths + bad tokens
     verifyClient({ req }, done) {

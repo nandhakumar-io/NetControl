@@ -359,6 +359,25 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── DELETE /api/devices — delete ALL devices (admin only) ───────────────────
+router.delete('/', requireRole('admin'), async (req, res) => {
+  try {
+    const { c: count } = await queryOne('SELECT COUNT(*) as c FROM devices');
+    if (!count) return res.json({ message: 'No devices to delete', deleted: 0 });
+
+    await execute('DELETE FROM devices');
+
+    await audit.log({
+      userId: req.user.id, username: req.user.username,
+      action: 'delete_all_devices', targetType: 'device', targetId: null,
+      targetName: `${count} device(s)`, ipSource: req.realIp, result: 'success',
+      details: `Deleted all ${count} device(s)`,
+    });
+
+    res.json({ message: `${count} device(s) deleted`, deleted: count });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── DELETE /api/devices/:id ──────────────────────────────────────────────────
 router.delete('/:id', requireRole('admin'), param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
@@ -408,4 +427,3 @@ router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
 });
 
 module.exports = router;
-

@@ -2,13 +2,14 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Layers, Plus, Pencil, Trash2, Monitor, Zap, Power,
   RotateCcw, X, Loader2, ChevronDown, ChevronRight,
-  Server, RefreshCw, Search, Users, Wifi, WifiOff
+  Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import { useThemeStore } from '../store/themeStore'
+import { usePermissions } from '../hooks/usePermissions'
 
 // ── Group form modal ──────────────────────────────────────────────────────────
 function GroupFormModal({ open, onClose, onSaved, group }) {
@@ -252,7 +253,9 @@ export default function GroupsPage() {
   const [groupModal,    setGroupModal]    = useState(null)
   const [deleteTarget,  setDeleteTarget]  = useState(null)
   const [actionModal,   setActionModal]   = useState(null)
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false)
   const isLight = useThemeStore(s => s.theme === 'light')
+  const { isAdmin } = usePermissions()
 
   const fetchAll = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -274,6 +277,18 @@ export default function GroupsPage() {
       setDeleteTarget(null)
       fetchAll(true)
     } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
+  }
+
+  const handleDeleteAll = async () => {
+    try {
+      const { data } = await api.delete('/groups')
+      toast.success(data.message || 'All groups deleted')
+      setDeleteAllOpen(false)
+      fetchAll(true)
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Delete failed')
+      throw err
+    }
   }
 
   const executeAction = async (pin) => {
@@ -330,6 +345,15 @@ export default function GroupsPage() {
               onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
               <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
             </button>
+            {isAdmin && groups.length > 0 && (
+              <button onClick={() => setDeleteAllOpen(true)} title="Delete all groups"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all"
+                style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', color: '#f87171' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(239,68,68,0.16)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'rgba(239,68,68,0.08)'}>
+                <AlertOctagon size={13} /> Delete All
+              </button>
+            )}
             <button onClick={() => setGroupModal('add')}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all"
               style={{ background: '#a855f7', color: '#fff' }}
@@ -463,6 +487,15 @@ export default function GroupsPage() {
         onConfirm={handleDelete}
         title={`Delete "${deleteTarget?.name}"`}
         description="Devices will become unassigned. This cannot be undone."
+        danger
+      />
+
+      <ActionConfirmModal
+        open={deleteAllOpen}
+        onClose={() => setDeleteAllOpen(false)}
+        onConfirm={handleDeleteAll}
+        title={`Delete all ${groups.length} group(s)`}
+        description="All groups will be removed. Devices in them will become unassigned, not deleted. This cannot be undone."
         danger
       />
     </div>

@@ -168,44 +168,91 @@ router.delete('/scans/:id', requirePermission(DISCOVER_NETWORK), param('id').isU
 });
 
 // ── POST /api/discovery/scans/:id/import — add discovered hosts as devices ───
+// Body shape:
+//   devices: [
+//     {
+//       resultId:       UUID,           // discovery_results.id
+//       name:           string,         // chosen display name
+//       group_id:       UUID|null,
+//       os_type:        'linux'|'windows',
+//       ssh_username:   string|null,    // stored encrypted
+//       ssh_password:   string|null,    // stored encrypted
+//       winrm_username: string|null,
+//       winrm_password: string|null,
+//     }, ...
+//   ]
 router.post('/scans/:id/import',
   requirePermission(DISCOVER_NETWORK), requirePermission(MANAGE_DEVICES),
   param('id').isUUID(),
-  body('resultIds').isArray({ min: 1, max: 500 }),
-  body('resultIds.*').isUUID(),
-  body('group_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)),
-  body('os_type').optional().isIn(['windows', 'linux']),
+  body('devices').isArray({ min: 1, max: 500 }),
+  body('devices.*.resultId').isUUID(),
+  body('devices.*.name').trim().notEmpty().isLength({ max: 100 }),
+  body('devices.*.os_type').isIn(['windows', 'linux']),
+  body('devices.*.group_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)),
+  body('devices.*.ssh_username').optional({ nullable: true }).isString().isLength({ max: 100 }),
+  body('devices.*.ssh_password').optional({ nullable: true }).isString().isLength({ max: 500 }),
+  body('devices.*.winrm_username').optional({ nullable: true }).isString().isLength({ max: 100 }),
+  body('devices.*.winrm_password').optional({ nullable: true }).isString().isLength({ max: 500 }),
   async (req, res) => {
     if (validate(req, res)) return;
-    const { resultIds, group_id, os_type } = req.body;
+    const { devices: deviceSpecs } = req.body;
+    const { encrypt } = require('../services/crypto');
 
     try {
+      const resultIds = deviceSpecs.map(d => d.resultId);
       const placeholders = resultIds.map(() => '?').join(',');
-      const results = await query(
-        `SELECT * FROM discovery_results WHERE scan_id = ? AND id IN (${placeholders}) AND imported = 0`,
+      const dbResults = await query(
+        `SELECT * FROM discovery_results WHERE scan_id = ? AND id IN (${placeholders})`,
         [req.params.id, ...resultIds]
       );
+      const resultMap = Object.fromEntries(dbResults.map(r => [r.id, r]));
 
       const imported = [];
-      const skipped = [];
+      const skipped  = [];
 
-      for (const r of results) {
-        if (!r.mac_address) { skipped.push({ ip: r.ip_address, reason: 'No MAC address discovered — required for device inventory' }); continue; }
+      for (const spec of deviceSpecs) {
+        const r = resultMap[spec.resultId];
+        if (!r) { skipped.push({ name: spec.name, reason: 'Result not found' }); continue; }
+        if (r.imported) { skipped.push({ name: spec.name, reason: 'Already imported' }); continue; }
 
-        const existing = await queryOne('SELECT id FROM devices WHERE mac_address = ?', [r.mac_address]);
-        if (existing) { skipped.push({ ip: r.ip_address, reason: 'A device with this MAC already exists' }); continue; }
+        // MAC is strongly preferred but not hard-required — some hosts (e.g. remote
+        // subnets) won't have one in the ARP table. Warn but allow import.
+        if (r.mac_address) {
+          const existing = await queryOne('SELECT id FROM devices WHERE mac_address = ?', [r.mac_address]);
+          if (existing) { skipped.push({ name: spec.name, ip: r.ip_address, reason: 'A device with this MAC already exists' }); continue; }
+        }
 
         const deviceId = uuidv4();
-        const now = Math.floor(Date.now() / 1000);
-        const guessedOs = os_type || (r.os_guess && /windows/i.test(r.os_guess) ? 'windows' : 'linux');
+        const now      = Math.floor(Date.now() / 1000);
+
+        // For Windows: mirror winrm creds into ssh fields too (used by SSH terminal fallback)
+        const sshUser   = spec.ssh_username   || (spec.os_type === 'windows' ? spec.winrm_username : null) || null;
+        const sshPass   = spec.ssh_password   || (spec.os_type === 'windows' ? spec.winrm_password : null) || null;
+        const winrmUser = spec.winrm_username || null;
+        const winrmPass = spec.winrm_password || null;
 
         await execute(
-          `INSERT INTO devices (id, name, ip_address, mac_address, os_type, group_id, status, last_seen, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?)`,
-          [deviceId, r.hostname || r.ip_address, r.ip_address, r.mac_address, guessedOs, group_id || null, 'unknown', now, now]
+          `INSERT INTO devices
+             (id, name, ip_address, mac_address, os_type, group_id,
+              ssh_username, ssh_password, winrm_username, winrm_password,
+              status, last_seen, created_at)
+           VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?)`,
+          [
+            deviceId,
+            spec.name.trim(),
+            r.ip_address,
+            r.mac_address || null,
+            spec.os_type,
+            spec.group_id || null,
+            sshUser,
+            sshPass   ? encrypt(sshPass)   : null,
+            winrmUser,
+            winrmPass ? encrypt(winrmPass) : null,
+            'unknown', now, now,
+          ]
         );
         await execute('UPDATE discovery_results SET imported = 1, device_id = ? WHERE id = ?', [deviceId, r.id]);
-        imported.push({ ip: r.ip_address, deviceId });
+        imported.push({ ip: r.ip_address, name: spec.name, deviceId });
       }
 
       await audit.log({

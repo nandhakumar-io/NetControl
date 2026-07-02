@@ -257,6 +257,11 @@ function guessOsFromSysDescr(sysDescr) {
   if (s.includes('routeros') || s.includes('mikrotik')) return 'MikroTik RouterOS';
   if (s.includes('freebsd')) return 'FreeBSD';
   if (s.includes('vxworks')) return 'VxWorks';
+  if (s.includes('openbsd')) return 'OpenBSD';
+  if (s.includes('netbsd')) return 'NetBSD';
+  if (s.includes('darwin') || s.includes('mac os')) return 'macOS';
+  if (s.includes('esxi') || s.includes('vmware')) return 'VMware ESXi';
+  if (s.includes('ubuntu') || s.includes('debian') || s.includes('centos') || s.includes('red hat')) return 'Linux';
   return null;
 }
 
@@ -275,56 +280,129 @@ function isNmapAvailable() {
 const fastXml = (() => { try { return require('fast-xml-parser'); } catch { return null; } })();
 
 /**
- * Scan a single host with nmap. `opts` is a small whitelist of booleans/ints
- * only — never raw flag strings from the client — so there is no way to
- * smuggle extra nmap flags through this feature.
+ * Parse nmap XML stdout into { ports, osGuess }.
+ * BUG FIX: nmaprun.host can be an array (multiple hosts in one run) or a
+ * single object. Always normalise to array and take the first entry so that
+ * future batch calls don't silently return empty results.
  */
-function nmapScanHost(ip, opts = {}) {
+function parseNmapXml(stdout) {
+  if (!stdout || !fastXml) return { ports: [], osGuess: null };
+  try {
+    const parser = new fastXml.XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+    const doc = parser.parse(stdout);
+    // BUG FIX: host can be an array when nmap scans multiple targets.
+    // Always normalise to get the first host entry.
+    const rawHost = doc?.nmaprun?.host;
+    const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
+    if (!host) return { ports: [], osGuess: null };
+
+    let portList = host.ports?.port || [];
+    if (!Array.isArray(portList)) portList = [portList];
+    const ports = portList
+      .filter(p => p.state?.['@_state'] === 'open')
+      .map(p => ({
+        port:    parseInt(p['@_portid'], 10),
+        proto:   p['@_protocol'],
+        service: p.service?.['@_name']    || null,
+        product: p.service?.['@_product'] || null,
+      }));
+
+    let osGuess = null;
+    // BUG FIX: osmatch can also be an array — always take the highest-accuracy
+    // match (nmap returns them sorted by accuracy descending).
+    const osMatches = host.os?.osmatch;
+    const first = Array.isArray(osMatches) ? osMatches[0] : osMatches;
+    if (first?.['@_name']) osGuess = first['@_name'];
+
+    return { ports, osGuess };
+  } catch {
+    return { ports: [], osGuess: null };
+  }
+}
+
+function runNmap(args) {
   return new Promise((resolve) => {
-    const args = ['-oX', '-', '--host-timeout', '20s'];
-
-    if (opts.topPorts && Number.isInteger(opts.topPorts) && opts.topPorts > 0) {
-      args.push('--top-ports', String(Math.min(opts.topPorts, NMAP_TOP_PORTS_MAX)));
-    } else if (opts.ports && /^[0-9,\-]{1,100}$/.test(opts.ports)) {
-      args.push('-p', opts.ports);
-    } else {
-      args.push('--top-ports', '100');
-    }
-
-    if (opts.serviceDetection) args.push('-sV');
-    if (opts.osDetection) args.push('-O');
-    args.push(ip);
-
     execFile('nmap', args, { timeout: NMAP_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      if (err || !stdout || !fastXml) return resolve({ ports: [], osGuess: null });
-      try {
-        const parser = new fastXml.XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-        const doc = parser.parse(stdout);
-        const host = doc?.nmaprun?.host;
-        if (!host) return resolve({ ports: [], osGuess: null });
-
-        let portList = host.ports?.port || [];
-        if (!Array.isArray(portList)) portList = [portList];
-        const ports = portList
-          .filter(p => p.state?.['@_state'] === 'open')
-          .map(p => ({
-            port: parseInt(p['@_portid'], 10),
-            proto: p['@_protocol'],
-            service: p.service?.['@_name'] || null,
-            product: p.service?.['@_product'] || null,
-          }));
-
-        let osGuess = null;
-        const osMatch = host.os?.osmatch;
-        const first = Array.isArray(osMatch) ? osMatch[0] : osMatch;
-        if (first?.['@_name']) osGuess = first['@_name'];
-
-        resolve({ ports, osGuess });
-      } catch {
-        resolve({ ports: [], osGuess: null });
-      }
+      resolve(err ? null : stdout);
     });
   });
+}
+
+/**
+ * Scan a single host with nmap.
+ *
+ * FIX: nmap -O (OS detection) requires a privileged SYN scan (-sS) which
+ * needs root. When combined with -sV (service scan) in a single unprivileged
+ * invocation, nmap silently falls back to -sT which is INCOMPATIBLE with -O,
+ * causing it to skip both service detection and OS detection, returning
+ * empty results.
+ *
+ * Solution: when BOTH osDetection and serviceDetection are requested, run
+ * two separate nmap processes and merge their results:
+ *   Pass 1 — service scan (-sV --top-ports N) — works without root
+ *   Pass 2 — OS scan    (-O -p <open ports from pass 1>) — needs root
+ *             if root is not available, pass 2 is attempted but its port
+ *             results are ignored; only the OS guess is used.
+ *
+ * Additional fixes:
+ *   - Added -Pn to both passes so hosts that block ICMP aren't skipped.
+ *   - When no open ports are found in pass 1, fall back to --top-ports 100
+ *     for the OS scan (more surface than 20 = better OS fingerprint).
+ *   - If only osDetection is requested (no serviceDetection), run a combined
+ *     -O --top-ports N scan instead of two separate passes.
+ *
+ * `opts` is a whitelist of typed values — no raw flag strings from the client.
+ */
+async function nmapScanHost(ip, opts = {}) {
+  const portArgs = [];
+  if (opts.topPorts && Number.isInteger(opts.topPorts) && opts.topPorts > 0) {
+    portArgs.push('--top-ports', String(Math.min(opts.topPorts, NMAP_TOP_PORTS_MAX)));
+  } else if (opts.ports && /^[0-9,\-]{1,100}$/.test(opts.ports)) {
+    portArgs.push('-p', opts.ports);
+  } else {
+    portArgs.push('--top-ports', '100');
+  }
+
+  // -Pn: treat host as online even if ICMP is blocked (very common on Windows).
+  // Without this, nmap marks the host as "down" and returns no results at all.
+  const commonArgs = ['-Pn', '-oX', '-', '--host-timeout', '20s'];
+
+  // ── Pass 1: service/port scan (no root needed) ────────────────────────────
+  const svcArgs = [...commonArgs, ...portArgs];
+  if (opts.serviceDetection) svcArgs.push('-sV');
+  svcArgs.push(ip);
+
+  const svcOut = await runNmap(svcArgs);
+  const { ports, osGuess: svcOsGuess } = parseNmapXml(svcOut);
+
+  // ── Pass 2: OS detection (separate invocation, requires root for -sS) ─────
+  let osGuess = svcOsGuess;
+  if (opts.osDetection) {
+    // BUG FIX: Use the open ports from pass 1 for a targeted OS scan —
+    // nmap needs at least one open and one closed/filtered port to fingerprint.
+    // Fall back to --top-ports 100 (was 20 — too few to find a closed port,
+    // causing nmap to silently give up on OS detection).
+    const openPortStr = ports.length > 0
+      ? ports.map(p => p.port).slice(0, 30).join(',')
+      : null;
+
+    // BUG FIX: --host-timeout raised to 30s for OS scan — fingerprinting
+    // takes longer than a simple port scan, especially on Windows hosts.
+    const osArgs = ['-Pn', '-oX', '-', '--host-timeout', '30s', '-O'];
+    if (openPortStr) {
+      osArgs.push('-p', openPortStr);
+    } else {
+      // No open ports found — give nmap a wider surface to probe
+      osArgs.push('--top-ports', '100');
+    }
+    osArgs.push(ip);
+
+    const osOut = await runNmap(osArgs);
+    const { osGuess: nmapOsGuess } = parseNmapXml(osOut);
+    if (nmapOsGuess) osGuess = nmapOsGuess;
+  }
+
+  return { ports, osGuess };
 }
 
 // ── Scan orchestrator ─────────────────────────────────────────────────────────

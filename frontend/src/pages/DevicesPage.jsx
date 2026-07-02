@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X
+  SlidersHorizontal, X, AlertOctagon
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -13,6 +13,7 @@ import DeviceModal from '../components/modals/DeviceModal'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import FilePushModal from '../components/modals/FilePushModal'
 import { useThemeStore } from '../store/themeStore'
+import { usePermissions } from '../hooks/usePermissions'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const STATUS = {
@@ -432,7 +433,9 @@ export default function DevicesPage() {
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [actionModal, setActionModal]   = useState(null)
   const [filePushOpen, setFilePushOpen] = useState(false)
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false)
   const isLight = useThemeStore(s => s.theme === 'light')
+  const { isAdmin } = usePermissions()
 
   const fetchAll = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -485,6 +488,19 @@ export default function DevicesPage() {
       setDeleteTarget(null)
       fetchAll(true)
     } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
+  }
+
+  const handleDeleteAll = async () => {
+    try {
+      const { data } = await api.delete('/devices')
+      toast.success(data.message || 'All devices deleted')
+      setDeleteAllOpen(false)
+      clearSelection()
+      fetchAll(true)
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Delete failed')
+      throw err
+    }
   }
 
   // Filtering
@@ -541,6 +557,15 @@ export default function DevicesPage() {
             <button onClick={() => setFilePushOpen(true)} className="btn-ghost">
               <Upload size={14} /> Push File
             </button>
+            {isAdmin && devices.length > 0 && (
+              <button onClick={() => setDeleteAllOpen(true)} title="Delete all devices"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all"
+                style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', color: '#f87171' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(239,68,68,0.16)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'rgba(239,68,68,0.08)'}>
+                <AlertOctagon size={13} /> Delete All
+              </button>
+            )}
             <button onClick={() => setDeviceModal('add')} className="btn-primary">
               <Plus size={14} /> Add Device
             </button>
@@ -740,6 +765,13 @@ export default function DevicesPage() {
         onConfirm={handleDelete}
         title={`Delete ${deleteTarget?.name}`}
         description="This will permanently remove the device and its stored credentials. This cannot be undone."
+        danger />
+
+      <ActionConfirmModal
+        open={deleteAllOpen} onClose={() => setDeleteAllOpen(false)}
+        onConfirm={handleDeleteAll}
+        title={`Delete all ${devices.length} device(s)`}
+        description="This will permanently remove every device and its stored credentials. This cannot be undone."
         danger />
 
       <FilePushModal open={filePushOpen} onClose={() => setFilePushOpen(false)}
