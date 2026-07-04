@@ -265,4 +265,4 @@ function stop() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { runCheck, setBaseline, runDueChecks, start, stop, diffList, hashSnapshot };
+module.exports = { runCheck, setBaseline, runDueChecks, start, stop, diffList, hashSnapshot };git

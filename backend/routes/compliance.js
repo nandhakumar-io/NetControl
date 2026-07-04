@@ -33,6 +33,40 @@ async function assertDevice(id, res) {
   return device;
 }
 
+// ── GET /api/compliance — list every device with its current compliance
+// status, joined against its latest snapshot + baseline presence. This is
+// what CompliancePage.jsx's initial load() call hits.
+router.get('/', requirePermission(MANAGE_COMPLIANCE), async (req, res) => {
+  try {
+    const rows = await query(`
+      SELECT
+        d.id                        AS device_id,
+        d.name                      AS device_name,
+        d.ip_address                AS ip_address,
+        d.os_type                   AS os_type,
+        COALESCE(cc.enabled, 0)     AS enabled,
+        COALESCE(cc.check_interval_hours, 24) AS check_interval_hours,
+        cc.last_checked_at          AS last_checked_at,
+        cb.created_at               AS baseline_created_at,
+        ls.status                   AS latest_status,
+        ls.diff                     AS latest_diff
+      FROM devices d
+      LEFT JOIN compliance_config cc ON cc.device_id = d.id
+      LEFT JOIN compliance_baselines cb ON cb.device_id = d.id
+      LEFT JOIN (
+        SELECT s1.device_id, s1.status, s1.diff
+        FROM compliance_snapshots s1
+        INNER JOIN (
+          SELECT device_id, MAX(taken_at) AS max_taken
+          FROM compliance_snapshots GROUP BY device_id
+        ) s2 ON s2.device_id = s1.device_id AND s2.max_taken = s1.taken_at
+      ) ls ON ls.device_id = d.id
+      ORDER BY d.name ASC
+    `);
+    res.json(rows.map(r => ({ ...r, latest_diff: safeJson(r.latest_diff, null) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/compliance/:deviceId/config ──────────────────────────────────────
 router.get('/:deviceId/config', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
