@@ -486,6 +486,12 @@ run()
     } catch (e) {
       console.warn('  ⚠  device_history:', e.message);
     }
+    try {
+      const { migrateComplianceTables } = require('./migrate-compliance');
+      await migrateComplianceTables();
+    } catch (e) {
+      console.warn('  ⚠  compliance_tables:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

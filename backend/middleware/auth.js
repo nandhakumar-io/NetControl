@@ -85,6 +85,10 @@ function requireRole(...roles) {
  *                                granted to operator/viewer by default since
  *                                network scanning is more sensitive than
  *                                routine device management)
+ *   2048 - manage_compliance   (config-drift baselines/snapshots — admin
+ *                                only by convention, same reasoning as
+ *                                discover_network: this touches every
+ *                                device's package/service/firewall state)
  *
  * Admins always pass; operators pass bits 1|4|8|32; viewers pass 1|8|32|128.
  */

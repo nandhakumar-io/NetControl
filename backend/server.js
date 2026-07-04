@@ -42,6 +42,7 @@ const fs           = require('fs');
 const { apiLimiter, bulkImportLimiter } = require('./middleware/rateLimiter');
 const { loadAllSchedules }      = require('./services/scheduler');
 const statusPoller              = require('./services/statusPoller');
+const complianceService          = require('./services/complianceService');
 const { attachSSHProxy }        = require('./services/sshProxy');
 
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs', { recursive: true });
@@ -158,6 +159,7 @@ app.use('/api/security',   require('./routes/security'));
 app.use('/api/metrics',   require('./routes/metrics'));
 app.use('/api/alerts',    require('./routes/alerts').router);
 app.use('/api/discovery', require('./routes/discovery'));
+app.use('/api/compliance', require('./routes/compliance'));
 
 // BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
 // by the terminal page (/api/terminal/open/:id, the SSE output stream, and
@@ -196,6 +198,7 @@ async function boot() {
     console.log(`   CORS origin : ${process.env.CORS_ORIGIN || 'http://localhost:5173'}\n`);
     loadAllSchedules();
     statusPoller.start();
+    complianceService.start();
   });
 }
 
@@ -204,4 +207,4 @@ boot().catch(err => {
   process.exit(1);
 });
 
-module.exports = app;
+module.exports = app;                                                                                                                                                            
