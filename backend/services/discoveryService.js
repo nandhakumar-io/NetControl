@@ -497,73 +497,88 @@ async function runScan(scanId, { userId, username, ipSource } = {}) {
   let nmapUsed = 0;
   let cancelled = false;
 
-  await mapWithConcurrency(hosts, doPing ? PING_CONCURRENCY : PROBE_CONCURRENCY, async (ip) => {
-    if (cancelled) return;
-    if (scannedCount % 10 === 0 && await isCancelled(scanId)) { cancelled = true; return; }
+  // Poll cancel_requested on a wall-clock timer instead of gating the check
+  // on scannedCount. The old `scannedCount % 10 === 0` check meant cancellation
+  // was only re-checked once every 10 *completed* hosts — for small scans that
+  // count never lands on a multiple of 10 again, and for slow scans (nmap
+  // OS/service detection) it could take minutes of real time to line up.
+  // Result: clicking "cancel" often did nothing until the scan just finished
+  // on its own. A 1s timer bounds detection latency to ~1s plus however long
+  // whatever's currently in flight takes to finish, regardless of scan size.
+  const cancelPoll = setInterval(async () => {
+    if (!cancelled && await isCancelled(scanId)) cancelled = true;
+  }, 1000);
 
-    const via = [];
-    let alive = true;
-    let rtt = null;
+  try {
+    await mapWithConcurrency(hosts, doPing ? PING_CONCURRENCY : PROBE_CONCURRENCY, async (ip) => {
+      if (cancelled) return;
 
-    if (doPing) {
-      const pr = await pingOnce(ip);
-      alive = pr.alive;
-      rtt = pr.rtt;
-      if (alive) via.push('ping');
-    }
+      const via = [];
+      let alive = true;
+      let rtt = null;
 
-    // Only spend SNMP/nmap effort on hosts we believe are up (or when ping
-    // was never run at all, since some hosts silently drop ICMP).
-    if (!alive && doPing) { scannedCount++; return; }
+      if (doPing) {
+        const pr = await pingOnce(ip);
+        alive = pr.alive;
+        rtt = pr.rtt;
+        if (alive) via.push('ping');
+      }
 
-    const mac = arpTable[ip] || null;
-    const vendor = lookupVendor(mac);
-    let sysDescr = null, sysName = null, sysObjectID = null, community = null;
-    let neighbors = [];
-    let ports = [];
-    let osGuess = null;
+      // Only spend SNMP/nmap effort on hosts we believe are up (or when ping
+      // was never run at all, since some hosts silently drop ICMP).
+      if (!alive && doPing) { scannedCount++; return; }
 
-    if (doSnmp) {
-      const snmpResult = await snmpProbe(ip, communities);
-      if (snmpResult) {
-        via.push('snmp');
-        sysDescr = snmpResult.sysDescr;
-        sysName = snmpResult.sysName;
-        sysObjectID = snmpResult.sysObjectID;
-        community = snmpResult.community;
-        osGuess = guessOsFromSysDescr(sysDescr);
+      const mac = arpTable[ip] || null;
+      const vendor = lookupVendor(mac);
+      let sysDescr = null, sysName = null, sysObjectID = null, community = null;
+      let neighbors = [];
+      let ports = [];
+      let osGuess = null;
 
-        if (doLldpCdp) {
-          try {
-            neighbors = await snmpNeighbors(ip, community);
-            if (neighbors.length) via.push('lldp_cdp');
-          } catch { /* best-effort */ }
+      if (doSnmp) {
+        const snmpResult = await snmpProbe(ip, communities);
+        if (snmpResult) {
+          via.push('snmp');
+          sysDescr = snmpResult.sysDescr;
+          sysName = snmpResult.sysName;
+          sysObjectID = snmpResult.sysObjectID;
+          community = snmpResult.community;
+          osGuess = guessOsFromSysDescr(sysDescr);
+
+          if (doLldpCdp) {
+            try {
+              neighbors = await snmpNeighbors(ip, community);
+              if (neighbors.length) via.push('lldp_cdp');
+            } catch { /* best-effort */ }
+          }
         }
       }
-    }
 
-    if (nmapReady && nmapUsed < MAX_NMAP_HOSTS) {
-      nmapUsed++;
-      const nmapResult = await nmapScanHost(ip, nmapOpts);
-      if (nmapResult.ports.length) via.push('nmap');
-      ports = nmapResult.ports;
-      if (!osGuess && nmapResult.osGuess) osGuess = nmapResult.osGuess;
-    }
+      if (nmapReady && nmapUsed < MAX_NMAP_HOSTS) {
+        nmapUsed++;
+        const nmapResult = await nmapScanHost(ip, nmapOpts);
+        if (nmapResult.ports.length) via.push('nmap');
+        ports = nmapResult.ports;
+        if (!osGuess && nmapResult.osGuess) osGuess = nmapResult.osGuess;
+      }
 
-    if (via.length > 0 || mac) {
-      aliveCount++;
-      await upsertResult(scanId, ip, {
-        mac, vendor, hostname: sysName, sysDescr, sysName, sysObjectID,
-        neighbors, ports, osGuess, rtt, via,
-      });
-    }
+      if (via.length > 0 || mac) {
+        aliveCount++;
+        await upsertResult(scanId, ip, {
+          mac, vendor, hostname: sysName, sysDescr, sysName, sysObjectID,
+          neighbors, ports, osGuess, rtt, via,
+        });
+      }
 
-    scannedCount++;
-    if (scannedCount % 5 === 0) {
-      await execute('UPDATE discovery_scans SET scanned_hosts=?, alive_hosts=? WHERE id=?',
-        [scannedCount, aliveCount, scanId]);
-    }
-  });
+      scannedCount++;
+      if (scannedCount % 5 === 0) {
+        await execute('UPDATE discovery_scans SET scanned_hosts=?, alive_hosts=? WHERE id=?',
+          [scannedCount, aliveCount, scanId]);
+      }
+    });
+  } finally {
+    clearInterval(cancelPoll);
+  }
 
   const now = Math.floor(Date.now() / 1000);
   await execute('UPDATE discovery_scans SET status=?, scanned_hosts=?, alive_hosts=?, finished_at=? WHERE id=?',
