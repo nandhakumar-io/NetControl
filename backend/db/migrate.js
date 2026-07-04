@@ -376,6 +376,26 @@ const MIGRATIONS = [
     `,
   },
 
+  // FEATURE: Maintenance auto-expiry — an optional maintenance_until
+  // timestamp so a maintenance window clears itself instead of silently
+  // suppressing real alerts forever if someone forgets to mark a device ok.
+  // Enforced by services/statusPoller.js (clearExpiredMaintenance), which
+  // runs every poll tick.
+  {
+    id: '010_devices_maintenance_until',
+    sql: `
+      SET @u1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'maintenance_until');
+      SET @sqlu1 = IF(@u1 = 0, 'ALTER TABLE devices ADD COLUMN maintenance_until INT UNSIGNED DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtu1 FROM @sqlu1; EXECUTE stmtu1; DEALLOCATE PREPARE stmtu1;
+
+      SET @u2 = (SELECT COUNT(*) FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND INDEX_NAME = 'idx_devices_maintenance_until');
+      SET @sqlu2 = IF(@u2 = 0, 'ALTER TABLE devices ADD INDEX idx_devices_maintenance_until (maintenance_mode, maintenance_until)', 'SELECT 1');
+      PREPARE stmtu2 FROM @sqlu2; EXECUTE stmtu2; DEALLOCATE PREPARE stmtu2;
+    `,
+  },
+
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────

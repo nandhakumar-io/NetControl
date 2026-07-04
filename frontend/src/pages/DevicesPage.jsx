@@ -51,10 +51,17 @@ function StatusBadge({ status }) {
 
 // ── Maintenance badge ─────────────────────────────────────────────────────────
 // Shown whenever a device is flagged under maintenance — alerts and webhooks
-// for that device are suppressed backend-side until it's marked ok again.
-function MaintenanceBadge({ note }) {
+// for that device are suppressed backend-side until it's marked ok again
+// (or until maintenance_until passes, if one was set).
+function MaintenanceBadge({ note, until }) {
+  const untilLabel = until ? new Date(until * 1000).toLocaleString() : null
+  const title = [
+    note ? `Note: ${note}` : null,
+    untilLabel ? `Auto-clears: ${untilLabel}` : 'No auto-clear set',
+    'Alerts & webhooks paused for this device',
+  ].filter(Boolean).join('\n')
   return (
-    <span title={note ? `Maintenance: ${note}` : 'Alerts & webhooks paused for this device'}
+    <span title={title}
       className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold"
       style={{ background: 'rgba(251,146,60,0.12)', border: '1px solid rgba(251,146,60,0.3)', color: '#fb923c' }}>
       <Wrench size={10} />
@@ -197,7 +204,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       <div className="flex items-center justify-between mb-3 flex-wrap gap-1.5">
         <div className="flex items-center gap-1.5 flex-wrap">
           <StatusBadge status={status} />
-          {inMaintenance && <MaintenanceBadge note={device.maintenance_note} />}
+          {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
         </div>
         <OsBadge osType={device.os_type} />
       </div>
@@ -370,7 +377,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
       {/* Status */}
       <div className="flex items-center gap-1.5 flex-wrap">
         <StatusBadge status={status} />
-        {inMaintenance && <MaintenanceBadge note={device.maintenance_note} />}
+        {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
       </div>
 
       {/* Actions */}
@@ -544,16 +551,40 @@ export default function DevicesPage() {
     } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
   }
 
+  // Prompts for an optional note + optional auto-clear duration when
+  // enabling maintenance. Returns null if the user cancels either prompt.
+  const promptMaintenanceDetails = (label) => {
+    const note = window.prompt(
+      `Mark ${label} under maintenance?\nAlerts & webhooks will pause until marked OK again.\n\nOptional note:`, ''
+    )
+    if (note === null) return null // cancelled
+    const durationRaw = window.prompt(
+      `Auto-clear after how many minutes? (e.g. 60 = 1 hour, 1440 = 1 day)\nLeave blank to require a manual "mark OK" instead.`, ''
+    )
+    if (durationRaw === null) return null // cancelled
+    const duration_minutes = durationRaw.trim() ? parseInt(durationRaw, 10) : null
+    if (durationRaw.trim() && (!Number.isFinite(duration_minutes) || duration_minutes <= 0)) {
+      toast.error('Duration must be a positive number of minutes')
+      return null
+    }
+    return { note: note || undefined, duration_minutes: duration_minutes || undefined }
+  }
+
   const handleToggleMaintenance = async (device) => {
     const enabling = !device.maintenance_mode
-    let note = null
+    let details = { note: undefined, duration_minutes: undefined }
     if (enabling) {
-      note = window.prompt(`Mark "${device.name}" under maintenance?\nAlerts & webhooks for it will pause until you mark it OK again.\n\nOptional note:`, '')
-      if (note === null) return // cancelled
+      const result = promptMaintenanceDetails(`"${device.name}"`)
+      if (!result) return
+      details = result
     }
     try {
-      await api.post(`/devices/${device.id}/maintenance`, { enabled: enabling, note: note || undefined })
-      toast.success(enabling ? `${device.name} marked under maintenance` : `${device.name} marked OK`)
+      await api.post(`/devices/${device.id}/maintenance`, { enabled: enabling, ...details })
+      toast.success(
+        enabling
+          ? `${device.name} marked under maintenance${details.duration_minutes ? ` for ${details.duration_minutes}m` : ''}`
+          : `${device.name} marked OK`
+      )
       fetchAll(true)
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
@@ -568,18 +599,20 @@ export default function DevicesPage() {
     // a patch window). Clearing a mixed batch is still one click away by
     // re-selecting just the ones that need it.
     const enabling = !targets.every(d => d.maintenance_mode)
-    let note = null
+    let details = { note: undefined, duration_minutes: undefined }
     if (enabling) {
-      note = window.prompt(`Mark ${targets.length} device(s) under maintenance?\nAlerts & webhooks for them will pause until marked OK again.\n\nOptional note:`, '')
-      if (note === null) return // cancelled
+      const result = promptMaintenanceDetails(`${targets.length} device(s)`)
+      if (!result) return
+      details = result
     }
     try {
       const { data } = await api.post('/devices/bulk-maintenance', {
-        deviceIds: targets.map(d => d.id), enabled: enabling, note: note || undefined,
+        deviceIds: targets.map(d => d.id), enabled: enabling, ...details,
       })
       toast.success(
-        enabling ? `${data.updated} device(s) marked under maintenance` : `${data.updated} device(s) marked OK`,
-        data.skipped ? { duration: 5000 } : undefined
+        enabling
+          ? `${data.updated} device(s) marked under maintenance${details.duration_minutes ? ` for ${details.duration_minutes}m` : ''}`
+          : `${data.updated} device(s) marked OK`
       )
       if (data.skipped) toast(`${data.skipped} device(s) skipped — no access`, { icon: '⚠️' })
       clearSelection()

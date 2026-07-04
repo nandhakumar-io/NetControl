@@ -42,6 +42,26 @@ function normaliseMac(mac) {
   return String(mac || '').toUpperCase().replace(/-/g, ':');
 }
 
+// ── Resolve a maintenance expiry timestamp from request body ─────────────────
+// Accepts either an explicit unix `until` timestamp or a convenience
+// `duration_minutes` (converted to now + N minutes). Neither present means
+// "no auto-expiry" — the device stays under maintenance until someone
+// explicitly marks it ok. Returns null on absent/invalid input.
+const MAX_MAINTENANCE_MINUTES = 30 * 24 * 60; // 30 days
+function resolveMaintenanceUntil(body, nowSec) {
+  if (body.until != null) {
+    const until = parseInt(body.until, 10);
+    return Number.isFinite(until) && until > nowSec ? until : null;
+  }
+  if (body.duration_minutes != null) {
+    const mins = parseInt(body.duration_minutes, 10);
+    if (Number.isFinite(mins) && mins > 0) {
+      return nowSec + Math.min(mins, MAX_MAINTENANCE_MINUTES) * 60;
+    }
+  }
+  return null;
+}
+
 // ── Validate a single row from a bulk payload ─────────────────────────────────
 const MAC_RE = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/;
 const IP_RE  = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-fA-F:]+$/; // IPv4 + basic IPv6
@@ -397,6 +417,8 @@ router.post('/bulk-maintenance',
   body('deviceIds.*').isUUID().withMessage('Invalid device id'),
   body('enabled').isBoolean(),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  body('duration_minutes').optional({ nullable: true }).isInt({ min: 1, max: MAX_MAINTENANCE_MINUTES }),
+  body('until').optional({ nullable: true }).isInt({ min: 1 }),
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
@@ -406,6 +428,7 @@ router.post('/bulk-maintenance',
       const enabled = !!req.body.enabled;
       const note    = req.body.note || null;
       const now     = Math.floor(Date.now() / 1000);
+      const until   = enabled ? resolveMaintenanceUntil(req.body, now) : null;
 
       let skipped = 0;
       if (req.user.role === 'operator') {
@@ -429,10 +452,10 @@ router.post('/bulk-maintenance',
       const result = await execute(
         `UPDATE devices
            SET maintenance_mode = ?, maintenance_note = ?,
-               maintenance_since = ?, maintenance_by = ?
+               maintenance_since = ?, maintenance_by = ?, maintenance_until = ?
          WHERE id IN (${placeholders})`,
         [enabled ? 1 : 0, enabled ? note : null,
-         enabled ? now : null, enabled ? req.user.id : null,
+         enabled ? now : null, enabled ? req.user.id : null, until,
          ...deviceIds]
       );
 
@@ -448,10 +471,11 @@ router.post('/bulk-maintenance',
         targetName: `${deviceIds.length} device(s)`,
         ipSource: req.realIp || req.ip, result: 'success',
         details: `[${req.user.role}] ${enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled'}` +
+                 (until ? ` (auto-clears ${new Date(until * 1000).toISOString()})` : '') +
                  (skipped ? ` (${skipped} skipped — no group access)` : ''),
       });
 
-      res.json({ updated: result.affectedRows ?? deviceIds.length, skipped });
+      res.json({ updated: result.affectedRows ?? deviceIds.length, skipped, until });
     } catch (e) { res.status(500).json({ error: e.message }); }
   }
 );
@@ -467,6 +491,8 @@ router.post('/:id/maintenance',
   param('id').isUUID(),
   body('enabled').isBoolean(),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  body('duration_minutes').optional({ nullable: true }).isInt({ min: 1, max: MAX_MAINTENANCE_MINUTES }),
+  body('until').optional({ nullable: true }).isInt({ min: 1 }),
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
@@ -488,14 +514,15 @@ router.post('/:id/maintenance',
       const enabled = !!req.body.enabled;
       const note    = req.body.note || null;
       const now     = Math.floor(Date.now() / 1000);
+      const until   = enabled ? resolveMaintenanceUntil(req.body, now) : null;
 
       await execute(
         `UPDATE devices
            SET maintenance_mode = ?, maintenance_note = ?,
-               maintenance_since = ?, maintenance_by = ?
+               maintenance_since = ?, maintenance_by = ?, maintenance_until = ?
          WHERE id = ?`,
         [enabled ? 1 : 0, enabled ? note : null,
-         enabled ? now : null, enabled ? req.user.id : null,
+         enabled ? now : null, enabled ? req.user.id : null, until,
          req.params.id]
       );
 
@@ -510,7 +537,8 @@ router.post('/:id/maintenance',
         action: enabled ? 'enable_maintenance_mode' : 'disable_maintenance_mode',
         targetType: 'device', targetId: req.params.id, targetName: device.name,
         ipSource: req.realIp || req.ip, result: 'success',
-        details: `[${req.user.role}] ${enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled'}`,
+        details: `[${req.user.role}] ${enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled'}` +
+                 (until ? ` (auto-clears ${new Date(until * 1000).toISOString()})` : ''),
       });
 
       const updated = await queryOne('SELECT * FROM devices WHERE id = ?', [req.params.id]);

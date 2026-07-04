@@ -235,10 +235,61 @@ async function flushToDB(results, nowSec) {
   }
 }
 
+// ── Maintenance auto-expiry ───────────────────────────────────────────────────
+// Devices marked under maintenance with a maintenance_until timestamp get
+// cleared automatically once that time passes — so a forgotten toggle
+// doesn't blackhole real alerts/webhooks indefinitely. Runs every poll tick
+// (cheap: no-op SELECT when nothing has expired).
+async function clearExpiredMaintenance(nowSec) {
+  let expired;
+  try {
+    expired = await query(
+      `SELECT id, name FROM devices
+        WHERE maintenance_mode = 1 AND maintenance_until IS NOT NULL AND maintenance_until <= ?`,
+      [nowSec]
+    );
+  } catch (e) {
+    console.error('[Poller] maintenance-expiry fetch:', e.message);
+    return;
+  }
+  if (!expired.length) return;
+
+  const ids = expired.map(d => d.id);
+  const ph  = ids.map(() => '?').join(',');
+  try {
+    await execute(
+      `UPDATE devices
+          SET maintenance_mode = 0, maintenance_note = NULL,
+              maintenance_since = NULL, maintenance_by = NULL, maintenance_until = NULL
+        WHERE id IN (${ph})`,
+      ids
+    );
+  } catch (e) {
+    console.error('[Poller] maintenance-expiry clear:', e.message);
+    return;
+  }
+
+  // Drop the webhook service's per-device cache so alerts/webhooks resume
+  // immediately instead of waiting out the cache TTL.
+  const webhook = require('./webhook');
+  const audit   = require('./audit');
+  for (const d of expired) {
+    webhook.invalidateMaintenanceCache(d.id);
+    audit.log({
+      username: 'system', action: 'maintenance_expired',
+      targetType: 'device', targetId: d.id, targetName: d.name,
+      result: 'success', details: 'Maintenance window expired — auto-cleared',
+    }).catch(() => {});
+    console.log(`[Poller] Maintenance window expired — cleared for ${d.name} (${d.id})`);
+  }
+}
+
 // ── Main poll cycle ───────────────────────────────────────────────────────────
 async function pollAll() {
   const nowSec = Math.floor(Date.now() / 1000);
   const t0     = Date.now();
+
+  await clearExpiredMaintenance(nowSec);
 
   let devices;
   try {
@@ -300,4 +351,4 @@ function stop() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, pollAll, pollDevice, flushToDB };
+module.exports = { start, stop, pollAll, pollDevice, flushToDB, clearExpiredMaintenance };
