@@ -1,11 +1,16 @@
 const { execFile } = require('child_process');
-const { decrypt } = require('./crypto');   // 👈 ADD THIS
+const { decrypt } = require('./crypto');
+const nodeWinrm = require('nodejs-winrm');
 
-const EXEC_TIMEOUT = 15000; // 15 seconds
+const RPC_TIMEOUT   = 15000; // 15s — local `net rpc` call over SMB/RPC (port 445/135)
+const WINRM_TIMEOUT = 20000; // 20s — WinRM SOAP round-trips are slower, give it more room
 
+// ── RPC (primary) ────────────────────────────────────────────────────────────
+// Uses Samba's `net rpc` client tool. Requires samba-client/samba-common-tools
+// installed and a (minimal) /etc/samba/smb.conf present in the container.
 function netRpc(args) {
   return new Promise((resolve, reject) => {
-    execFile('net', args, { timeout: EXEC_TIMEOUT }, (err, stdout, stderr) => {
+    execFile('net', args, { timeout: RPC_TIMEOUT }, (err, stdout, stderr) => {
       if (err) {
         const msg = stderr?.trim() || err.message;
         return reject(new Error(`net rpc failed: ${msg}`));
@@ -15,55 +20,94 @@ function netRpc(args) {
   });
 }
 
-/**
- * FIXED credential builder
- */
-function credString(device) {
+function rpcCredString(device) {
   const user = device.rpc_username || device.ssh_username;
-
-  // 👇 FIX: decrypt password before use
-  const pass =
-    decrypt(device.rpc_password) ||
-    decrypt(device.ssh_password) ||
-    '';
-
-  if (!user) throw new Error('No username configured for Windows device');
-
+  const pass = decrypt(device.rpc_password) || decrypt(device.ssh_password) || '';
+  if (!user) throw new Error('No username configured for Windows device (RPC)');
   return `${user}%${pass}`;
 }
 
-async function shutdown(device) {
-  const cred = credString(device);
-  return netRpc([
-    'rpc', 'shutdown',
-    '-I', device.ip_address,
-    '-U', cred,
-    '-f',
-    '-t', '0',
+// ── WinRM (fallback) ──────────────────────────────────────────────────────────
+// Used when `net rpc` fails or is blocked (e.g. RPC/135/445 filtered by firewall
+// but WinRM/5985 is open, or the device only has WinRM configured). Pure-JS
+// SOAP client, no native/system dependency required.
+function winrmCreds(device) {
+  const user = device.winrm_username || device.rpc_username || device.ssh_username;
+  const pass =
+    decrypt(device.winrm_password) ||
+    decrypt(device.rpc_password) ||
+    decrypt(device.ssh_password) ||
+    '';
+  const port = device.winrm_port || 5985;
+  if (!user) throw new Error('No username configured for Windows device (WinRM)');
+  return { user, pass, port };
+}
+
+async function winrmExec(device, command) {
+  const { user, pass, port } = winrmCreds(device);
+
+  const timeoutGuard = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('WinRM request timed out')), WINRM_TIMEOUT)
+  );
+
+  const output = await Promise.race([
+    nodeWinrm.runCommand(command, device.ip_address, user, pass, port),
+    timeoutGuard,
   ]);
+
+  // nodejs-winrm swallows internal errors (SOAP faults, connection errors) and
+  // *returns* an Error instance instead of throwing — normalize that here so
+  // callers/fallback logic can treat it like any other rejected promise.
+  if (output instanceof Error) throw new Error(`WinRM failed: ${output.message}`);
+
+  return { stdout: String(output || '').trim(), stderr: '' };
+}
+
+// ── RPC-first, WinRM-fallback wrapper ────────────────────────────────────────
+async function withFallback(device, rpcAttempt, winrmCommand) {
+  try {
+    return await rpcAttempt();
+  } catch (rpcErr) {
+    try {
+      const result = await winrmExec(device, winrmCommand);
+      return { ...result, _via: 'winrm', _rpcError: rpcErr.message };
+    } catch (winrmErr) {
+      throw new Error(
+        `RPC failed (${rpcErr.message}); WinRM fallback also failed (${winrmErr.message})`
+      );
+    }
+  }
+}
+
+async function shutdown(device) {
+  return withFallback(
+    device,
+    () => netRpc(['rpc', 'shutdown', '-I', device.ip_address, '-U', rpcCredString(device), '-f', '-t', '0']),
+    'shutdown /s /t 0 /f'
+  );
 }
 
 async function restart(device) {
-  const cred = credString(device);
-  return netRpc([
-    'rpc', 'shutdown',
-    '-I', device.ip_address,
-    '-U', cred,
-    '-f',
-    '-t', '0',
-    '-r',
-  ]);
+  return withFallback(
+    device,
+    () => netRpc(['rpc', 'shutdown', '-I', device.ip_address, '-U', rpcCredString(device), '-f', '-t', '0', '-r']),
+    'shutdown /r /t 0 /f'
+  );
 }
 
 async function execCommand(device, command) {
-  const parts = command.trim().split(/\s+/);
-  const cred  = credString(device);
-
-  const args = parts[0] === 'rpc'
-    ? [...parts, '-I', device.ip_address, '-U', cred]
-    : ['rpc', ...parts, '-I', device.ip_address, '-U', cred];
-
-  return netRpc(args);
+  return withFallback(
+    device,
+    () => {
+      const parts = command.trim().split(/\s+/);
+      const cred = rpcCredString(device);
+      const args = parts[0] === 'rpc'
+        ? [...parts, '-I', device.ip_address, '-U', cred]
+        : ['rpc', ...parts, '-I', device.ip_address, '-U', cred];
+      return netRpc(args);
+    },
+    command
+  );
 }
 
 module.exports = { shutdown, restart, execCommand };
