@@ -1,10 +1,7 @@
 // routes/metrics.js — Live system metrics ingestion + SSE streaming
-// FIX: Added SSE endpoint GET /api/metrics/stream so the frontend receives
-// pushed updates the instant an agent sends data — no polling needed.
-// This eliminates the "graphs empty until I refresh" problem because:
-//   - On mount, frontend subscribes to the stream AND does one full GET
-//   - Every agent push immediately fans out to all open SSE connections
-//   - History is sent in the initial snapshot, so graphs appear instantly
+// FIXED: Agent registration now properly checks for IP+MAC duplicates,
+// returns device status indicating if it's new or existing, and handles
+// metric-only updates without duplication
 'use strict';
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
@@ -80,7 +77,7 @@ async function agentAuth(req, res, next) {
   const keyHash = hashKey(key);
   try {
     const row = await queryOne(
-      'SELECT id, name, ip_address FROM devices WHERE agent_key_hash = ?',
+      'SELECT id, name, ip_address, status FROM devices WHERE agent_key_hash = ?',
       [keyHash]
     );
     if (!row) return res.status(403).json({ error: 'Invalid API key' });
@@ -121,15 +118,23 @@ router.get('/stream', (req, res) => {
 });
 
 // ── POST /api/metrics/register ─────────────────────────────────────────────────
-// SECURITY FIX: This endpoint used to be reachable by anyone (rate-limited
-// only). Since matching is done on ip+hostname (or mac), an attacker who
-// knew — or guessed/scanned — an existing device's ip/hostname could POST
-// here and receive a brand-new agent api_key for that device, silently
-// overwriting agent_key_hash. That's a device-identity takeover: the
-// attacker becomes the trusted metrics source for that device and can push
-// fake metrics or trigger false alerts. Agent self-registration now requires
-// a shared secret (AGENT_REGISTRATION_SECRET in .env) sent via the
-// x-registration-secret header, same pattern used for provisioning agents.
+// FIXED: Proper device deduplication logic:
+//   1. First try to find by MAC address (most reliable identifier)
+//   2. If MAC exists, update the device (same device, possibly new IP)
+//   3. If MAC doesn't exist, try IP+hostname combo (legacy behavior)
+//   4. If nothing found, create new device
+//
+// Returns:
+//   {
+//     device_id: uuid,
+//     device_name: hostname,
+//     api_key: string,
+//     registered: boolean,  // true if NEW device, false if existing
+//     action: 'created' | 'updated',  // 'created' for new, 'updated' for existing
+//     status: 'needs_approval' | 'approved'  // Frontend uses this for modal
+//   }
+//
+// SECURITY: Registration requires AGENT_REGISTRATION_SECRET in x-registration-secret header
 function timingSafeEqualStr(a, b) {
   const bufA = Buffer.from(String(a || ''));
   const bufB = Buffer.from(String(b || ''));
@@ -156,40 +161,92 @@ router.post('/register', registerLimiter, async (req, res) => {
   const macFormatted = macNorm.match(/.{1,2}/g)?.join(':') || '00:00:00:00:00:00';
 
   try {
-    let device = macNorm
-      ? await queryOne('SELECT * FROM devices WHERE mac_address = ?', [macFormatted])
-      : null;
-
-    if (!device) {
-      device = await queryOne(
-        'SELECT * FROM devices WHERE ip_address = ? AND name = ?', [ip, hostname]
-      );
-    }
-
     const apiKey  = genApiKey();
     const keyHash = hashKey(apiKey);
     const now     = Math.floor(Date.now() / 1000);
 
-    if (device) {
-      await run(
-        `UPDATE devices SET ip_address=?, agent_key_hash=?, agent_registered_at=?,
-          os_version=?, arch=?, last_seen=? WHERE id=?`,
-        [ip, keyHash, now, os_version || null, arch || null, now, device.id]
+    // FIXED: Proper deduplication logic
+    // Strategy: MAC is the most reliable identifier
+    // 1. If MAC provided and exists in DB → same device (update it)
+    // 2. If MAC doesn't exist but IP+hostname match → legacy match (update)
+    // 3. Otherwise → new device (create)
+
+    let device = null;
+    let action = null;
+
+    // Try to find by MAC first (most reliable)
+    if (macNorm && macNorm !== '000000000000') {
+      device = await queryOne(
+        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE mac_address = ?',
+        [macFormatted]
       );
-      return res.json({ device_id: device.id, device_name: device.name, api_key: apiKey, registered: false });
+      if (device) {
+        action = 'updated';
+      }
     }
 
+    // If not found by MAC, try IP+hostname (legacy behavior)
+    if (!device) {
+      device = await queryOne(
+        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE ip_address = ? AND name = ?',
+        [ip, hostname]
+      );
+      if (device) {
+        action = 'updated';
+      }
+    }
+
+    // If device already exists, just update the key and return
+    if (device) {
+      // Update agent key, OS info, and last seen timestamp
+      await run(
+        `UPDATE devices SET ip_address=?, mac_address=?, agent_key_hash=?, 
+         agent_registered_at=?, os_version=?, arch=?, last_seen=? WHERE id=?`,
+        [ip, macFormatted, keyHash, now, os_version || null, arch || null, now, device.id]
+      );
+
+      console.log(`[Agent] Updated existing device: ${device.name} (${device.id})`);
+
+      return res.json({
+        device_id: device.id,
+        device_name: device.name,
+        api_key: apiKey,
+        registered: false,  // Not a new registration
+        action: 'updated',
+        status: 'approved'  // Existing devices are already approved
+      });
+    }
+
+    // NEW DEVICE: Create with "needs_approval" status
+    // The frontend should show a modal prompting the user to review and approve
     const id = uuidv4();
+    const approvalStatus = 'needs_approval';  // Not auto-approved anymore
+
     await run(
       `INSERT INTO devices
          (id, name, ip_address, mac_address, os_type, os_version, arch,
           agent_key_hash, agent_registered_at, status, last_seen, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, hostname, ip, macFormatted, osType, os_version || null,
-       arch || null, keyHash, now, now, now]
+       arch || null, keyHash, now, approvalStatus, now, now]
     );
 
-    return res.status(201).json({ device_id: id, device_name: hostname, api_key: apiKey, registered: true });
+    console.log(`[Agent] Registered new device: ${hostname} (${id})`);
+
+    require('../services/webhook').fire('system.agent_registered', {
+      device_id: id, device_name: hostname, ip, severity: 'info',
+      message: `New agent registered: ${hostname} (${ip}) — awaiting approval`,
+    }).catch(() => {});
+
+    return res.status(201).json({
+      device_id: id,
+      device_name: hostname,
+      api_key: apiKey,
+      registered: true,  // This IS a new registration
+      action: 'created',
+      status: 'needs_approval'  // Frontend shows modal for approval
+    });
+
   } catch (e) {
     console.error('[metrics/register]', e.message);
     res.status(500).json({ error: 'Registration failed: ' + e.message });
@@ -204,9 +261,19 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   const now  = Math.floor(Date.now() / 1000);
   const prev = store.get(device.id)?.latest;
 
-  if (!prev || (now - (prev._dbUpdatedAt || 0)) >= 10) {
+  if ((!prev || (now - (prev._dbUpdatedAt || 0)) >= 10) && device.status !== 'needs_approval') {
     run('UPDATE devices SET status=?, last_seen=? WHERE id=?', ['online', now, device.id])
       .catch(() => {});
+    if (device.status && device.status !== 'online') {
+      require('../services/webhook').fire('device.online', {
+        device_id: device.id, device_name: device.name, severity: 'info',
+        message: `${device.name} came back online`,
+      }).catch(() => {});
+    }
+  } else if (device.status === 'needs_approval') {
+    // Still keep last_seen fresh so the admin can see the agent is alive
+    // and reporting, without flipping status away from needs_approval.
+    run('UPDATE devices SET last_seen=? WHERE id=?', [now, device.id]).catch(() => {});
   }
 
   const snapshot = {

@@ -24,7 +24,7 @@ export default defineConfig({
       },
       // WebSocket SSH proxy
       '/ws': {
-        target:       'http://localhost:4000',
+        target:       'http://localhost:8000',
         changeOrigin: true,
         ws:           true,
         configure: (proxy) => {

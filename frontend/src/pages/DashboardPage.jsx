@@ -39,7 +39,7 @@ const TT_STYLE = {
 }
 
 // ─── Micro sparkline ──────────────────────────────────────────────────────────
-function Spark({ data, color='#818cf8', height=28 }) {
+function Spark({ data, color='#a78bfa', height=28 }) {
   if (!data?.length) return <div style={{height}} className="flex items-center justify-center opacity-20 text-[9px] font-mono text-slate-500">no data</div>
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -107,7 +107,7 @@ function SectionLabel({ children, action }) {
 }
 
 // ─── Stat card ────────────────────────────────────────────────────────────────
-function StatCard({ icon: Icon, label, value, sub, color='#818cf8', trend, spark }) {
+function StatCard({ icon: Icon, label, value, sub, color='#a78bfa', trend, spark }) {
   return (
     <div className="glass rounded-2xl p-4 flex flex-col gap-2">
       <div className="flex items-center justify-between">
@@ -423,7 +423,7 @@ export default function DashboardPage() {
     <div className="flex items-center justify-center min-h-screen" style={{background:'var(--bg-page)'}}>
       <div className="flex flex-col items-center gap-3">
         <div className="w-10 h-10 rounded-2xl glass flex items-center justify-center">
-          <Activity size={18} className="animate-pulse" style={{color:'#818cf8'}}/>
+          <Activity size={18} className="animate-pulse" style={{color:'#a78bfa'}}/>
         </div>
         <p className="text-xs font-mono" style={{color:'var(--text-muted)'}}>Loading fleet data…</p>
       </div>
@@ -440,7 +440,7 @@ export default function DashboardPage() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-lg font-display font-bold" style={{color:'var(--text-primary)'}}>
-            {greeting}, <span style={{color:'#818cf8'}}>{user?.username}</span>
+            {greeting}, <span style={{color:'#a78bfa'}}>{user?.username}</span>
           </h1>
           <p className="text-[11px] font-mono mt-0.5" style={{color:'var(--text-muted)'}}>
             {new Date().toLocaleDateString([],{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
@@ -469,7 +469,7 @@ export default function DashboardPage() {
       {/* ── KPI stat cards ────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <StatCard icon={Server}      label="Devices"   value={devices.length}
-          sub={`${groups.length} groups`}           color="#818cf8" spark={onlineSpark}/>
+          sub={`${groups.length} groups`}           color="#a78bfa" spark={onlineSpark}/>
         <StatCard icon={Wifi}        label="Online"    value={online}
           sub={`${fleetPct}% healthy`}              color="#22c55e" spark={onlineSpark}
           trend={histData.length>2?(online-(histData[histData.length-3]?.online||online)):null}/>
@@ -540,8 +540,8 @@ export default function DashboardPage() {
                     <stop offset="95%" stopColor="#22c55e" stopOpacity={0}/>
                   </linearGradient>
                   <linearGradient id="gCpu" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%"  stopColor="#818cf8" stopOpacity={0.15}/>
-                    <stop offset="95%" stopColor="#818cf8" stopOpacity={0}/>
+                    <stop offset="5%"  stopColor="#a78bfa" stopOpacity={0.15}/>
+                    <stop offset="95%" stopColor="#a78bfa" stopOpacity={0}/>
                   </linearGradient>
                   <linearGradient id="gRam" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%"  stopColor="#06b6d4" stopOpacity={0.15}/>
@@ -553,7 +553,7 @@ export default function DashboardPage() {
                 <YAxis tick={{fontSize:9,fill:'#475569'}} tickLine={false} axisLine={false}/>
                 <Tooltip contentStyle={TT_STYLE} labelStyle={{color:'#94a3b8',marginBottom:4,fontSize:10}}/>
                 <Area type="monotone" dataKey="online" name="Online" stroke="#22c55e" strokeWidth={2} fill="url(#gOnline)" dot={false} isAnimationActive={false}/>
-                <Area type="monotone" dataKey="cpu"    name="CPU %"  stroke="#818cf8" strokeWidth={1.5} fill="url(#gCpu)"    dot={false} isAnimationActive={false}/>
+                <Area type="monotone" dataKey="cpu"    name="CPU %"  stroke="#a78bfa" strokeWidth={1.5} fill="url(#gCpu)"    dot={false} isAnimationActive={false}/>
                 <Area type="monotone" dataKey="ram"    name="RAM %"  stroke="#06b6d4" strokeWidth={1.5} fill="url(#gRam)"    dot={false} isAnimationActive={false}/>
               </AreaChart>
             </ResponsiveContainer>

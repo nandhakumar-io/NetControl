@@ -19,8 +19,13 @@ if (cluster.isPrimary && WORKERS > 1) {
   console.log(`[Master] Spawning ${WORKERS} workers on ${os.cpus().length} cores`);
   for (let i = 0; i < WORKERS; i++) cluster.fork();
   cluster.on('exit', (w, code) => {
-    console.warn(`[Master] Worker ${w.process.pid} died (${code}) — restarting`);
-    cluster.fork();
+    console.warn(`[Master] Worker ${w.process.pid} died (${code}) — restarting in 2s`);
+    // Small delay before respawn: if the crash is caused by something
+    // persistent (DB down, missing table, bad config), forking immediately
+    // creates a tight infinite crash loop — hundreds of new DB pools spun up
+    // and torn down per second, burning CPU and DB connections without ever
+    // giving the underlying problem a chance to be noticed/fixed.
+    setTimeout(() => cluster.fork(), 2000);
   });
   return; // master process exits here
 }
@@ -40,6 +45,15 @@ const statusPoller              = require('./services/statusPoller');
 const { attachSSHProxy }        = require('./services/sshProxy');
 
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs', { recursive: true });
+
+// Safety net: an unguarded rejected promise anywhere at boot (or later)
+// otherwise crashes the whole Node process by default since Node 15+.
+// Log it loudly instead of taking the worker down — individual routes/
+// services should still handle their own errors properly; this is a
+// last-resort backstop, not a substitute for that.
+process.on('unhandledRejection', (err) => {
+  console.error('[UnhandledRejection]', err);
+});
 
 const app = express();
 
@@ -146,7 +160,7 @@ app.use((err, _req, res, _next) => {
 const httpServer = http.createServer(app);
 attachSSHProxy(httpServer);
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 8000;
 
 async function boot() {
   httpServer.listen(PORT, '0.0.0.0', () => {

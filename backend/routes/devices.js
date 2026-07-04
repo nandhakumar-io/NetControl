@@ -118,6 +118,8 @@ router.get('/:id', param('id').isUUID(), async (req, res) => {
 
 // ── POST /api/devices (single) ───────────────────────────────────────────────
 // SECURITY FIX: Only admins can add/edit/delete devices
+// (requireRole is declared once here and used for every admin-only route
+// below, including approve-registration and PUT further down the file.)
 const { requireRole } = require('../middleware/auth');
 router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
   const errors = validationResult(req);
@@ -303,61 +305,13 @@ router.post('/bulk-import',
   }
 );
 
-// ── PUT /api/devices/:id ─────────────────────────────────────────────────────
-router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation, async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-  try {
-    const existing = await queryOne('SELECT id FROM devices WHERE id = ?', [req.params.id]);
-    if (!existing) return res.status(404).json({ error: 'Device not found' });
-
-    const {
-      name, ip_address, mac_address, os_type, group_id,
-      ssh_username, ssh_password, ssh_key,
-      rpc_username, rpc_password,
-    } = req.body;
-
-    const normalizedMac = normaliseMac(mac_address);
-
-    const encSshPw  = ssh_password ? encrypt(ssh_password) : null;
-    const encSshKey = ssh_key      ? encrypt(ssh_key)      : null;
-    const encRpcPw  = rpc_password ? encrypt(rpc_password) : null;
-
-    await execute(
-      `UPDATE devices SET
-         name         = ?,
-         ip_address   = ?,
-         mac_address  = ?,
-         os_type      = ?,
-         group_id     = ?,
-         ssh_username = ?,
-         ssh_password = CASE WHEN ? IS NOT NULL THEN ? ELSE ssh_password END,
-         ssh_key      = CASE WHEN ? IS NOT NULL THEN ? ELSE ssh_key      END,
-         rpc_username = ?,
-         rpc_password = CASE WHEN ? IS NOT NULL THEN ? ELSE rpc_password END
-       WHERE id = ?`,
-      [
-        name, ip_address, normalizedMac, os_type, group_id || null,
-        ssh_username || null,
-        encSshPw,  encSshPw,
-        encSshKey, encSshKey,
-        rpc_username || null,
-        encRpcPw,  encRpcPw,
-        req.params.id,
-      ]
-    );
-
-    await audit.log({
-      userId: req.user.id, username: req.user.username,
-      action: 'edit_device', targetType: 'device', targetId: req.params.id,
-      targetName: name, ipSource: req.realIp, result: 'success',
-    });
-
-    const device = await queryOne('SELECT * FROM devices WHERE id = ?', [req.params.id]);
-    res.json(sanitizeDevice(device));
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// NOTE: PUT /api/devices/:id is implemented once, further down this file
+// (the "ENHANCED" handler near approve-registration). A second, older
+// copy of this same route used to live here — since Express dispatches
+// to whichever matching route was registered FIRST, that older copy
+// silently swallowed every device edit and the enhanced version (with
+// explicit credential-clearing and updated_at tracking) was permanently
+// unreachable dead code. Removed to avoid the duplicate-route shadowing.
 
 // ── DELETE /api/devices — delete ALL devices (admin only) ───────────────────
 router.delete('/', requireRole('admin'), async (req, res) => {
@@ -425,5 +379,221 @@ router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// Add this endpoint to routes/devices.js
+// POST /api/devices/:id/approve-registration — Approve a pending agent registration
+// This endpoint finalizes the device registration and marks it as approved
+
+// Add this to the device routes (after the standard CRUD endpoints)
+//
+// BUG FIX: this used to re-declare `const { requireRole } = require(...)`,
+// which is already declared earlier in this file (used by POST/PUT/DELETE
+// above). Re-declaring the same const in the same module scope is a hard
+// SyntaxError ("Identifier 'requireRole' has already been declared") that
+// prevented this file — and therefore the whole server — from loading at
+// all. requireRole is already in scope here from the top of the file.
+
+// ── POST /api/devices/:id/approve-registration ─────────────────────────────────
+// Admin approves a device that was registered by an agent
+// Sets up default group assignment and marks device as properly configured
+router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUID(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+
+  try {
+    const deviceId = req.params.id;
+    const { name, os_type, ip_address, mac_address, group_id } = req.body;
+
+    // Get the device first
+    const device = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    // Update device with approved information
+    const normalizedMac = mac_address ? normaliseMac(mac_address) : device.mac_address;
+    const now = Math.floor(Date.now() / 1000);
+
+    await execute(
+      `UPDATE devices 
+       SET name=?, os_type=?, ip_address=?, mac_address=?, group_id=?, 
+           status='unknown', last_approved_at=?, updated_at=?
+       WHERE id=?`,
+      [
+        name || device.name,
+        os_type || device.os_type,
+        ip_address || device.ip_address,
+        normalizedMac,
+        group_id || device.group_id || null,
+        now,
+        now,
+        deviceId
+      ]
+    );
+
+    // Log audit trail
+    await audit.log({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'approve_device_registration',
+      targetType: 'device',
+      targetId: deviceId,
+      targetName: name || device.name,
+      ipSource: req.realIp,
+      result: 'success',
+      details: `Approved agent registration from ${ip_address || device.ip_address}`
+    });
+
+    // Fire webhook for device approval
+    require('../services/webhook').fire('device.approved', {
+      device_id: deviceId,
+      device_name: name || device.name,
+      ip: ip_address || device.ip_address,
+      severity: 'info',
+      message: `Device "${name || device.name}" approved and registered`,
+    }).catch(() => {});
+
+    // Return the updated device
+    const updatedDevice = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    res.json(sanitizeDevice(updatedDevice));
+
+  } catch (e) {
+    console.error('[devices/approve-registration]', e.message);
+    res.status(500).json({ error: 'Approval failed: ' + e.message });
+  }
+});
+
+// ── PUT /api/devices/bulk-update — Edit shared fields across many devices ───
+//
+//  Accepts: { deviceIds: [uuid, ...], updates: { group_id?, os_type?,
+//             ssh_username?, ssh_password?, ssh_key?, rpc_username?, rpc_password? } }
+//
+//  Only keys PRESENT in `updates` are touched — this lets the caller change
+//  just the group, or just credentials, without clobbering every device's
+//  other fields. This must be registered before PUT /:id, otherwise Express
+//  would match "bulk-update" as an :id param and 400 on the UUID check.
+//
+//  Security: admin-only (same as single-device edit). Credentials are
+//  encrypted the same way as the single-device PUT route below.
+router.put('/bulk-update',
+  requireRole('admin'),
+  body('deviceIds').isArray({ min: 1, max: 500 }).withMessage('deviceIds must be an array of 1–500 items'),
+  body('deviceIds.*').isUUID().withMessage('Invalid device id'),
+  body('updates').isObject().withMessage('updates must be an object'),
+  body('updates.group_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)).withMessage('Invalid group_id'),
+  body('updates.os_type').optional().isIn(['windows', 'linux']),
+  body('updates.ssh_username').optional({ nullable: true }).trim().isLength({ max: 100 }),
+  body('updates.ssh_password').optional({ nullable: true }).isLength({ max: 500 }),
+  body('updates.ssh_key').optional({ nullable: true }).isLength({ max: 10000 }),
+  body('updates.rpc_username').optional({ nullable: true }).trim().isLength({ max: 100 }),
+  body('updates.rpc_password').optional({ nullable: true }).isLength({ max: 500 }),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { deviceIds, updates } = req.body;
+    const ALLOWED = ['group_id', 'os_type', 'ssh_username', 'ssh_password', 'ssh_key', 'rpc_username', 'rpc_password'];
+    const fields = Object.keys(updates || {}).filter(k => ALLOWED.includes(k));
+    if (fields.length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+
+    try {
+      if (updates.group_id) {
+        const g = await queryOne('SELECT id FROM `groups` WHERE id = ?', [updates.group_id]);
+        if (!g) return res.status(400).json({ error: 'Group not found' });
+      }
+
+      const setClauses = [];
+      const values = [];
+      if (fields.includes('group_id'))     { setClauses.push('group_id = ?');     values.push(updates.group_id || null); }
+      if (fields.includes('os_type'))      { setClauses.push('os_type = ?');      values.push(updates.os_type); }
+      if (fields.includes('ssh_username')) { setClauses.push('ssh_username = ?'); values.push(updates.ssh_username || null); }
+      if (fields.includes('ssh_password')) { setClauses.push('ssh_password = ?'); values.push(updates.ssh_password ? encrypt(updates.ssh_password) : null); }
+      if (fields.includes('ssh_key'))      { setClauses.push('ssh_key = ?');      values.push(updates.ssh_key ? encrypt(updates.ssh_key) : null); }
+      if (fields.includes('rpc_username')) { setClauses.push('rpc_username = ?'); values.push(updates.rpc_username || null); }
+      if (fields.includes('rpc_password')) { setClauses.push('rpc_password = ?'); values.push(updates.rpc_password ? encrypt(updates.rpc_password) : null); }
+      const now = Math.floor(Date.now() / 1000);
+      setClauses.push('updated_at = ?');
+      values.push(now);
+
+      const placeholders = deviceIds.map(() => '?').join(',');
+      const result = await execute(
+        `UPDATE devices SET ${setClauses.join(', ')} WHERE id IN (${placeholders})`,
+        [...values, ...deviceIds]
+      );
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'bulk_edit_devices', targetType: 'device', targetId: null,
+        targetName: `${deviceIds.length} device(s)`, ipSource: req.realIp, result: 'success',
+        details: `Updated fields: ${fields.join(', ')}`,
+      });
+
+      res.json({ updated: result.affectedRows ?? deviceIds.length, fields });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── PUT /api/devices/:id — Update device ────────────────────────────────────
+// ENHANCED: Updated endpoint to handle agent registration updates
+router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const deviceId = req.params.id;
+    const {
+      name, ip_address, mac_address, os_type, group_id,
+      ssh_username, ssh_password, ssh_key,
+      rpc_username, rpc_password,
+    } = req.body;
+
+    // Check device exists
+    const device = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    const normalizedMac = normaliseMac(mac_address || device.mac_address);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Update device
+    await execute(
+      `UPDATE devices
+       SET name=?, ip_address=?, mac_address=?, os_type=?, group_id=?,
+           ssh_username=?, ssh_password=?, ssh_key=?,
+           rpc_username=?, rpc_password=?, updated_at=?
+       WHERE id=?`,
+      [
+        name,
+        ip_address,
+        normalizedMac,
+        os_type,
+        group_id || null,
+        ssh_username || null,
+        ssh_password ? encrypt(ssh_password) : (req.body.ssh_password === null ? null : device.ssh_password),
+        ssh_key ? encrypt(ssh_key) : (req.body.ssh_key === null ? null : device.ssh_key),
+        rpc_username || null,
+        rpc_password ? encrypt(rpc_password) : (req.body.rpc_password === null ? null : device.rpc_password),
+        now,
+        deviceId
+      ]
+    );
+
+    await audit.log({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'edit_device',
+      targetType: 'device',
+      targetId: deviceId,
+      targetName: name,
+      ipSource: req.realIp,
+      result: 'success',
+    });
+
+    const updated = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    res.json(sanitizeDevice(updated));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 module.exports = router;

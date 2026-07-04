@@ -12,6 +12,7 @@ const { query, queryOne }               = require('../db');
 const { decrypt }                       = require('../services/crypto');
 const { scpPushMany }                   = require('../services/scpPush');
 const audit                             = require('../services/audit');
+const webhook                           = require('../services/webhook');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -139,6 +140,15 @@ router.post(
     const overall =
       results.every(r => r.result === 'failure') ? 'failure' :
       results.every(r => r.result === 'success') ? 'success' : 'partial';
+
+    webhook.fire('file.push', {
+      file: req.file.originalname, remote_path: remotePath,
+      pushed_by: req.user.username, overall,
+      pushed: results.filter(r => r.result === 'success').length,
+      failed: results.filter(r => r.result === 'failure').length,
+      severity: overall === 'failure' ? 'warning' : 'info',
+      message: `${req.user.username} pushed ${req.file.originalname} to ${remotePath} (${overall})`,
+    }).catch(() => {});
 
     res.json({
       file:       req.file.originalname,

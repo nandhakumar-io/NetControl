@@ -25,7 +25,7 @@ const pct        = (u,t) => t?Math.round(u/t*100):0
 const clamp      = (v,lo,hi) => Math.min(hi,Math.max(lo,v))
 
 const cpuColor   = v => !v&&v!==0?'#475569':v>=90?'#ef4444':v>=70?'#f97316':v>=50?'#eab308':'#22c55e'
-const ramColor   = p => p>=90?'#ef4444':p>=75?'#f97316':p>=60?'#eab308':'#818cf8'
+const ramColor   = p => p>=90?'#ef4444':p>=75?'#f97316':p>=60?'#eab308':'#a78bfa'
 const diskColor  = p => p>=90?'#ef4444':p>=80?'#f97316':p>=70?'#eab308':'#22c55e'
 const latColor   = ms => ms==null?'#475569':ms<50?'#22c55e':ms<150?'#eab308':'#ef4444'
 const statusColor= s => ({online:'#22c55e',offline:'#ef4444',unknown:'#475569'}[s]||'#475569')
@@ -168,7 +168,7 @@ function FleetOverview({ devices, metrics, groups }) {
       {/* Row A: KPI cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
         {[
-          {label:'Devices',   v:devices.length, c:'#818cf8', icon:Server},
+          {label:'Devices',   v:devices.length, c:'#a78bfa', icon:Server},
           {label:'Online',    v:online,          c:'#22c55e', icon:CheckCircle2},
           {label:'Offline',   v:offline,         c:offline>0?'#ef4444':'#475569', icon:AlertTriangle},
           {label:'Reporting', v:reporting,       c:'#06b6d4', icon:Radio, sub:`of ${devices.length}`},
@@ -196,7 +196,7 @@ function FleetOverview({ devices, metrics, groups }) {
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs font-body font-semibold" style={{color:'var(--text-primary)'}}>Fleet CPU & RAM trend</span>
             <div className="flex items-center gap-3">
-              {[['#818cf8','CPU'],['#06b6d4','RAM'],['#22c55e','Net KB/s']].map(([c,l])=>(
+              {[['#a78bfa','CPU'],['#06b6d4','RAM'],['#22c55e','Net KB/s']].map(([c,l])=>(
                 <span key={l} className="flex items-center gap-1 text-[9px] font-mono" style={{color:c}}>
                   <span className="inline-block w-3 h-px" style={{background:c}}/>{l}
                 </span>
@@ -206,7 +206,7 @@ function FleetOverview({ devices, metrics, groups }) {
           <ResponsiveContainer width="100%" height={130}>
             <AreaChart data={series} margin={{top:4,right:4,left:-22,bottom:0}}>
               <defs>
-                {[['fcpu','#818cf8'],['fram','#06b6d4'],['fnet','#22c55e']].map(([id,c])=>(
+                {[['fcpu','#a78bfa'],['fram','#06b6d4'],['fnet','#22c55e']].map(([id,c])=>(
                   <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor={c} stopOpacity={0.25}/>
                     <stop offset="100%" stopColor={c} stopOpacity={0}/>
@@ -218,7 +218,7 @@ function FleetOverview({ devices, metrics, groups }) {
               <YAxis tick={{fontSize:9,fill:'#475569'}} tickLine={false} axisLine={false}/>
               <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity={0.35}/>
               <Tooltip content={<ChartTT/>}/>
-              <Area type="monotone" dataKey="cpu" name="CPU"   stroke="#818cf8" strokeWidth={2} fill="url(#fcpu)" dot={false} isAnimationActive={false}/>
+              <Area type="monotone" dataKey="cpu" name="CPU"   stroke="#a78bfa" strokeWidth={2} fill="url(#fcpu)" dot={false} isAnimationActive={false}/>
               <Area type="monotone" dataKey="ram" name="RAM"   stroke="#06b6d4" strokeWidth={2} fill="url(#fram)" dot={false} isAnimationActive={false}/>
               <Area type="monotone" dataKey="net" name="RX"    stroke="#22c55e" unit=" KB/s" strokeWidth={1.5} fill="url(#fnet)" dot={false} isAnimationActive={false}/>
             </AreaChart>
@@ -707,7 +707,7 @@ export default function MonitoringPage() {
   if(loading) return (
     <div className="flex items-center justify-center min-h-screen">
       <div className="flex flex-col items-center gap-3">
-        <Activity size={24} className="animate-pulse" style={{color:'#818cf8'}}/>
+        <Activity size={24} className="animate-pulse" style={{color:'#a78bfa'}}/>
         <p className="text-xs font-mono" style={{color:'var(--text-muted)'}}>Loading monitoring data…</p>
       </div>
     </div>

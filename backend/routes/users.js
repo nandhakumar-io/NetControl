@@ -1,6 +1,7 @@
 // routes/users.js — User management (admin only)
 const express = require('express');
 const bcrypt  = require('bcryptjs');
+const crypto  = require('crypto');
 const { body, param, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
@@ -15,6 +16,11 @@ function sanitizeUser(u) {
   const { password, ...safe } = u;
   return safe;
 }
+
+// Columns safe to return to the client. google_linked is derived so we never
+// leak the raw Google subject id, just whether an account is linked.
+const USER_FIELDS = `id, username, email, display_name, role, permissions, enabled,
+  has_password, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
 
 // ── POST /api/users/me/change-password — any authenticated user ──────────────
 // Used to satisfy must_change_password after the random one-time admin
@@ -53,8 +59,7 @@ router.post('/me/change-password',
 router.get('/', requireRole('admin'), async (req, res) => {
   try {
     const users = await query(
-      `SELECT id, username, role, permissions, enabled, created_at, last_login
-       FROM users ORDER BY created_at ASC`
+      `SELECT ${USER_FIELDS} FROM users ORDER BY created_at ASC`
     );
     res.json(users);
   } catch (e) {
@@ -67,7 +72,7 @@ router.get('/:id', requireRole('admin'), param('id').isUUID(), async (req, res) 
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
     const user = await queryOne(
-      'SELECT id, username, role, permissions, enabled, created_at, last_login FROM users WHERE id = ?',
+      `SELECT ${USER_FIELDS} FROM users WHERE id = ?`,
       [req.params.id]
     );
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -78,12 +83,18 @@ router.get('/:id', requireRole('admin'), param('id').isUUID(), async (req, res) 
 });
 
 // ── POST /api/users — create user (admin only) ───────────────────────────────
+// Password is optional IF an email is provided — that creates a "Google
+// invite": the account has no usable local password (has_password=0) and
+// can only sign in once the invited person completes Google sign-in with
+// that exact email address, which auto-links it on first login.
 router.post('/',
   requireRole('admin'),
   [
     body('username').trim().notEmpty().isLength({ min: 3, max: 50 })
       .matches(/^[a-zA-Z0-9_.-]+$/).withMessage('Username may only contain letters, numbers, _ . -'),
-    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('password').optional({ nullable: true }).isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('email').optional({ nullable: true }).trim().isEmail().withMessage('Invalid email address').isLength({ max: 255 }),
+    body('displayName').optional({ nullable: true }).trim().isLength({ max: 100 }),
     body('role').isIn(['admin', 'operator', 'viewer', 'custom']),
     body('permissions').optional().isInt({ min: 0 }),
   ],
@@ -91,29 +102,51 @@ router.post('/',
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+    const { username, password, role, permissions, displayName } = req.body;
+    const email = req.body.email ? req.body.email.toLowerCase().trim() : null;
+
+    if (!password && !email) {
+      return res.status(400).json({ error: 'Provide a password, or an email to invite the user via Google sign-in.' });
+    }
+
     try {
-      const { username, password, role, permissions } = req.body;
       const lower = username.toLowerCase().trim();
 
       const existing = await queryOne('SELECT id FROM users WHERE username = ?', [lower]);
       if (existing) return res.status(409).json({ error: 'Username already exists' });
 
-      const hash = await bcrypt.hash(password, 12);
-      const id   = uuidv4();
+      if (email) {
+        const emailClash = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
+        if (emailClash) return res.status(409).json({ error: 'A user with this email already exists' });
+      }
+
+      let hash, hasPassword;
+      if (password) {
+        hash = await bcrypt.hash(password, 12);
+        hasPassword = 1;
+      } else {
+        // Unusable placeholder — never communicated, never derivable — so
+        // local login is impossible until an admin sets a real password.
+        hash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+        hasPassword = 0;
+      }
+      const id = uuidv4();
 
       await execute(
-        'INSERT INTO users (id, username, password, role, permissions, enabled) VALUES (?, ?, ?, ?, ?, 1)',
-        [id, lower, hash, role, permissions || 0]
+        `INSERT INTO users (id, username, password, has_password, email, display_name, role, permissions, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, lower, hash, hasPassword, email, displayName || null, role, permissions || 0]
       );
 
       await audit.log({
         userId: req.user.id, username: req.user.username,
         action: 'create_user', targetType: 'user', targetId: id,
         targetName: lower, ipSource: req.realIp, result: 'success',
+        details: email && !password ? `invited via Google (${email})` : undefined,
       });
 
       const user = await queryOne(
-        'SELECT id, username, role, permissions, enabled, created_at, last_login FROM users WHERE id = ?',
+        `SELECT ${USER_FIELDS} FROM users WHERE id = ?`,
         [id]
       );
       res.status(201).json(user);
@@ -131,9 +164,12 @@ router.put('/:id',
     body('username').optional().trim().notEmpty().isLength({ min: 3, max: 50 })
       .matches(/^[a-zA-Z0-9_.-]+$/),
     body('password').optional().isLength({ min: 6 }),
+    body('email').optional({ nullable: true }).trim().isEmail().withMessage('Invalid email address').isLength({ max: 255 }),
+    body('displayName').optional({ nullable: true }).trim().isLength({ max: 100 }),
     body('role').optional().isIn(['admin', 'operator', 'viewer', 'custom']),
     body('permissions').optional().isInt({ min: 0 }),
     body('enabled').optional().isBoolean(),
+    body('unlinkGoogle').optional().isBoolean(),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -158,23 +194,45 @@ router.put('/:id',
       const role        = req.body.role        ?? existing.role;
       const permissions = req.body.permissions ?? existing.permissions;
       const enabled     = req.body.enabled     !== undefined ? (req.body.enabled ? 1 : 0) : existing.enabled;
+      const displayName = req.body.displayName !== undefined ? (req.body.displayName || null) : existing.display_name;
+      const email       = req.body.email       !== undefined ? (req.body.email ? req.body.email.toLowerCase().trim() : null) : existing.email;
 
       // Check username uniqueness if changing
       if (username !== existing.username) {
         const clash = await queryOne('SELECT id FROM users WHERE username = ? AND id != ?', [username, req.params.id]);
         if (clash) return res.status(409).json({ error: 'Username already taken' });
       }
+      if (email && email !== existing.email) {
+        const clash = await queryOne('SELECT id FROM users WHERE email = ? AND id != ?', [email, req.params.id]);
+        if (clash) return res.status(409).json({ error: 'A user with this email already exists' });
+      }
+
+      // Unlinking Google is only safe if the account can still authenticate
+      // locally afterwards — either it already has a real password, or one
+      // is being set in this same request.
+      const unlinkGoogle = req.body.unlinkGoogle === true;
+      if (unlinkGoogle && !existing.google_id) {
+        return res.status(400).json({ error: 'This account is not linked to a Google account' });
+      }
+      if (unlinkGoogle && !existing.has_password && !req.body.password) {
+        return res.status(400).json({ error: 'Set a password for this user before unlinking Google — otherwise they would be locked out.' });
+      }
+
+      const hasPassword = req.body.password ? 1 : existing.has_password;
+      const googleId = unlinkGoogle ? null : existing.google_id;
 
       if (req.body.password) {
         const hash = await bcrypt.hash(req.body.password, 12);
         await execute(
-          'UPDATE users SET username=?, role=?, permissions=?, enabled=?, password=? WHERE id=?',
-          [username, role, permissions, enabled, hash, req.params.id]
+          `UPDATE users SET username=?, role=?, permissions=?, enabled=?, password=?, has_password=?,
+             email=?, display_name=?, google_id=? WHERE id=?`,
+          [username, role, permissions, enabled, hash, hasPassword, email, displayName, googleId, req.params.id]
         );
       } else {
         await execute(
-          'UPDATE users SET username=?, role=?, permissions=?, enabled=? WHERE id=?',
-          [username, role, permissions, enabled, req.params.id]
+          `UPDATE users SET username=?, role=?, permissions=?, enabled=?, has_password=?,
+             email=?, display_name=?, google_id=? WHERE id=?`,
+          [username, role, permissions, enabled, hasPassword, email, displayName, googleId, req.params.id]
         );
       }
 
@@ -183,16 +241,20 @@ router.put('/:id',
       if (enabled === 0 && existing.enabled !== 0) {
         await execute('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [req.params.id]);
       }
+      // Same idea if Google was unlinked — force re-authentication
+      if (unlinkGoogle) {
+        await execute('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [req.params.id]);
+      }
 
       await audit.log({
         userId: req.user.id, username: req.user.username,
-        action: 'edit_user', targetType: 'user', targetId: req.params.id,
+        action: unlinkGoogle ? 'unlink_google_account' : 'edit_user', targetType: 'user', targetId: req.params.id,
         targetName: username, ipSource: req.realIp, result: 'success',
         details: `role=${role} enabled=${enabled}`,
       });
 
       const user = await queryOne(
-        'SELECT id, username, role, permissions, enabled, created_at, last_login FROM users WHERE id = ?',
+        `SELECT ${USER_FIELDS} FROM users WHERE id = ?`,
         [req.params.id]
       );
       res.json(user);

@@ -189,8 +189,8 @@ function ImportPanel({ groups, onImported }) {
 
       {/* Template download */}
       <div className="flex items-center gap-3 p-3 rounded-xl"
-        style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(129,140,248,0.2)' }}>
-        <FileSpreadsheet size={18} className="text-indigo-400 shrink-0" />
+        style={{ background: 'rgba(124,92,245,0.08)', border: '1px solid rgba(167,139,250,0.2)' }}>
+        <FileSpreadsheet size={18} className="text-brand-400 shrink-0" />
         <div className="flex-1 min-w-0">
           <p className="text-sm font-body font-medium" style={{ color: 'var(--text-primary)' }}>Download template first</p>
           <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Fill it in, then upload below — up to 500 devices</p>
@@ -205,8 +205,8 @@ function ImportPanel({ groups, onImported }) {
         onClick={() => inputRef.current?.click()}
         className="flex flex-col items-center justify-center gap-2 h-28 rounded-xl border-2 border-dashed cursor-pointer transition-all"
         style={{
-          borderColor: file ? 'rgba(52,211,153,0.4)' : 'rgba(129,140,248,0.25)',
-          background:  file ? 'rgba(52,211,153,0.05)' : 'rgba(99,102,241,0.04)',
+          borderColor: file ? 'rgba(52,211,153,0.4)' : 'rgba(167,139,250,0.25)',
+          background:  file ? 'rgba(52,211,153,0.05)' : 'rgba(124,92,245,0.04)',
         }}
       >
         <input
@@ -295,7 +295,7 @@ function ImportPanel({ groups, onImported }) {
                   </span>
                   {gName && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded font-body shrink-0 ${
-                      groupResolved ? 'bg-indigo-400/10 text-indigo-400' : 'bg-amber-400/10 text-amber-400'
+                      groupResolved ? 'bg-brand-500/10 text-brand-400' : 'bg-amber-400/10 text-amber-400'
                     }`}>
                       {groupResolved ? gName : `⚠ ${gName}`}
                     </span>
@@ -467,15 +467,15 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 modal-backdrop" />
       <div className="relative z-10 w-full max-w-lg animate-slide-up" onClick={e => e.stopPropagation()}>
-        <div className="glass rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(129,140,248,0.18)' }}>
+        <div className="glass rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(167,139,250,0.18)' }}>
           <div className="h-px glow-line" />
 
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-xl flex items-center justify-center"
-                style={{ background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(129,140,248,0.25)' }}>
-                <Monitor size={15} className="text-indigo-400" />
+                style={{ background: 'rgba(124,92,245,0.15)', border: '1px solid rgba(167,139,250,0.25)' }}>
+                <Monitor size={15} className="text-brand-400" />
               </div>
               <h3 className="font-display text-base" style={{ color: 'var(--text-primary)' }}>
                 {device ? 'Edit Device' : 'Add Device'}
@@ -491,7 +491,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
                 <button key={val} onClick={() => setTab(val)}
                   className={`px-4 py-1.5 rounded-lg text-xs font-body font-semibold transition-all flex items-center gap-1.5
                     ${tab === val
-                      ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
+                      ? 'bg-brand-500/20 text-brand-400 border border-brand-500/30'
                       : 'text-slate-500 hover:text-slate-300'
                     }`}>
                   {val === 'excel' && <FileSpreadsheet size={12} />}{lbl}
@@ -564,13 +564,13 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
                   </F>
                   <div className="col-span-2 px-3 py-2 rounded-xl" style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)' }}>
                     <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
-                      Used with <span className="font-mono text-indigo-400">net rpc shutdown</span> and SSH terminal.
+                      Used with <span className="font-mono text-brand-400">net rpc shutdown</span> and SSH terminal.
                     </p>
                   </div>
                 </>)}
 
                 <div className="col-span-2 px-3 py-2.5 rounded-xl"
-                  style={{ background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(129,140,248,0.15)' }}>
+                  style={{ background: 'rgba(124,92,245,0.07)', border: '1px solid rgba(167,139,250,0.15)' }}>
                   <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
                     <span className="font-semibold" style={{ color: 'var(--text-secondary)' }}>Security: </span>
                     Credentials are AES-256 encrypted at rest and never sent to the browser.

@@ -92,7 +92,13 @@ function unregisterSchedule(scheduleId) {
 }
 
 async function loadAllSchedules() {
-  const schedules = await query('SELECT * FROM schedules WHERE enabled = 1');
+  let schedules;
+  try {
+    schedules = await query('SELECT * FROM schedules WHERE enabled = 1');
+  } catch (e) {
+    console.error('[Scheduler] Failed to load schedules — will retry on next call:', e.message);
+    return;
+  }
   let registered = 0;
   for (const s of schedules) {
     if (registerSchedule(s)) registered++;
@@ -101,4 +107,3 @@ async function loadAllSchedules() {
 }
 
 module.exports = { registerSchedule, unregisterSchedule, loadAllSchedules, executeScheduledAction };
-

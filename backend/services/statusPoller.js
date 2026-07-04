@@ -87,6 +87,18 @@ async function isReachable(device) {
 
 // ── Poll a single device ──────────────────────────────────────────────────────
 async function pollDevice(device, nowSec) {
+  // Devices awaiting admin approval are left alone entirely — no TCP probing,
+  // no status overwrite — regardless of whether their agent is actively
+  // reporting or has gone silent. The approval UI depends on status staying
+  // 'needs_approval' until an admin explicitly approves the device.
+  if (device.status === 'needs_approval') {
+    if (device.agent_key_hash) {
+      // Still bump last_seen so the admin can see the agent is alive.
+      await execute('UPDATE devices SET last_seen = ? WHERE id = ?', [nowSec, device.id]).catch(() => {});
+    }
+    return { id: device.id, name: device.name, newStatus: 'needs_approval', oldStatus: device.status, method: 'skip' };
+  }
+
   // Agent path: re-fetch last_seen fresh to avoid trusting stale batch data
   if (device.agent_key_hash) {
     const fresh = await queryOne(
@@ -126,23 +138,47 @@ async function pollDevice(device, nowSec) {
 
 // ── Bulk flush status changes to DB ──────────────────────────────────────────
 async function flushToDB(results, nowSec) {
-  const toOnline  = [];
-  const toOffline = [];
+  // BUG FIX: previously ANY device reported 'online' this cycle — including
+  // ones fast-pathed as online purely because they were still inside the
+  // agent grace window — had last_seen stamped to nowSec here. That created
+  // a feedback loop: check "is last_seen < 15s old?" -> yes -> mark online
+  // -> immediately reset last_seen to now -> next cycle is guaranteed fresh
+  // again. A dead agent's last_seen could never actually age past the grace
+  // window, so it stayed "online" forever even with no real heartbeat.
+  //
+  // Fix: only devices confirmed online via a genuine TCP probe get last_seen
+  // refreshed here (it means "last confirmed reachable"). Agent devices only
+  // get last_seen updated by a real heartbeat POST in routes/metrics.js.
+  const toOnlineTcp   = [];
+  const toOnlineAgent = [];
+  const toOffline     = [];
 
   for (const r of results) {
     if (r.method === 'skip') continue;
-    if (r.newStatus === 'online')  toOnline.push(r.id);
+    if (r.newStatus === 'online' && r.method === 'tcp')   toOnlineTcp.push(r.id);
+    if (r.newStatus === 'online' && r.method === 'agent') toOnlineAgent.push(r.id);
     if (r.newStatus === 'offline') toOffline.push(r.id);
   }
 
   const tasks = [];
 
-  if (toOnline.length) {
-    const ph = toOnline.map(() => '?').join(',');
+  if (toOnlineTcp.length) {
+    const ph = toOnlineTcp.map(() => '?').join(',');
     tasks.push(execute(
       `UPDATE devices SET status = 'online', last_seen = ? WHERE id IN (${ph})`,
-      [nowSec, ...toOnline]
+      [nowSec, ...toOnlineTcp]
     ).catch(e => console.error('[Poller] online flush:', e.message)));
+  }
+
+  if (toOnlineAgent.length) {
+    // Status only — last_seen is left untouched so the real heartbeat age
+    // keeps accumulating and can actually exceed AGENT_GRACE_SEC when the
+    // agent goes silent.
+    const ph = toOnlineAgent.map(() => '?').join(',');
+    tasks.push(execute(
+      `UPDATE devices SET status = 'online' WHERE id IN (${ph})`,
+      toOnlineAgent
+    ).catch(e => console.error('[Poller] online(agent) flush:', e.message)));
   }
 
   if (toOffline.length) {
@@ -155,13 +191,27 @@ async function flushToDB(results, nowSec) {
 
   await Promise.all(tasks);
 
-  // Fire offline alerts for devices that just went offline
+  // Fire offline alerts + webhooks for devices that just transitioned status
+  const webhook = require('./webhook');
   for (const r of results) {
+    if (r.oldStatus === r.newStatus) continue;
+
     if (r.oldStatus === 'online' && r.newStatus === 'offline') {
       try {
         const { evaluateOffline } = require('../routes/alerts');
         setImmediate(() => evaluateOffline(r.id, r.name).catch(() => {}));
       } catch {}
+      webhook.fire('device.offline', {
+        device_id: r.id, device_name: r.name, severity: 'warning',
+        message: `${r.name} went offline`,
+      }).catch(() => {});
+    }
+
+    if (r.oldStatus && r.oldStatus !== 'online' && r.newStatus === 'online') {
+      webhook.fire('device.online', {
+        device_id: r.id, device_name: r.name, severity: 'info',
+        message: `${r.name} came back online`,
+      }).catch(() => {});
     }
   }
 }

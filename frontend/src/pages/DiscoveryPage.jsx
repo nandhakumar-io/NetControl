@@ -133,7 +133,7 @@ function NewScanModal({ open, onClose, onCreated }) {
         <div className="relative z-10 w-full max-w-lg animate-slide-up" onClick={e => e.stopPropagation()}>
           <div className="rounded-2xl overflow-hidden max-h-[85vh] flex flex-col"
             style={{ background: 'var(--bg-card)', border: '1px solid var(--border-mid)', boxShadow: '0 24px 64px rgba(0,0,0,0.4)' }}>
-            <div style={{ height: 2, background: 'linear-gradient(90deg,#38bdf8,#818cf8)' }} />
+            <div style={{ height: 2, background: 'linear-gradient(90deg,#38bdf8,#a78bfa)' }} />
             <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: 'rgba(56,189,248,0.15)', border: '1px solid rgba(56,189,248,0.3)' }}>
@@ -326,7 +326,7 @@ function ImportModal({ open, onClose, onDone, scanId, results }) {
       <div className="relative z-10 w-full max-w-6xl animate-slide-up" onClick={e => e.stopPropagation()}>
         <div className="glass rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(255,255,255,0.1)', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
           {/* Accent bar */}
-          <div style={{ height: 2, background: 'linear-gradient(90deg,#38bdf8,#818cf8,#34d399)' }} />
+          <div style={{ height: 2, background: 'linear-gradient(90deg,#38bdf8,#a78bfa,#34d399)' }} />
 
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 shrink-0" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
@@ -514,8 +514,8 @@ function ImportModal({ open, onClose, onDone, scanId, results }) {
 
           {/* Security note */}
           <div className="px-6 py-2.5 shrink-0 flex items-center gap-2"
-            style={{ borderTop: '1px solid var(--border-subtle)', background: 'rgba(99,102,241,0.05)' }}>
-            <Info size={11} style={{ color: '#818cf8' }} />
+            style={{ borderTop: '1px solid var(--border-subtle)', background: 'rgba(124,92,245,0.05)' }}>
+            <Info size={11} style={{ color: '#a78bfa' }} />
             <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>
               Credentials are AES-256 encrypted at rest and never exposed back to the browser.
             </p>

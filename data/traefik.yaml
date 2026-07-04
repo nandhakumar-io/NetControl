@@ -1,0 +1,14 @@
+api:
+  dashboard: true
+log:
+  level: DEBUG
+entryPoints:
+  http:
+    address: ":80"
+serversTransport:
+  insecureSkipVerify: true
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false 
+

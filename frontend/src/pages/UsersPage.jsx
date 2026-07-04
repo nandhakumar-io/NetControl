@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Users, Plus, Shield, ShieldOff, Trash2, Pencil,
   Activity, Search, RefreshCw, CheckCircle2, XCircle,
-  Clock, Layers, X, Check, AlertTriangle, Lock
+  Clock, Layers, X, Check, AlertTriangle, Lock, Link2
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -61,7 +61,7 @@ function GroupAccessPanel({ user, allGroups, onClose, onSaved }) {
       <div className="relative z-10 w-full max-w-md rounded-2xl overflow-hidden animate-slide-up"
         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}
         onClick={e => e.stopPropagation()}>
-        <div style={{ height: 3, background: 'linear-gradient(90deg,#38bdf8,#818cf8)' }} />
+        <div style={{ height: 3, background: 'linear-gradient(90deg,#38bdf8,#a78bfa)' }} />
         <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center"
@@ -139,8 +139,15 @@ function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onAc
           <div className="flex items-center gap-2">
             <p className="text-sm font-body font-medium truncate" style={{ color: 'var(--text-primary)' }}>{user.username}</p>
             {isSelf && <span className="text-[9px] px-1.5 py-0.5 rounded font-body" style={{ background: 'var(--bg-input)', color: 'var(--text-muted)' }}>you</span>}
+            {user.google_linked && (
+              <span title="Linked to Google" className="flex items-center">
+                <Link2 size={10} style={{ color: '#34d399' }} />
+              </span>
+            )}
           </div>
-          <p className="text-[10px] font-body" style={{ color: 'var(--text-muted)' }}>Created {formatTs(user.created_at)}</p>
+          <p className="text-[10px] font-body truncate" style={{ color: 'var(--text-muted)' }}>
+            {user.email || `Created ${formatTs(user.created_at)}`}
+          </p>
         </div>
       </div>
 
@@ -172,7 +179,7 @@ function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onAc
       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
         <button onClick={() => onActivity(user)} title="Activity"
           className="p-1.5 rounded-lg transition-all" style={{ color: 'var(--text-muted)' }}
-          onMouseEnter={e => { e.currentTarget.style.color = '#818cf8'; e.currentTarget.style.background = 'rgba(129,140,248,0.1)' }}
+          onMouseEnter={e => { e.currentTarget.style.color = '#a78bfa'; e.currentTarget.style.background = 'rgba(167,139,250,0.1)' }}
           onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent' }}>
           <Activity size={13} />
         </button>
@@ -301,7 +308,7 @@ export default function UsersPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-5 gap-3 mb-5">
-        {[['Total', counts.total, '#818cf8'], ['Admin', counts.admin, '#a78bfa'],
+        {[['Total', counts.total, '#a78bfa'], ['Admin', counts.admin, '#a78bfa'],
           ['Operator', counts.operator, '#38bdf8'], ['Viewer', counts.viewer, '#94a3b8'],
           ['Disabled', counts.disabled, '#f87171']].map(([l, v, c]) => (
           <div key={l} className="glass rounded-2xl p-4">

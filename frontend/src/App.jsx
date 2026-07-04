@@ -6,6 +6,7 @@ import { useThemeStore } from './store/themeStore'
 import { usePermissions } from './hooks/usePermissions'
 import Layout          from './components/layout/Layout'
 import LoginPage       from './pages/LoginPage'
+import GoogleCallbackPage from './pages/GoogleCallbackPage'
 import DashboardPage   from './pages/DashboardPage'
 import DevicesPage     from './pages/DevicesPage'
 import GroupsPage      from './pages/GroupsPage'
@@ -40,6 +41,20 @@ function RequireRole({ roles, children }) {
   return children
 }
 
+/**
+ * RequirePermission — same idea as RequireRole, but checks a permission bit
+ * instead of a fixed role list. This mirrors the bits Layout.jsx already
+ * uses to decide which links to show in the sidebar, so a user who can't
+ * see "Audit Log" in the nav also can't reach /audit by typing the URL.
+ */
+function RequirePermission({ bit, children }) {
+  const user = useAuthStore(s => s.user)
+  const { can } = usePermissions()
+  if (user === null) return null
+  if (!can(bit)) return <Navigate to="/dashboard" replace />
+  return children
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -68,6 +83,7 @@ export default function App() {
       />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/callback" element={<GoogleCallbackPage />} />
 
         {/* Terminal opens in a new tab — outside the main Layout */}
         <Route
@@ -79,15 +95,15 @@ export default function App() {
         <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard"     element={<DashboardPage />} />
-          <Route path="devices"       element={<DevicesPage />} />
-          <Route path="groups"        element={<GroupsPage />} />
-          <Route path="remote-access" element={<RemoteAccessPage />} />
-          <Route path="file-push"     element={<FilePushPage />} />
-          <Route path="schedules"     element={<SchedulesPage />} />
-          <Route path="audit"         element={<AuditPage />} />
-          <Route path="monitoring"     element={<MonitoringPage />} />
-          <Route path="alerts"          element={<AlertsPage />} />
-          <Route path="discovery"       element={<DiscoveryPage />} />
+          <Route path="devices"       element={<RequirePermission bit={1}><DevicesPage /></RequirePermission>} />
+          <Route path="groups"        element={<RequirePermission bit={8}><GroupsPage /></RequirePermission>} />
+          <Route path="remote-access" element={<RequirePermission bit={1}><RemoteAccessPage /></RequirePermission>} />
+          <Route path="file-push"     element={<RequirePermission bit={1}><FilePushPage /></RequirePermission>} />
+          <Route path="schedules"     element={<RequirePermission bit={32}><SchedulesPage /></RequirePermission>} />
+          <Route path="audit"         element={<RequirePermission bit={128}><AuditPage /></RequirePermission>} />
+          <Route path="monitoring"     element={<RequirePermission bit={1}><MonitoringPage /></RequirePermission>} />
+          <Route path="alerts"          element={<RequirePermission bit={1}><AlertsPage /></RequirePermission>} />
+          <Route path="discovery"       element={<RequirePermission bit={1024}><DiscoveryPage /></RequirePermission>} />
 
           {/* Admin-only routes */}
           <Route

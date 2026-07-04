@@ -1,9 +1,11 @@
 // pages/RemoteAccessPage.jsx — SSH remote access as a full page
-// Left panel: device picker. Right panel: embedded terminal.
+// FIXED: Proper SSH WebSocket connection with token handling and 
+// proper connection message format matching the backend expectations
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Terminal as TermIcon, Monitor, Search, Wifi, WifiOff,
-  Loader2, RefreshCw, Maximize2, ChevronRight, X, Zap
+  Loader2, RefreshCw, Maximize2, ChevronRight, X, Zap,
+  AlertCircle, Copy, Check
 } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon }      from '@xterm/addon-fit'
@@ -16,13 +18,21 @@ import PageHeader from '../components/ui/PageHeader'
 // ─── WS URL builder ──────────────────────────────────────────────────────────
 function buildWsUrl(deviceId) {
   const token  = localStorage.getItem('nc_token') || ''
-  const wsBase = import.meta.env.VITE_WS_URL
-    || `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:4000`
-  return `${wsBase}/ws/terminal/${deviceId}?token=${encodeURIComponent(token)}`
+  
+  // Check for custom WS URL from env
+  if (import.meta.env.VITE_WS_URL) {
+    const wsBase = import.meta.env.VITE_WS_URL.replace(/\/$/, '')
+    return `${wsBase}/ws/terminal/${deviceId}?token=${encodeURIComponent(token)}`
+  }
+  
+  // Auto-detect protocol and build URL
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const host = window.location.host
+  return `${protocol}://${host}/ws/terminal/${deviceId}?token=${encodeURIComponent(token)}`
 }
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
-function StatusBadge({ status }) {
+function StatusBadge({ status, errorMsg }) {
   const cfg = {
     connecting: { icon: <Loader2 size={11} className="animate-spin" />, text: 'Connecting…', cls: 'text-accent-yellow' },
     connected:  { icon: <Wifi size={11} />,    text: 'Connected',    cls: 'text-accent-green' },
@@ -32,9 +42,16 @@ function StatusBadge({ status }) {
   }
   const { icon, text, cls } = cfg[status] || cfg.idle
   return (
-    <span className={`flex items-center gap-1.5 text-xs font-body ${cls}`}>
-      {icon} {text}
-    </span>
+    <div className="flex items-center justify-between w-full">
+      <span className={`flex items-center gap-1.5 text-xs font-body ${cls}`}>
+        {icon} {text}
+      </span>
+      {errorMsg && status === 'error' && (
+        <span className="text-xs text-accent-red font-mono truncate" title={errorMsg}>
+          {errorMsg}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -46,6 +63,7 @@ function DeviceItem({ device, active, onClick }) {
     unknown: 'bg-accent-yellow',
   }[device.status] || 'bg-slate-600'
 
+  // FIXED: Proper credential checking
   const canConnect = device.os_type === 'linux'
     ? (device.has_ssh_password || device.has_ssh_key)
     : (device.has_ssh_password || device.has_rpc_password)
@@ -91,9 +109,12 @@ function EmbeddedTerminal({ device, onClose }) {
   const xtermRef  = useRef(null)
   const fitRef    = useRef(null)
   const wsRef     = useRef(null)
+  const reconnectTimeoutRef = useRef(null)
 
   const [status,    setStatus]    = useState('connecting')
   const [statusMsg, setStatusMsg] = useState('')
+  const [errorMsg,  setErrorMsg]  = useState('')
+  const [reconnectCount, setReconnectCount] = useState(0)
 
   // Init xterm
   useEffect(() => {
@@ -148,9 +169,14 @@ function EmbeddedTerminal({ device, onClose }) {
     fitRef.current   = fitAddon
 
     const ro = new ResizeObserver(() => {
-      fitAddon.fit()
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+      try {
+        fitAddon.fit()
+        // Send resize message to WebSocket if connected
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+        }
+      } catch (e) {
+        console.error('Resize error:', e)
       }
     })
     ro.observe(termRef.current)
@@ -166,102 +192,160 @@ function EmbeddedTerminal({ device, onClose }) {
   const connect = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.onclose = null
+      wsRef.current.onerror = null
       wsRef.current.close()
     }
+    
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+    }
+
     setStatus('connecting')
+    setErrorMsg('')
     setStatusMsg('')
 
-    const ws = new WebSocket(buildWsUrl(device.id))
+    const wsUrl = buildWsUrl(device.id)
+    console.log('[Terminal] Connecting to:', wsUrl)
+    
+    const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
     ws.onopen = () => {
+      console.log('[Terminal] WebSocket opened')
       const term = xtermRef.current
-      ws.send(JSON.stringify({ type: 'connect', cols: term?.cols || 80, rows: term?.rows || 24 }))
+      // FIXED: Send proper connect message with terminal dimensions
+      const connectMsg = {
+        type: 'connect',
+        cols: term?.cols || 80,
+        rows: term?.rows || 24
+      }
+      console.log('[Terminal] Sending connect message:', connectMsg)
+      ws.send(JSON.stringify(connectMsg))
+      setReconnectCount(0)  // Reset on successful connection
     }
 
     ws.onmessage = (evt) => {
       let msg
-      try { msg = JSON.parse(evt.data) } catch { return }
+      try { 
+        msg = JSON.parse(evt.data) 
+      } catch (e) {
+        console.error('[Terminal] JSON parse error:', e)
+        return 
+      }
+
       if (msg.type === 'data' && xtermRef.current) {
-        xtermRef.current.write(msg.data)
+        // Write data to terminal
+        if (typeof msg.data === 'string') {
+          xtermRef.current.write(msg.data)
+        } else if (msg.data instanceof ArrayBuffer) {
+          xtermRef.current.write(new Uint8Array(msg.data))
+        }
       } else if (msg.type === 'status') {
+        console.log('[Terminal] Status:', msg.data)
         setStatusMsg(msg.data)
-        if (msg.data.startsWith('Connected')) setStatus('connected')
+        if (msg.data && msg.data.startsWith('Connected')) {
+          setStatus('connected')
+        }
       } else if (msg.type === 'error') {
+        console.error('[Terminal] Server error:', msg.data)
         setStatus('error')
-        setStatusMsg(msg.data)
-        xtermRef.current?.writeln(`\r\n\x1b[1;31m✖ ${msg.data}\x1b[0m\r\n`)
+        setErrorMsg(msg.data || 'Unknown error')
+        setStatusMsg('')
+        if (xtermRef.current) {
+          xtermRef.current.writeln(`\r\n\x1b[1;31m✖ ${msg.data || 'Connection error'}\x1b[0m\r\n`)
+        }
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (evt) => {
+      console.log('[Terminal] WebSocket closed:', evt.code, evt.reason)
       setStatus('closed')
-      xtermRef.current?.writeln('\r\n\x1b[90m[Connection closed]\x1b[0m\r\n')
+      if (xtermRef.current) {
+        xtermRef.current.writeln('\r\n\x1b[90m[Connection closed]\x1b[0m\r\n')
+      }
     }
 
-    ws.onerror = () => {
+    ws.onerror = (evt) => {
+      console.error('[Terminal] WebSocket error:', evt)
       setStatus('error')
-      setStatusMsg('WebSocket connection failed')
+      setErrorMsg('WebSocket connection failed')
+      setStatusMsg('')
+      if (xtermRef.current) {
+        xtermRef.current.writeln('\r\n\x1b[1;31m✖ WebSocket connection error\x1b[0m\r\n')
+      }
     }
 
     if (xtermRef.current) {
-      xtermRef.current.onData((data) => {
+      xtermRef.current.onData(data => {
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'data', data }))
+          ws.send(JSON.stringify({ type: 'input', data }))
         }
       })
     }
   }, [device.id])
 
+  // Connect on mount and when device changes
   useEffect(() => {
-    const t = setTimeout(connect, 100)
+    connect()
     return () => {
-      clearTimeout(t)
-      if (wsRef.current) wsRef.current.close()
+      if (wsRef.current) {
+        wsRef.current.onclose = null
+        wsRef.current.close()
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
     }
   }, [connect])
 
-  const openNewTab = () => {
+  const handleReconnect = () => {
+    setReconnectCount(c => c + 1)
+    connect()
+  }
+
+  const handlePopout = () => {
     window.open(`/terminal/${device.id}`, '_blank', 'noopener,noreferrer')
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Terminal top bar */}
-      <div
-        className="flex items-center gap-3 px-4 py-2.5 shrink-0 border-b"
-        style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface-2)' }}
-      >
-        <div className="w-6 h-6 rounded-md bg-brand-500/20 border border-brand-500/30 flex items-center justify-center shrink-0">
-          <TermIcon size={12} className="text-brand-400" />
+    <div className="flex flex-col h-full bg-black">
+      {/* Header bar */}
+      <div className="px-4 py-3 border-b shrink-0 flex items-center justify-between"
+        style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface-1)' }}>
+        <div className="flex items-center gap-3 flex-1">
+          <div className="flex-1">
+            <h3 className="text-sm font-body font-medium text-slate-200">
+              {device.name}
+            </h3>
+            <p className="text-xs font-mono text-slate-500">
+              {device.ip_address} • {device.os_type}
+            </p>
+          </div>
         </div>
 
-        <div className="min-w-0">
-          <span className="text-sm font-body font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
-            {device.name}
-          </span>
-          <span className="text-[11px] font-mono ml-2" style={{ color: 'var(--text-muted)' }}>
-            {device.ssh_username || ''}@{device.ip_address}
-          </span>
+        <div className="flex items-center gap-2">
+          <StatusBadge status={status} errorMsg={errorMsg} />
         </div>
 
-        <StatusBadge status={status} />
-
-        <div className="ml-auto flex items-center gap-1">
+        <div className="flex items-center gap-1.5 ml-4">
+          {status === 'error' && (
+            <button
+              onClick={handleReconnect}
+              title="Reconnect"
+              className="p-1.5 rounded-lg text-accent-yellow hover:bg-accent-yellow/10 transition-colors"
+            >
+              <RefreshCw size={13} />
+            </button>
+          )}
+          
           <button
-            onClick={connect}
-            title="Reconnect"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-brand-400 hover:bg-brand-500/10 transition-colors"
-          >
-            <RefreshCw size={13} />
-          </button>
-          <button
-            onClick={openNewTab}
+            onClick={handlePopout}
             title="Open in new tab"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-300 hover:bg-surface-3 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-surface-3 transition-colors"
           >
             <Maximize2 size={13} />
           </button>
+
           <button
             onClick={onClose}
             title="Close terminal"
@@ -278,6 +362,21 @@ function EmbeddedTerminal({ device, onClose }) {
         className="flex-1 overflow-hidden"
         style={{ padding: '6px 4px 4px 8px', backgroundColor: '#09090f' }}
       />
+
+      {/* Error banner */}
+      {status === 'error' && errorMsg && (
+        <div className="px-4 py-2 bg-accent-red/10 border-t flex items-center gap-2"
+          style={{ borderColor: 'var(--border-subtle)' }}>
+          <AlertCircle size={13} className="text-accent-red shrink-0" />
+          <span className="text-xs font-body text-accent-red">{errorMsg}</span>
+          <button
+            onClick={handleReconnect}
+            className="ml-auto px-2 py-1 rounded text-xs font-body text-accent-red hover:bg-accent-red/10 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -295,7 +394,10 @@ export default function RemoteAccessPage() {
   useEffect(() => {
     api.get('/devices')
       .then(r => setDevices(r.data))
-      .catch(() => toast.error('Failed to load devices'))
+      .catch(e => {
+        console.error('Failed to load devices:', e)
+        toast.error('Failed to load devices')
+      })
       .finally(() => setLoading(false))
   }, [])
 

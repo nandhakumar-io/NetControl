@@ -213,6 +213,134 @@ const MIGRATIONS = [
   //   sql: \`ALTER TABLE ... ;\`,
   // },
 
+  {
+    id: '004_google_auth',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN email        VARCHAR(255) DEFAULT NULL,
+        ADD COLUMN google_id    VARCHAR(255) DEFAULT NULL,
+        ADD COLUMN has_password TINYINT(1)   NOT NULL DEFAULT 1;
+
+      ALTER TABLE users ADD UNIQUE INDEX uq_users_email     (email);
+      ALTER TABLE users ADD UNIQUE INDEX uq_users_google_id (google_id);
+    `,
+  },
+
+  // BUG FIX: routes/devices.js (PUT /:id and POST /:id/approve-registration)
+  // reads and writes `updated_at` and `last_approved_at` on the devices
+  // table, and routes/metrics.js's agent-registration flow relies on the
+  // approval workflow those columns support — but no migration ever added
+  // them, so both endpoints failed at runtime with
+  // "Unknown column 'updated_at' in 'field list'".
+  {
+    id: '005_device_approval_workflow',
+    sql: `
+      ALTER TABLE devices
+        ADD COLUMN updated_at       INT UNSIGNED DEFAULT NULL,
+        ADD COLUMN last_approved_at INT UNSIGNED DEFAULT NULL;
+    `,
+  },
+
+  // BUG FIX: on any DB that already had a `devices` table before
+  // agent_key_hash/agent_registered_at existed (created via the old
+  // db/setup.js schema), migration 001's `CREATE TABLE IF NOT EXISTS`
+  // is a no-op on an existing table, so the column was never added.
+  // That caused every poller cycle to fail with "Unknown column
+  // 'agent_key_hash' in 'field list'" (statusPoller.js, routes/metrics.js,
+  // routes/devices.js, services/webTerminal.js all depend on it).
+  {
+    id: '006_agent_key_hash_backfill',
+    sql: `
+      SET @col_exists = (
+        SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'agent_key_hash'
+      );
+      SET @sql = IF(@col_exists = 0,
+        'ALTER TABLE devices ADD COLUMN agent_key_hash CHAR(64) DEFAULT NULL, ADD COLUMN agent_registered_at INT UNSIGNED DEFAULT NULL, ADD INDEX idx_devices_agent_key (agent_key_hash)',
+        'SELECT 1');
+      PREPARE stmt FROM @sql;
+      EXECUTE stmt;
+      DEALLOCATE PREPARE stmt;
+    `,
+  },
+
+  // BUG FIX: same class of issue as 006, but for `users`. Migration 001's
+  // `CREATE TABLE IF NOT EXISTS users` declares enabled/permissions/
+  // display_name, but on any DB where `users` already existed (old
+  // db/setup.js schema, which only had id/username/password/role/
+  // created_at/last_login), those columns were never added — only
+  // must_change_password was patched in separately by setup.js. Every
+  // query in routes/users.js and routes/auth.js that reads/writes
+  // enabled/permissions/display_name fails with
+  // "Unknown column 'enabled' in 'field list'" (etc.) until this runs.
+  {
+    id: '007_users_enabled_permissions_backfill',
+    sql: `
+      SET @c1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'enabled');
+      SET @sql1 = IF(@c1 = 0,
+        'ALTER TABLE users ADD COLUMN enabled TINYINT(1) NOT NULL DEFAULT 1',
+        'SELECT 1');
+      PREPARE stmt1 FROM @sql1; EXECUTE stmt1; DEALLOCATE PREPARE stmt1;
+
+      SET @c2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'permissions');
+      SET @sql2 = IF(@c2 = 0,
+        'ALTER TABLE users ADD COLUMN permissions INT UNSIGNED NOT NULL DEFAULT 255',
+        'SELECT 1');
+      PREPARE stmt2 FROM @sql2; EXECUTE stmt2; DEALLOCATE PREPARE stmt2;
+
+      SET @c3 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'display_name');
+      SET @sql3 = IF(@c3 = 0,
+        'ALTER TABLE users ADD COLUMN display_name VARCHAR(100) DEFAULT NULL',
+        'SELECT 1');
+      PREPARE stmt3 FROM @sql3; EXECUTE stmt3; DEALLOCATE PREPARE stmt3;
+    `,
+  },
+
+  // BUG FIX: same class of issue as 006/007, but for the remaining `devices`
+  // columns from migration 001 (os_version, arch, ssh_port, winrm_*) that
+  // never got backfilled onto pre-existing installs. Causes
+  // "Unknown column 'os_version' in 'field list'" (and friends) in
+  // routes/metrics.js, routes/actions.js, routes/discovery.js,
+  // routes/filePush.js, services/scheduler.js, services/scpPush.js,
+  // services/ssh.js, services/sshProxy.js.
+  {
+    id: '008_devices_columns_backfill',
+    sql: `
+      SET @d1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'os_version');
+      SET @sqld1 = IF(@d1 = 0, 'ALTER TABLE devices ADD COLUMN os_version VARCHAR(100) DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtd1 FROM @sqld1; EXECUTE stmtd1; DEALLOCATE PREPARE stmtd1;
+
+      SET @d2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'arch');
+      SET @sqld2 = IF(@d2 = 0, 'ALTER TABLE devices ADD COLUMN arch VARCHAR(20) DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtd2 FROM @sqld2; EXECUTE stmtd2; DEALLOCATE PREPARE stmtd2;
+
+      SET @d3 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'ssh_port');
+      SET @sqld3 = IF(@d3 = 0, 'ALTER TABLE devices ADD COLUMN ssh_port SMALLINT UNSIGNED DEFAULT 22', 'SELECT 1');
+      PREPARE stmtd3 FROM @sqld3; EXECUTE stmtd3; DEALLOCATE PREPARE stmtd3;
+
+      SET @d4 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'winrm_username');
+      SET @sqld4 = IF(@d4 = 0, 'ALTER TABLE devices ADD COLUMN winrm_username VARCHAR(100) DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtd4 FROM @sqld4; EXECUTE stmtd4; DEALLOCATE PREPARE stmtd4;
+
+      SET @d5 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'winrm_password');
+      SET @sqld5 = IF(@d5 = 0, 'ALTER TABLE devices ADD COLUMN winrm_password TEXT DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtd5 FROM @sqld5; EXECUTE stmtd5; DEALLOCATE PREPARE stmtd5;
+
+      SET @d6 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'winrm_port');
+      SET @sqld6 = IF(@d6 = 0, 'ALTER TABLE devices ADD COLUMN winrm_port SMALLINT UNSIGNED DEFAULT 5985', 'SELECT 1');
+      PREPARE stmtd6 FROM @sqld6; EXECUTE stmtd6; DEALLOCATE PREPARE stmtd6;
+    `,
+  },
+
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -281,6 +409,20 @@ run()
       console.log('  ✓ discovery_tables (discovery_scans, discovery_results)');
     } catch (e) {
       console.warn('  ⚠  discovery_tables:', e.message);
+    }
+    try {
+      const { migrateBruteForceTables } = require('./migrate-bruteforce');
+      await migrateBruteForceTables();
+      console.log('  ✓ bruteforce_tables (ip_bans, ip_ban_log)');
+    } catch (e) {
+      console.warn('  ⚠  bruteforce_tables:', e.message);
+    }
+    try {
+      const { migrateSnmpTables } = require('./migrate-snmp');
+      await migrateSnmpTables();
+      console.log('  ✓ snmp_tables (system_settings, audit_log.snmp_synced)');
+    } catch (e) {
+      console.warn('  ⚠  snmp_tables:', e.message);
     }
     console.log('\n✅ All done.\n');
   })

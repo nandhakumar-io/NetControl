@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { X, UserPlus, Pencil, Eye, EyeOff } from 'lucide-react'
+import { X, UserPlus, Pencil, Eye, EyeOff, Mail, Link2, Unlink } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import { PERM } from '../../hooks/usePermissions'
@@ -7,6 +7,8 @@ import { PERM } from '../../hooks/usePermissions'
 const EMPTY = {
   username:    '',
   password:    '',
+  email:       '',
+  displayName: '',
   role:        'operator',
   permissions: 0,
   enabled:     true,
@@ -37,18 +39,24 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
   const [loading, setLoading] = useState(false)
   const [errors, setErrors]   = useState({})
   const [showPw, setShowPw]   = useState(false)
+  const [inviteMode, setInviteMode] = useState(false) // create-only: Google invite (no password)
+  const [confirmUnlink, setConfirmUnlink] = useState(false)
 
   useEffect(() => {
     if (open) {
       setForm(user ? {
         username:    user.username,
         password:    '',
+        email:       user.email || '',
+        displayName: user.display_name || '',
         role:        user.role,
         permissions: user.permissions || 0,
         enabled:     !!user.enabled,
       } : EMPTY)
       setErrors({})
       setShowPw(false)
+      setInviteMode(false)
+      setConfirmUnlink(false)
     }
   }, [open, user])
 
@@ -63,8 +71,13 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
     const e = {}
     if (!form.username.trim()) e.username = 'Required'
     else if (!/^[a-zA-Z0-9_.-]{3,50}$/.test(form.username)) e.username = 'Letters, numbers, _ . - only (3–50 chars)'
-    if (!user && !form.password) e.password = 'Required for new user'
-    else if (form.password && form.password.length < 6) e.password = 'Min 6 characters'
+    if (!user && inviteMode) {
+      if (!form.email.trim()) e.email = 'Required to invite via Google'
+    } else if (!user && !form.password) {
+      e.password = 'Required for new user (or switch to Google invite)'
+    }
+    if (form.password && form.password.length < 6) e.password = 'Min 6 characters'
+    if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = 'Invalid email address'
     setErrors(e)
     return Object.keys(e).length === 0
   }
@@ -80,13 +93,15 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
         enabled:     form.enabled,
       }
       if (form.password) payload.password = form.password
+      if (form.email.trim() || (user && user.email)) payload.email = form.email.trim() || null
+      if (form.displayName.trim() || (user && user.display_name)) payload.displayName = form.displayName.trim() || null
 
       if (user) {
         await api.put(`/users/${user.id}`, payload)
         toast.success('User updated')
       } else {
         await api.post('/users', payload)
-        toast.success('User created')
+        toast.success(inviteMode ? 'Invite created — they can now sign in with Google' : 'User created')
       }
       onSaved()
       onClose()
@@ -94,6 +109,25 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
       toast.error(e.response?.data?.error || 'Save failed')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const doUnlinkGoogle = async () => {
+    if (!user) return
+    setLoading(true)
+    try {
+      await api.put(`/users/${user.id}`, {
+        unlinkGoogle: true,
+        ...(form.password ? { password: form.password } : {}),
+      })
+      toast.success('Google account unlinked')
+      onSaved()
+      onClose()
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to unlink')
+    } finally {
+      setLoading(false)
+      setConfirmUnlink(false)
     }
   }
 
@@ -147,8 +181,59 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
               </p>}
             </F>
 
+            {/* Create-mode: choose password vs. Google invite */}
+            {!user && (
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setInviteMode(false)}
+                  className={`flex-1 py-2 rounded-lg border text-xs font-body font-medium transition-all
+                    ${!inviteMode
+                      ? (isLight ? 'bg-[#6c5ce7]/10 border-[#6c5ce7]/40 text-[#6c5ce7]' : 'bg-brand-500/15 border-brand-500/40 text-brand-400')
+                      : (isLight ? 'bg-white border-black/10 text-slate-500' : 'bg-surface-3 border-white/6 text-slate-400')}`}>
+                  Set a password
+                </button>
+                <button type="button" onClick={() => setInviteMode(true)}
+                  className={`flex-1 py-2 rounded-lg border text-xs font-body font-medium transition-all flex items-center justify-center gap-1.5
+                    ${inviteMode
+                      ? (isLight ? 'bg-[#6c5ce7]/10 border-[#6c5ce7]/40 text-[#6c5ce7]' : 'bg-brand-500/15 border-brand-500/40 text-brand-400')
+                      : (isLight ? 'bg-white border-black/10 text-slate-500' : 'bg-surface-3 border-white/6 text-slate-400')}`}>
+                  <Mail size={12} /> Invite via Google
+                </button>
+              </div>
+            )}
+
+            {/* Email — required for Google invite, optional otherwise (lets an
+                existing local account auto-link the first time it signs in
+                with Google using this address) */}
+            {(!user ? inviteMode : true) && (
+              <F label={!user ? 'Email (Google account)' : 'Email'} error={errors.email}>
+                <input
+                  type="email"
+                  className={`${baseInput} ${errors.email ? 'border-accent-red/50' : ''}`}
+                  placeholder="name@company.com"
+                  value={form.email}
+                  onChange={e => set('email', e.target.value)}
+                />
+                {!user && inviteMode && (
+                  <p className={`text-[11px] mt-1 font-body ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
+                    No password is set — this person signs in with Google using this exact address.
+                  </p>
+                )}
+              </F>
+            )}
+
+            {user && (
+              <F label="Display Name">
+                <input
+                  className={baseInput}
+                  placeholder="e.g. Jordan Doe"
+                  value={form.displayName}
+                  onChange={e => set('displayName', e.target.value)}
+                />
+              </F>
+            )}
+
             {/* Password */}
-            <F label={user ? 'New Password (blank to keep)' : 'Password'} error={errors.password}>
+            <F label={user ? 'New Password (blank to keep)' : (inviteMode ? 'Password (optional)' : 'Password')} error={errors.password}>
               <div className="relative">
                 <input
                   type={showPw ? 'text' : 'password'}
@@ -166,6 +251,49 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
                 </button>
               </div>
             </F>
+
+            {/* Google link status — edit mode only */}
+            {user && (
+              <div className={`flex items-center justify-between px-3 py-2.5 rounded-lg border
+                ${isLight ? 'bg-[#f5f5fa] border-black/[0.07]' : 'bg-surface-3 border-white/6'}`}>
+                <div className="flex items-center gap-2">
+                  {user.google_linked
+                    ? <Link2 size={13} className="text-emerald-500 shrink-0" />
+                    : <Unlink size={13} className={isLight ? 'text-slate-400' : 'text-slate-500'} />}
+                  <div>
+                    <p className={`text-xs font-body font-medium ${isLight ? 'text-[#1a1a2e]' : 'text-slate-200'}`}>
+                      {user.google_linked ? 'Linked to Google' : 'Not linked to Google'}
+                    </p>
+                    {!user.has_password && (
+                      <p className="text-[10px] font-body text-amber-500">Google sign-in only — no local password set</p>
+                    )}
+                  </div>
+                </div>
+                {user.google_linked && !confirmUnlink && (
+                  <button type="button" onClick={() => setConfirmUnlink(true)}
+                    className="text-[11px] font-body font-medium hover:underline text-accent-red">
+                    Unlink
+                  </button>
+                )}
+              </div>
+            )}
+            {user && confirmUnlink && (
+              <div className="px-3 py-2.5 rounded-lg border border-accent-red/25 bg-accent-red/5 space-y-2">
+                <p className="text-xs font-body text-accent-red">
+                  {user.has_password || form.password
+                    ? 'This user will no longer be able to sign in with Google — only their password.'
+                    : 'This account has no password yet — set one above first, or they will be locked out.'}
+                </p>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setConfirmUnlink(false)} className="btn-ghost text-xs px-2.5 py-1.5">Cancel</button>
+                  <button type="button" onClick={doUnlinkGoogle}
+                    disabled={loading || (!user.has_password && !form.password)}
+                    className="btn-danger text-xs px-2.5 py-1.5 disabled:opacity-40">
+                    Confirm Unlink
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Role */}
             <F label="Role">

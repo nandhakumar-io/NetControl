@@ -3,7 +3,8 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
-  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar
+  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar,
+  ChevronRight as ArrowIcon
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -194,25 +195,49 @@ export default function Layout() {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 group
+        `group relative flex items-center gap-3 rounded-xl transition-all duration-200
+         ${collapsed ? 'justify-center p-2' : 'px-2.5 py-2.5'}
          ${isActive
-           ? isLight ? 'bg-[#6c5ce7]/10 text-[#6c5ce7] font-semibold'
-                     : 'bg-brand-500/15 text-brand-400 border border-brand-500/25'
-           : isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
-                     : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'
+           ? isLight
+             ? 'bg-white border border-[#6c5ce7]/25 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_rgba(108,92,231,0.12)]'
+             : 'bg-brand-500/10 border border-brand-500/25 shadow-[0_0_18px_rgba(124,92,245,0.10)]'
+           : isLight
+             ? 'border border-transparent hover:bg-white hover:border-black/[0.06] hover:shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_12px_rgba(15,23,42,0.05)]'
+             : 'border border-transparent hover:bg-surface-3 hover:border-white/[0.06]'
          }`
       }
       title={collapsed ? label : undefined}
     >
       {({ isActive }) => (
         <>
-          {isLight && isActive
-            ? <div className="w-6 h-6 rounded-md bg-[#6c5ce7] flex items-center justify-center shrink-0">
-                <Icon size={13} className="text-white" />
-              </div>
-            : <Icon size={16} className="shrink-0" />
-          }
-          {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{label}</span>}
+          <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-all duration-200
+            ${isActive
+              ? isLight ? 'bg-[#6c5ce7] shadow-[0_2px_8px_rgba(108,92,231,0.35)]' : 'bg-brand-500/20 border border-brand-500/30'
+              : isLight ? 'bg-[#f2f1fb] group-hover:bg-[#eae7fb]' : 'bg-white/[0.04] group-hover:bg-white/[0.07]'
+            }`}>
+            <Icon size={15}
+              className={isActive ? (isLight ? 'text-white' : 'text-brand-400') : (isLight ? 'text-[#6c5ce7]/70' : 'text-slate-400')}
+            />
+          </div>
+          {!collapsed && (
+            <div className="min-w-0 flex-1 text-left">
+              <p className={`text-[15px] font-body font-semibold leading-tight truncate
+                ${isActive ? (isLight ? 'text-[#1a1a2e]' : 'text-slate-100') : (isLight ? 'text-slate-600' : 'text-slate-400')}`}>
+                {label}
+              </p>
+              <p className={`text-[12px] font-body leading-tight mt-0.5 truncate
+                ${isLight ? 'text-slate-400' : 'text-slate-600'}`}>
+                Click to access
+              </p>
+            </div>
+          )}
+          {!collapsed && (
+            <ArrowIcon size={13}
+              className={`shrink-0 transition-all duration-200
+                ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-60 -translate-x-1 group-hover:translate-x-0'}
+                ${isLight ? 'text-[#6c5ce7]' : 'text-brand-400'}`}
+            />
+          )}
         </>
       )}
     </NavLink>
@@ -242,7 +267,7 @@ export default function Layout() {
         </div>
 
         {/* Main Nav */}
-        <nav className="flex-1 py-4 px-2 flex flex-col gap-1 overflow-y-auto">
+        <nav className="flex-1 py-4 px-2 flex flex-col gap-1.5 overflow-y-auto">
           {NAV.map(item => <NavItem key={item.to} {...item} />)}
 
           {/* Admin section */}
@@ -250,7 +275,7 @@ export default function Layout() {
             <>
               {!collapsed && (
                 <div className="mt-3 mb-1 px-3">
-                  <p className={`text-[10px] font-body font-semibold uppercase tracking-widest ${isLight ? 'text-slate-400' : 'text-slate-600'}`}>
+                  <p className={`text-[11px] font-body font-semibold uppercase tracking-widest ${isLight ? 'text-slate-400' : 'text-slate-600'}`}>
                     Admin
                   </p>
                 </div>
@@ -268,7 +293,7 @@ export default function Layout() {
               <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0
                 ${isLight ? 'bg-[#6c5ce7] text-white' : 'bg-brand-500/20 text-brand-400'}`}>
                 {isLight
-                  ? <span className="text-white text-[10px] font-bold uppercase">{user.username?.[0] ?? 'U'}</span>
+                  ? <span className="text-white text-[12px] font-bold uppercase">{user.username?.[0] ?? 'U'}</span>
                   : <Shield size={12} />
                 }
               </div>
@@ -276,7 +301,7 @@ export default function Layout() {
                 <p className={`text-xs font-body font-medium truncate ${isLight ? 'text-[#1a1a2e]' : 'text-slate-300'}`}>
                   {user.username}
                 </p>
-                <p className={`text-[10px] capitalize ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
+                <p className={`text-[12px] capitalize ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
                   {user.role}
                 </p>
               </div>
@@ -334,4 +359,3 @@ export default function Layout() {
     </div>
   )
 }
-

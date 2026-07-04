@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon
+  SlidersHorizontal, X, AlertOctagon, Users
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -12,6 +12,8 @@ import PageHeader from '../components/ui/PageHeader'
 import DeviceModal from '../components/modals/DeviceModal'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import FilePushModal from '../components/modals/FilePushModal'
+import DeviceRegistrationModal from '../components/modals/DeviceRegistrationModal'
+import BulkEditModal from '../components/modals/BulkEditModal'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
 
@@ -21,13 +23,14 @@ const STATUS = {
   offline: { dot: 'bg-slate-500',    text: 'Offline', textCls: 'text-slate-500',     ring: ''  },
   unknown: { dot: 'bg-amber-400',    text: 'Unknown', textCls: 'text-amber-400',     ring: ''  },
   error:   { dot: 'bg-red-400',      text: 'Error',   textCls: 'text-red-400',       ring: ''  },
+  needs_approval: { dot: 'bg-brand-400', text: 'Pending Approval', textCls: 'text-brand-400', ring: '' },
 }
 
 // ── Status badge pill ─────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
   const s = STATUS[status] || STATUS.unknown
   return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold"
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold"
       style={{
         background: status === 'online'  ? 'rgba(34,197,94,0.12)'  :
                     status === 'offline' ? 'rgba(100,116,139,0.12)' :
@@ -49,7 +52,7 @@ function StatusBadge({ status }) {
 // ── OS badge ──────────────────────────────────────────────────────────────────
 function OsBadge({ osType }) {
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase
+    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono font-semibold uppercase
       ${osType === 'windows' ? 'bg-sky-400/10 text-sky-400' : 'bg-violet-400/10 text-violet-400'}`}>
       {osType === 'windows' ? <Server size={9} /> : <Monitor size={9} />}
       {osType}
@@ -67,7 +70,7 @@ function ActionBtn({ onClick, title, color, children }) {
   const c = colors[color]
   return (
     <button onClick={onClick} title={title}
-      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] font-semibold transition-all duration-150"
+      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-sm font-semibold transition-all duration-150"
       style={{ background: c.bg, border: `1px solid ${c.border}`, color: c.text }}
       onMouseEnter={e => { e.currentTarget.style.background = c.hbg; e.currentTarget.style.borderColor = c.hborder }}
       onMouseLeave={e => { e.currentTarget.style.background = c.bg;  e.currentTarget.style.borderColor = c.border }}>
@@ -133,13 +136,13 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       className="relative rounded-2xl p-4 cursor-pointer transition-all duration-200 group"
       style={{
         background: selected
-          ? isLight ? 'rgba(108,92,231,0.06)' : 'rgba(129,140,248,0.08)'
+          ? isLight ? 'rgba(108,92,231,0.06)' : 'rgba(167,139,250,0.08)'
           : 'var(--bg-surface-2)',
         border: `1px solid ${selected
-          ? isLight ? 'rgba(108,92,231,0.35)' : 'rgba(129,140,248,0.35)'
+          ? isLight ? 'rgba(108,92,231,0.35)' : 'rgba(167,139,250,0.35)'
           : isOnline ? 'rgba(34,197,94,0.2)' : 'var(--border-subtle)'}`,
         boxShadow: selected
-          ? isLight ? '0 0 0 3px rgba(108,92,231,0.1)' : '0 0 0 3px rgba(129,140,248,0.08)'
+          ? isLight ? '0 0 0 3px rgba(108,92,231,0.1)' : '0 0 0 3px rgba(167,139,250,0.08)'
           : 'var(--shadow-card)',
       }}
       onMouseEnter={e => { if (!selected) e.currentTarget.style.transform = 'translateY(-1px)' }}
@@ -149,8 +152,8 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       <div className="absolute top-3 right-3"
         style={{ opacity: selected ? 1 : 0, transition: 'opacity 0.15s' }}>
         <div className="w-5 h-5 rounded-full flex items-center justify-center"
-          style={{ background: isLight ? '#6c5ce7' : '#818cf8' }}>
-          <span className="text-white text-[10px] font-bold">✓</span>
+          style={{ background: isLight ? '#6c5ce7' : '#a78bfa' }}>
+          <span className="text-white text-xs font-bold">✓</span>
         </div>
       </div>
 
@@ -170,8 +173,8 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
             : <Monitor size={16} className="text-violet-400" />}
         </div>
         <div className="min-w-0 flex-1 pr-4">
-          <p className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
-          <p className="text-[11px] font-mono mt-0.5" style={{ color: 'var(--text-faint)' }}>{device.ip_address}</p>
+          <p className="text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
+          <p className="text-sm font-mono mt-0.5" style={{ color: 'var(--text-faint)' }}>{device.ip_address}</p>
         </div>
       </div>
 
@@ -189,14 +192,14 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 
         {/* Icon buttons */}
         <button onClick={() => onEdit(device)} title="Edit"
-          className="px-2 py-1.5 rounded-lg transition-all text-xs"
+          className="px-2 py-1.5 rounded-lg transition-all text-sm"
           style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}
           onMouseEnter={e => { e.currentTarget.style.color = 'var(--text-primary)'; e.currentTarget.style.borderColor = 'var(--border-mid)' }}
           onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)';   e.currentTarget.style.borderColor = 'var(--border-subtle)' }}>
           <Pencil size={12} />
         </button>
         <button onClick={() => onDelete(device)} title="Delete"
-          className="px-2 py-1.5 rounded-lg transition-all text-xs"
+          className="px-2 py-1.5 rounded-lg transition-all text-sm"
           style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}
           onMouseEnter={e => { e.currentTarget.style.color = '#f87171';              e.currentTarget.style.background = 'rgba(239,68,68,0.08)'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.25)' }}
           onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)';   e.currentTarget.style.background = 'var(--bg-surface-3)';   e.currentTarget.style.borderColor = 'var(--border-subtle)' }}>
@@ -207,12 +210,12 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       {/* Terminal button */}
       {device.ssh_username && (
         <button onClick={openTerminal} title="SSH Terminal"
-          className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all"
-          style={{ background: isLight ? 'rgba(108,92,231,0.07)' : 'rgba(129,140,248,0.07)',
-                   border: `1px solid ${isLight ? 'rgba(108,92,231,0.2)' : 'rgba(129,140,248,0.2)'}`,
-                   color:  isLight ? '#6c5ce7' : '#818cf8' }}
-          onMouseEnter={e => { e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.14)' : 'rgba(129,140,248,0.14)' }}
-          onMouseLeave={e => { e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.07)' : 'rgba(129,140,248,0.07)' }}>
+          className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
+          style={{ background: isLight ? 'rgba(108,92,231,0.07)' : 'rgba(167,139,250,0.07)',
+                   border: `1px solid ${isLight ? 'rgba(108,92,231,0.2)' : 'rgba(167,139,250,0.2)'}`,
+                   color:  isLight ? '#6c5ce7' : '#a78bfa' }}
+          onMouseEnter={e => { e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.14)' : 'rgba(167,139,250,0.14)' }}
+          onMouseLeave={e => { e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.07)' : 'rgba(167,139,250,0.07)' }}>
           <TerminalSquare size={11} /> Remote Access
         </button>
       )}
@@ -220,7 +223,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       {/* Group tag */}
       {device.group_name && (
         <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-          <span className="text-[10px]" style={{ color: 'var(--text-faint)' }}>
+          <span className="text-sm" style={{ color: 'var(--text-faint)' }}>
             <span style={{ color: 'var(--text-muted)' }}>Group: </span>{device.group_name}
           </span>
         </div>
@@ -244,10 +247,10 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
           className="group-hover:text-[var(--text-muted)]">
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </span>
-        <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>
+        <span className="text-base font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>
           {groupName}
         </span>
-        <span className="text-[10px] font-mono" style={{ color: 'var(--text-faint)' }}>
+        <span className="text-sm font-mono" style={{ color: 'var(--text-faint)' }}>
           {online}/{total}
         </span>
         {/* Progress bar */}
@@ -257,8 +260,8 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
         </div>
         {/* Select all */}
         <button onClick={e => { e.stopPropagation(); devices.forEach(d => onSelect(d.id, !allSel)) }}
-          className="ml-auto flex items-center gap-1.5 text-[10px] font-semibold transition-colors px-2 py-1 rounded-lg"
-          style={{ color: allSel ? '#818cf8' : 'var(--text-faint)', background: allSel ? 'rgba(129,140,248,0.1)' : 'transparent' }}>
+          className="ml-auto flex items-center gap-1.5 text-sm font-semibold transition-colors px-2 py-1 rounded-lg"
+          style={{ color: allSel ? '#a78bfa' : 'var(--text-faint)', background: allSel ? 'rgba(167,139,250,0.1)' : 'transparent' }}>
           {allSel ? <CheckSquare size={11} /> : <Square size={11} />}
           <span className="hidden sm:inline">Select all</span>
         </button>
@@ -294,8 +297,8 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
       style={{
         gridTemplateColumns: '40px 36px 1fr 140px 140px 100px 100px auto',
         borderBottom: '1px solid var(--border-subtle)',
-        background: selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(129,140,248,0.05)') : 'transparent',
-        borderLeft: `2px solid ${selected ? (isLight ? '#6c5ce7' : '#818cf8') : 'transparent'}`,
+        background: selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(167,139,250,0.05)') : 'transparent',
+        borderLeft: `2px solid ${selected ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent'}`,
       }}
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-hover)' }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent' }}
@@ -304,7 +307,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
       {/* Checkbox */}
       <div className="flex items-center justify-center" onClick={e => e.stopPropagation()}>
         <button onClick={() => onSelect(device.id, !selected)}
-          style={{ color: selected ? (isLight ? '#6c5ce7' : '#818cf8') : 'var(--text-faint)' }}>
+          style={{ color: selected ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-faint)' }}>
           {selected ? <CheckSquare size={14} /> : <Square size={14} />}
         </button>
       </div>
@@ -322,15 +325,15 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
 
       {/* Name */}
       <div className="min-w-0">
-        <p className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
-        {group && <p className="text-[11px] truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
+        <p className="text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
+        {group && <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
       </div>
 
       {/* IP */}
-      <p className="text-[11px] font-mono truncate" style={{ color: 'var(--text-muted)' }}>{device.ip_address}</p>
+      <p className="text-sm font-mono truncate" style={{ color: 'var(--text-muted)' }}>{device.ip_address}</p>
 
       {/* MAC */}
-      <p className="text-[11px] font-mono truncate" style={{ color: 'var(--text-faint)' }}>{device.mac_address}</p>
+      <p className="text-sm font-mono truncate" style={{ color: 'var(--text-faint)' }}>{device.mac_address}</p>
 
       {/* OS badge */}
       <div><OsBadge osType={device.os_type} /></div>
@@ -358,8 +361,8 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
         {device.ssh_username && (
           <button onClick={openTerminal} title="Terminal"
             className="p-1.5 rounded-lg transition-all"
-            style={{ color: isLight ? '#6c5ce7' : '#818cf8' }}
-            onMouseEnter={e => { e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.1)' : 'rgba(129,140,248,0.1)' }}
+            style={{ color: isLight ? '#6c5ce7' : '#a78bfa' }}
+            onMouseEnter={e => { e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.1)' : 'rgba(167,139,250,0.1)' }}
             onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}>
             <TerminalSquare size={12} />
           </button>
@@ -370,17 +373,24 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
 }
 
 // ── Bulk bar ──────────────────────────────────────────────────────────────────
-function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onClear }) {
+function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onEditSelected, onClear, canEdit }) {
   if (!count) return null
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 animate-slide-up">
-      <div className="flex items-center gap-2 px-4 py-2.5 rounded-2xl"
+      <div className="flex items-center gap-2 px-4 py-2.5 rounded-2xl flex-wrap justify-center"
         style={{ background: 'var(--bg-surface-1)', border: '1px solid var(--border-mid)',
                  boxShadow: '0 8px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2)' }}>
-        <span className="text-xs font-semibold px-2" style={{ color: '#818cf8' }}>
+        <span className="text-base font-semibold px-2" style={{ color: '#a78bfa' }}>
           {count} selected
         </span>
         <div className="w-px h-4" style={{ background: 'var(--border-subtle)' }} />
+        {canEdit && (
+          <button onClick={onEditSelected}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
+            style={{ background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa' }}>
+            <Users size={12} />Edit Selected
+          </button>
+        )}
         {[
           { fn: onWakeAll,     label: 'Wake All',  icon: <Zap size={11} />,       c: '#22c55e', bg: 'rgba(34,197,94,0.1)',  bc: 'rgba(34,197,94,0.25)'  },
           { fn: onShutdownAll, label: 'Shutdown',  icon: <Power size={11} />,     c: '#f87171', bg: 'rgba(239,68,68,0.1)',  bc: 'rgba(239,68,68,0.25)'  },
@@ -388,13 +398,13 @@ function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, on
           { fn: onPushFile,    label: 'Push File', icon: <Upload size={11} />,    c: '#38bdf8', bg: 'rgba(56,189,248,0.1)', bc: 'rgba(56,189,248,0.25)' },
         ].map((b, i) => (
           <button key={i} onClick={b.fn}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
             style={{ background: b.bg, border: `1px solid ${b.bc}`, color: b.c }}>
             {b.icon}{b.label}
           </button>
         ))}
         <div className="w-px h-4" style={{ background: 'var(--border-subtle)' }} />
-        <button onClick={onClear} className="text-xs px-1 transition-colors"
+        <button onClick={onClear} className="text-sm px-1 transition-colors"
           style={{ color: 'var(--text-faint)' }}
           onMouseEnter={e => e.currentTarget.style.color = 'var(--text-muted)'}
           onMouseLeave={e => e.currentTarget.style.color = 'var(--text-faint)'}>
@@ -411,8 +421,8 @@ function StatPill({ value, label, color, dot }) {
     <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl"
       style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
       {dot && <span className="w-2 h-2 rounded-full" style={{ background: color }} />}
-      <span className="text-sm font-mono font-bold" style={{ color }}>{value}</span>
-      <span className="text-xs" style={{ color: 'var(--text-faint)' }}>{label}</span>
+      <span className="text-base font-mono font-bold" style={{ color }}>{value}</span>
+      <span className="text-sm" style={{ color: 'var(--text-faint)' }}>{label}</span>
     </div>
   )
 }
@@ -433,7 +443,9 @@ export default function DevicesPage() {
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [actionModal, setActionModal]   = useState(null)
   const [filePushOpen, setFilePushOpen] = useState(false)
+  const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
+  const [registrationTarget, setRegistrationTarget] = useState(null)
   const isLight = useThemeStore(s => s.theme === 'light')
   const { isAdmin } = usePermissions()
 
@@ -449,6 +461,13 @@ export default function DevicesPage() {
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // Auto-refresh device statuses in the background so online/offline state
+  // doesn't go stale while the page sits open (backend polls every 5s).
+  useEffect(() => {
+    const t = setInterval(() => { fetchAll(true) }, 5000)
+    return () => clearInterval(t)
+  }, [fetchAll])
 
   const handleSelect = (id, sel) => setSelectedIds(prev => {
     const n = new Set(prev); sel ? n.add(id) : n.delete(id); return n
@@ -503,15 +522,20 @@ export default function DevicesPage() {
     }
   }
 
+  // Devices awaiting admin approval (from agent self-registration) are kept
+  // separate from the main grid/list — they aren't fully configured yet.
+  const pendingDevices = useMemo(() => devices.filter(d => d.status === 'needs_approval'), [devices])
+  const manageableDevices = useMemo(() => devices.filter(d => d.status !== 'needs_approval'), [devices])
+
   // Filtering
-  const filtered = useMemo(() => devices.filter(d => {
+  const filtered = useMemo(() => manageableDevices.filter(d => {
     const q = search.toLowerCase()
     if (q && !d.name.toLowerCase().includes(q) && !d.ip_address.includes(q) && !(d.mac_address||'').toLowerCase().includes(q)) return false
     if (osFilter !== 'all' && d.os_type !== osFilter) return false
     if (statusFilter !== 'all' && d.status !== statusFilter) return false
     if (groupFilter !== 'all' && d.group_id !== groupFilter) return false
     return true
-  }), [devices, search, osFilter, statusFilter, groupFilter])
+  }), [manageableDevices, search, osFilter, statusFilter, groupFilter])
 
   // Grouped for grid view
   const grouped = useMemo(() => {
@@ -524,12 +548,23 @@ export default function DevicesPage() {
     return [...map.entries()].filter(([,v]) => v.devices.length > 0).map(([id,v]) => ({ id, ...v }))
   }, [filtered, groups])
 
-  const onlineCount  = devices.filter(d => d.status === 'online').length
-  const offlineCount = devices.filter(d => d.status === 'offline').length
-  const unknownCount = devices.filter(d => !d.status || d.status === 'unknown').length
+  const onlineCount  = manageableDevices.filter(d => d.status === 'online').length
+  const offlineCount = manageableDevices.filter(d => d.status === 'offline').length
+  const unknownCount = manageableDevices.filter(d => !d.status || d.status === 'unknown').length
   const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all'
 
   const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all') }
+
+  // Map a device row (id/name) onto the shape DeviceRegistrationModal expects
+  // (device_id/device_name), since the modal is shared with the live agent
+  // check-in flow which uses those field names.
+  const openRegistrationReview = (d) => setRegistrationTarget({
+    device_id: d.id,
+    device_name: d.name,
+    ip_address: d.ip_address,
+    mac_address: d.mac_address,
+    os_type: d.os_type,
+  })
 
   return (
     <div className="p-6 max-w-[1600px] mx-auto animate-fade-in pb-28">
@@ -559,7 +594,7 @@ export default function DevicesPage() {
             </button>
             {isAdmin && devices.length > 0 && (
               <button onClick={() => setDeleteAllOpen(true)} title="Delete all devices"
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold transition-all"
                 style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', color: '#f87171' }}
                 onMouseEnter={e => e.currentTarget.style.background = 'rgba(239,68,68,0.16)'}
                 onMouseLeave={e => e.currentTarget.style.background = 'rgba(239,68,68,0.08)'}>
@@ -573,6 +608,50 @@ export default function DevicesPage() {
         }
       />
 
+      {/* Pending agent registrations — require admin review before a device is usable */}
+      {pendingDevices.length > 0 && (
+        <div className="mb-6 rounded-2xl p-4 animate-fade-in"
+          style={{ background: 'rgba(167,139,250,0.06)', border: '1px solid rgba(167,139,250,0.25)' }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-brand-400" />
+            </span>
+            <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+              {pendingDevices.length} device{pendingDevices.length > 1 ? 's' : ''} awaiting approval
+            </p>
+          </div>
+          <div className="flex flex-col gap-2">
+            {pendingDevices.map(d => (
+              <div key={d.id} className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl transition-colors"
+                style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className={`shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg
+                    ${d.os_type === 'windows' ? 'bg-sky-400/10 text-sky-400' : 'bg-violet-400/10 text-violet-400'}`}>
+                    {d.os_type === 'windows' ? <Server size={13} /> : <Monitor size={13} />}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{d.name}</p>
+                    <p className="text-sm font-mono truncate" style={{ color: 'var(--text-faint)' }}>
+                      {d.ip_address} · {d.mac_address}
+                    </p>
+                  </div>
+                </div>
+                {isAdmin ? (
+                  <button onClick={() => openRegistrationReview(d)}
+                    className="shrink-0 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all hover:bg-[rgba(167,139,250,0.2)]"
+                    style={{ background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa' }}>
+                    Review
+                  </button>
+                ) : (
+                  <span className="text-sm shrink-0" style={{ color: 'var(--text-faint)' }}>Admin approval required</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Filter bar */}
       <div className="flex flex-wrap items-center gap-2 mb-6 p-3 rounded-2xl"
         style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
@@ -581,7 +660,7 @@ export default function DevicesPage() {
         <div className="relative min-w-[180px] flex-1 max-w-xs">
           <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
             style={{ color: 'var(--text-faint)' }} />
-          <input className="input-field pl-8 h-8 text-xs" placeholder="Search name, IP, MAC…"
+          <input className="input-field pl-8 h-9 text-sm" placeholder="Search name, IP, MAC…"
             value={search} onChange={e => setSearch(e.target.value)} />
         </div>
 
@@ -592,9 +671,9 @@ export default function DevicesPage() {
         <div className="flex gap-1">
           {[['all','All OS'], ['linux','Linux'], ['windows','Windows']].map(([v,l]) => (
             <button key={v} onClick={() => setOsFilter(v)}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold transition-all"
               style={{
-                background: osFilter === v ? (isLight ? '#6c5ce7' : '#818cf8') : 'transparent',
+                background: osFilter === v ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent',
                 color: osFilter === v ? '#fff' : 'var(--text-muted)',
                 border: `1px solid ${osFilter === v ? 'transparent' : 'var(--border-subtle)'}`,
               }}>{l}</button>
@@ -605,10 +684,10 @@ export default function DevicesPage() {
         <div className="flex gap-1">
           {[['all','All'],['online','Online'],['offline','Offline']].map(([v,l]) => (
             <button key={v} onClick={() => setStatusFilter(v)}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold transition-all flex items-center gap-1.5"
               style={{
                 background: statusFilter === v
-                  ? v === 'online' ? 'rgba(34,197,94,0.15)' : v === 'offline' ? 'rgba(100,116,139,0.15)' : (isLight ? '#6c5ce7' : '#818cf8')
+                  ? v === 'online' ? 'rgba(34,197,94,0.15)' : v === 'offline' ? 'rgba(100,116,139,0.15)' : (isLight ? '#6c5ce7' : '#a78bfa')
                   : 'transparent',
                 color: statusFilter === v
                   ? v === 'online' ? '#22c55e' : v === 'offline' ? '#94a3b8' : '#fff'
@@ -626,7 +705,7 @@ export default function DevicesPage() {
         {/* Group filter */}
         {groups.length > 0 && (
           <select value={groupFilter} onChange={e => setGroupFilter(e.target.value)}
-            className="input-field h-8 text-xs py-0" style={{ minWidth: 130 }}>
+            className="input-field h-9 text-sm py-0" style={{ minWidth: 130 }}>
             <option value="all">All Groups</option>
             {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
@@ -637,13 +716,13 @@ export default function DevicesPage() {
         {/* Clear filters */}
         {hasFilters && (
           <button onClick={clearFilters}
-            className="flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg transition-all"
-            style={{ color: isLight ? '#6c5ce7' : '#818cf8', background: isLight ? 'rgba(108,92,231,0.08)' : 'rgba(129,140,248,0.08)' }}>
+            className="flex items-center gap-1 text-sm px-2 py-1.5 rounded-lg transition-all"
+            style={{ color: isLight ? '#6c5ce7' : '#a78bfa', background: isLight ? 'rgba(108,92,231,0.08)' : 'rgba(167,139,250,0.08)' }}>
             <X size={11} /> Clear
           </button>
         )}
 
-        <span className="text-xs font-mono" style={{ color: 'var(--text-faint)' }}>
+        <span className="text-sm font-mono" style={{ color: 'var(--text-faint)' }}>
           {filtered.length}/{devices.length}
         </span>
 
@@ -653,7 +732,7 @@ export default function DevicesPage() {
             <button key={mode} onClick={() => setViewMode(mode)}
               className="p-1.5 rounded-md transition-all"
               style={{
-                background: viewMode === mode ? (isLight ? '#6c5ce7' : '#818cf8') : 'transparent',
+                background: viewMode === mode ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent',
                 color: viewMode === mode ? '#fff' : 'var(--text-muted)',
               }} title={`${mode} view`}>
               <Icon size={13} />
@@ -676,7 +755,7 @@ export default function DevicesPage() {
           <p className="text-sm font-semibold mb-1" style={{ color: 'var(--text-secondary)' }}>
             {hasFilters ? 'No devices match your filters' : 'No devices added yet'}
           </p>
-          <p className="text-xs mb-5" style={{ color: 'var(--text-muted)' }}>
+          <p className="text-sm mb-5" style={{ color: 'var(--text-muted)' }}>
             {hasFilters ? 'Try adjusting search or filters' : 'Add your first device to get started'}
           </p>
           {hasFilters
@@ -702,7 +781,7 @@ export default function DevicesPage() {
         <div className="rounded-2xl overflow-hidden animate-fade-in"
           style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-surface-2)' }}>
           {/* Table header */}
-          <div className="grid items-center gap-3 px-4 py-3 text-[10px] font-bold uppercase tracking-wider"
+          <div className="grid items-center gap-3 px-4 py-3 text-sm font-bold uppercase tracking-wider"
             style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 100px 100px auto',
                      background: 'var(--bg-surface-3)', borderBottom: '1px solid var(--border-subtle)',
                      color: 'var(--text-muted)' }}>
@@ -710,7 +789,7 @@ export default function DevicesPage() {
                 selectedIds.size === filtered.length ? clearSelection()
                   : setSelectedIds(new Set(filtered.map(d => d.id)))
               }}
-              style={{ color: selectedIds.size === filtered.length && filtered.length > 0 ? (isLight ? '#6c5ce7' : '#818cf8') : 'var(--text-faint)' }}>
+              style={{ color: selectedIds.size === filtered.length && filtered.length > 0 ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-faint)' }}>
               {selectedIds.size === filtered.length && filtered.length > 0
                 ? <CheckSquare size={13} /> : <Square size={13} />}
             </button>
@@ -745,6 +824,8 @@ export default function DevicesPage() {
         onShutdownAll={() => bulkAction('shutdown')}
         onRestartAll={() => bulkAction('restart')}
         onPushFile={() => setFilePushOpen(true)}
+        onEditSelected={() => setBulkEditOpen(true)}
+        canEdit={isAdmin}
         onClear={clearSelection} />
 
       {/* Modals */}
@@ -776,6 +857,17 @@ export default function DevicesPage() {
 
       <FilePushModal open={filePushOpen} onClose={() => setFilePushOpen(false)}
         devices={devices} groups={groups} selectedIds={selectedIds} />
+
+      <BulkEditModal open={bulkEditOpen} onClose={() => setBulkEditOpen(false)}
+        deviceIds={[...selectedIds]} devices={devices} groups={groups}
+        onSaved={() => { setBulkEditOpen(false); clearSelection(); fetchAll(true) }} />
+
+      <DeviceRegistrationModal
+        device={registrationTarget}
+        isOpen={!!registrationTarget}
+        onClose={() => setRegistrationTarget(null)}
+        onApprove={() => fetchAll(true)}
+        onReject={() => fetchAll(true)} />
     </div>
   )
 }

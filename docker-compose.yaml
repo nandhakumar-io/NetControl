@@ -1,23 +1,91 @@
 services:
-  mysql:
-    image: mysql:latest 
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
     restart: unless-stopped
-    container_name: mysql
+    networks:
+      - frontend-net
+    volumes:
+      - ./cloudflared:/etc/cloudflared
+
+
+  traefik:
+    image: traefik:latest
+    command:
+      - "--configFile=/traefik.yaml"
+    restart: unless-stopped 
+    security_opt:
+      - no-new-privileges:true 
+    networks:
+      - frontend-net
+    expose:
+      - "80"
     env_file: .env 
+    volumes:
+      - /etc/localtime:/etc/localtime:ro 
+      - /var/run/docker.sock:/var/run/docker.sock:ro 
+      - ./data/traefik.yaml:/traefik.yaml:ro 
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.entrypoints=http"
+      - "traefik.http.routers.traefik.rule=Host(`traefik-dashboard.notoriousdev.in`)"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS}"
+      - "traefik.http.routers.traefik.middlewares=traefik-auth"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    expose: 
+      - "80"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.frontend.rule=Host(`netcontrol.notoriousdev.in`)
+      - traefik.http.services.frontend.loadbalancer.server.port=80
+    networks:
+      - frontend-net
+  
+  backend:
+    build: ./backend
+    depends_on: 
+      - mysql
+    expose:
+      - "8000"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.backend.rule=Host(`netcontrol-api.notoriousdev.in`)
+      - traefik.http.services.backend.loadbalancer.server.port=8000
+      - "traefik.docker.network=netcontrol_frontend-net"
+
+    env_file: 
+      - .env
+    networks:
+      - backend-net
+      - frontend-net
+
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD} 
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
       MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
-    ports:
-      # SECURITY FIX: was "3306:3306", which binds to 0.0.0.0 and exposes
-      # MySQL to the internet on any host with a public IP. The backend
-      # reaches this container over the docker network, not via this port
-      # mapping, so it's only needed for local admin/debug access — bind it
-      # to loopback only. Remove this ports block entirely if you don't need
-      # host-side DB access at all.
-      - "127.0.0.1:3306:3306"
+    networks:
+      - backend-net
+
     volumes:
       - netcontrol_db_data:/var/lib/mysql 
 volumes:
   netcontrol_db_data:
+
+networks:
+  frontend-net:
+    driver: bridge
+  backend-net:
+    driver: bridge

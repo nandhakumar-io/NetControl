@@ -42,7 +42,7 @@ const ALL_EVENTS = {
   'auth.ip_blocked':         { label: 'IP blocked',              color: '#f87171', cat: 'auth'   },
   'alert.triggered':         { label: 'Alert triggered',         color: '#facc15', cat: 'alert'  },
   'alert.critical':          { label: 'Critical alert',          color: '#f87171', cat: 'alert'  },
-  'file.push':               { label: 'File pushed',             color: '#818cf8', cat: 'system' },
+  'file.push':               { label: 'File pushed',             color: '#a78bfa', cat: 'system' },
   'ssh.failure':             { label: 'SSH failure',             color: '#f87171', cat: 'system' },
   'system.agent_registered': { label: 'Agent registered',        color: '#38bdf8', cat: 'system' },
 }
@@ -180,11 +180,21 @@ function WebhookModal({ hook, onSave, onClose }) {
     : EMPTY_WH)
   const [saving, setSaving] = useState(false)
   const [showSecret, setShowSecret] = useState(false)
+  const [customEvent, setCustomEvent] = useState('')
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   const toggleEvent = (ev) => setForm(f => ({
     ...f, events: f.events.includes(ev) ? f.events.filter(e => e !== ev) : [...f.events, ev]
   }))
+
+  const addCustomEvent = () => {
+    const ev = customEvent.trim().toLowerCase().replace(/\s+/g, '_')
+    if (!ev) return
+    if (form.events.includes(ev)) { toast.error('Event already added'); return }
+    setForm(f => ({ ...f, events: [...f.events, ev] }))
+    setCustomEvent('')
+  }
+  const removeCustomEvent = (ev) => setForm(f => ({ ...f, events: f.events.filter(e => e !== ev) }))
   const setCategory = (cat, checked) => {
     const catEvents = Object.keys(ALL_EVENTS).filter(k => ALL_EVENTS[k].cat === cat)
     setForm(f => ({
@@ -217,11 +227,11 @@ function WebhookModal({ hook, onSave, onClose }) {
       <div className="relative z-10 w-full max-w-lg rounded-2xl overflow-hidden animate-slide-up max-h-[90vh] overflow-y-auto"
         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}
         onClick={e => e.stopPropagation()}>
-        <div style={{ height: 3, background: 'linear-gradient(90deg,#818cf8,#c084fc)' }} />
+        <div style={{ height: 3, background: 'linear-gradient(90deg,#a78bfa,#c084fc)' }} />
         <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(129,140,248,0.12)', border: '1px solid rgba(129,140,248,0.25)' }}>
-              <Bell size={14} style={{ color: '#818cf8' }} />
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.25)' }}>
+              <Bell size={14} style={{ color: '#a78bfa' }} />
             </div>
             <p className="text-sm font-body font-semibold" style={{ color: 'var(--text-primary)' }}>
               {hook?.id ? 'Edit Webhook' : 'New Webhook'}
@@ -276,8 +286,8 @@ function WebhookModal({ hook, onSave, onClose }) {
                     <div className="flex items-center gap-2 mb-1.5">
                       <button onClick={() => setCategory(cat, !allOn)}
                         className="text-[10px] font-body font-bold uppercase tracking-widest flex items-center gap-1"
-                        style={{ color: allOn ? '#818cf8' : 'var(--text-muted)' }}>
-                        {allOn ? <CheckCircle2 size={11} style={{ color: '#818cf8' }} /> : <div className="w-3 h-3 rounded-full border" style={{ borderColor: 'var(--text-muted)' }} />}
+                        style={{ color: allOn ? '#a78bfa' : 'var(--text-muted)' }}>
+                        {allOn ? <CheckCircle2 size={11} style={{ color: '#a78bfa' }} /> : <div className="w-3 h-3 rounded-full border" style={{ borderColor: 'var(--text-muted)' }} />}
                         {cat}
                       </button>
                     </div>
@@ -304,6 +314,39 @@ function WebhookModal({ hook, onSave, onClose }) {
             </div>
           </div>
 
+          {/* Custom event names — for alert rules or integrations not in the built-in list */}
+          <div>
+            <label className="label">Custom event name</label>
+            <div className="flex gap-2">
+              <input className="input-field font-mono text-xs" placeholder="e.g. alert.disk_critical"
+                value={customEvent}
+                onChange={e => setCustomEvent(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomEvent() } }} />
+              <button onClick={addCustomEvent} type="button"
+                className="btn-ghost px-3 shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
+                <Plus size={14} />
+              </button>
+            </div>
+            <p className="text-[11px] font-body mt-1" style={{ color: 'var(--text-muted)' }}>
+              Add any event key your alert rules or scripts fire (e.g. a custom alert action). It'll be matched
+              exactly against the event name sent when firing a webhook, or use <code>*</code> to receive every event.
+            </p>
+            {form.events.filter(e => !ALL_EVENTS[e]).length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {form.events.filter(e => !ALL_EVENTS[e]).map(ev => (
+                  <span key={ev}
+                    className="text-[10px] font-mono px-2 py-1 rounded-lg border flex items-center gap-1.5"
+                    style={{ background: 'rgba(167,139,250,0.1)', borderColor: 'rgba(167,139,250,0.3)', color: '#a78bfa' }}>
+                    {ev}
+                    <button onClick={() => removeCustomEvent(ev)} type="button" className="hover:text-accent-red">
+                      <X size={10} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
           <label className="flex items-center gap-3 cursor-pointer">
             <Toggle value={form.enabled} onChange={v => set('enabled', v)} />
             <span className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>Webhook enabled</span>
@@ -325,13 +368,17 @@ function WebhookModal({ hook, onSave, onClose }) {
 function DeliveryLog({ hookId, hookName, onClose }) {
   const [log, setLog] = useState([])
   const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState(null)
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true)
     api.get(`/security/webhooks/${hookId}/log`)
       .then(r => setLog(r.data))
-      .catch(() => toast.error('Failed to load log'))
+      .catch(e => toast.error(e.response?.data?.error || 'Failed to load delivery log'))
       .finally(() => setLoading(false))
   }, [hookId])
+
+  useEffect(() => { load() }, [load])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -343,7 +390,12 @@ function DeliveryLog({ hookId, hookName, onClose }) {
           <p className="text-sm font-body font-semibold" style={{ color: 'var(--text-primary)' }}>
             Delivery Log — {hookName}
           </p>
-          <button onClick={onClose} style={{ color: 'var(--text-muted)' }}><X size={14} /></button>
+          <div className="flex items-center gap-1">
+            <button onClick={load} className="icon-btn p-1.5" title="Refresh">
+              <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+            </button>
+            <button onClick={onClose} style={{ color: 'var(--text-muted)' }}><X size={14} /></button>
+          </div>
         </div>
         <div className="max-h-96 overflow-y-auto">
           {loading ? (
@@ -353,16 +405,25 @@ function DeliveryLog({ hookId, hookName, onClose }) {
               <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No deliveries yet</p>
             </div>
           ) : log.map((entry, i) => (
-            <div key={entry.id} className="flex items-start gap-3 px-5 py-3"
+            <div key={entry.id} className="px-5 py-3"
               style={{ borderBottom: i < log.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
-              <StatusDot status={entry.status} />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-mono" style={{ color: 'var(--text-primary)' }}>{entry.event}</p>
-                {entry.error && <p className="text-[10px] font-body text-accent-red mt-0.5 truncate">{entry.error}</p>}
-                <p className="text-[9px] font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                  {entry.duration_ms != null ? `${entry.duration_ms}ms · ` : ''}{ago(entry.fired_at)}
-                </p>
+              <div className="flex items-start gap-3 cursor-pointer"
+                onClick={() => setExpanded(x => x === entry.id ? null : entry.id)}>
+                <StatusDot status={entry.status} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-mono" style={{ color: 'var(--text-primary)' }}>{entry.event}</p>
+                  {entry.error && <p className="text-[10px] font-body text-accent-red mt-0.5 truncate">{entry.error}</p>}
+                  <p className="text-[9px] font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    {entry.duration_ms != null ? `${entry.duration_ms}ms · ` : ''}{ago(entry.fired_at)}
+                  </p>
+                </div>
               </div>
+              {expanded === entry.id && entry.response_body && (
+                <pre className="text-[10px] font-mono mt-2 p-2 rounded-lg overflow-x-auto"
+                  style={{ background: 'var(--bg-input)', color: 'var(--text-muted)', maxHeight: 160 }}>
+                  {entry.response_body}
+                </pre>
+              )}
             </div>
           ))}
         </div>
@@ -637,8 +698,8 @@ export default function SecurityPage() {
         <div className="space-y-5">
 
           {/* Info banner */}
-          <div className="glass rounded-2xl p-4 flex items-start gap-3" style={{ border: '1px solid rgba(129,140,248,0.2)' }}>
-            <Bell size={16} style={{ color: '#818cf8', flexShrink: 0, marginTop: 2 }} />
+          <div className="glass rounded-2xl p-4 flex items-start gap-3" style={{ border: '1px solid rgba(167,139,250,0.2)' }}>
+            <Bell size={16} style={{ color: '#a78bfa', flexShrink: 0, marginTop: 2 }} />
             <div>
               <p className="text-sm font-body font-semibold" style={{ color: 'var(--text-primary)' }}>Webhook notifications</p>
               <p className="text-xs font-body mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
@@ -696,10 +757,14 @@ export default function SecurityPage() {
                     <div className="flex flex-wrap gap-1 mt-1">
                       {events.slice(0, 4).map(ev => {
                         const cfg = ALL_EVENTS[ev]
-                        return cfg ? (
+                        return (
                           <span key={ev} className="text-[9px] px-1.5 py-0.5 rounded font-body"
-                            style={{ background: `${cfg.color}12`, color: cfg.color }}>{cfg.label}</span>
-                        ) : null
+                            style={cfg
+                              ? { background: `${cfg.color}12`, color: cfg.color }
+                              : { background: 'rgba(167,139,250,0.12)', color: '#a78bfa' }}>
+                            {cfg ? cfg.label : ev}
+                          </span>
+                        )
                       })}
                       {events.length > 4 && <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ color: 'var(--text-muted)', background: 'var(--bg-input)' }}>+{events.length - 4}</span>}
                     </div>

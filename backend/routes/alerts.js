@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const audit = require('../services/audit');
+const webhook = require('../services/webhook');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -250,6 +251,15 @@ async function evaluateAlerts(deviceId, snapshot) {
         }
         pushNotification(admins.map(a => a.id), notif);
       }
+
+      // Fire webhook notification for this alert (independent of notify_admins)
+      const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
+      webhook.fire(webhookEvent, {
+        device_id: deviceId, device_name: device.name, rule_name: rule.name,
+        metric: rule.metric, severity: rule.severity, details,
+        message: `${rule.name}: ${details} on ${device.name}`,
+      }).catch(() => {});
+
       console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name}: ${details}`);
     }
   } catch (e) { console.error('[Alert evaluator]', e.message); }
@@ -264,4 +274,3 @@ async function evaluateOffline(deviceId, deviceName) {
 }
 
 module.exports = { router, evaluateAlerts, evaluateOffline, pushNotification };
-

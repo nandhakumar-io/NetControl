@@ -1,0 +1,11 @@
+tunnel: 6acfb1f3-a4af-4f92-8572-a733ae74e0b1
+credentials-file: /etc/cloudflared/6acfb1f3-a4af-4f92-8572-a733ae74e0b1.json
+
+ingress:
+  - hostname: netcontrol.notoriousdev.in
+    service: http://traefik:80 
+
+  - hostname: netcontrol-api.notoriousdev.in 
+    service: http://traefik:80
+
+  - service: http_status:404

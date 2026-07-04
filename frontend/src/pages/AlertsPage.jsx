@@ -70,8 +70,8 @@ function Toggle({ on, onChange }) {
   return (
     <button onClick={() => onChange(!on)}
       className={`w-10 h-5 rounded-full transition-all duration-200 relative shrink-0 border
-        ${on ? 'border-indigo-500/50' : 'border-white/10'}`}
-      style={{background: on ? 'rgba(99,102,241,0.7)' : 'rgba(255,255,255,0.06)'}}>
+        ${on ? 'border-brand-500/50' : 'border-white/10'}`}
+      style={{background: on ? 'rgba(124,92,245,0.7)' : 'rgba(255,255,255,0.06)'}}>
       <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all duration-200
         ${on ? 'left-5' : 'left-0.5'}`} />
     </button>
@@ -112,7 +112,7 @@ function RuleModal({ open, onClose, onSaved, rule, devices }) {
       <div className="absolute inset-0 bg-black/65 backdrop-blur-md" />
       <div className="relative z-10 w-full max-w-xl animate-slide-up" onClick={e=>e.stopPropagation()}>
         <div className="glass rounded-2xl overflow-hidden" style={{border:'1px solid rgba(255,255,255,0.1)'}}>
-          <div className="h-px" style={{background:'linear-gradient(90deg,transparent,rgba(99,102,241,0.6),transparent)'}} />
+          <div className="h-px" style={{background:'linear-gradient(90deg,transparent,rgba(124,92,245,0.6),transparent)'}} />
 
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b" style={{borderColor:'var(--border-subtle)'}}>
@@ -213,7 +213,7 @@ function RuleModal({ open, onClose, onSaved, rule, devices }) {
                       style={on
                         ? a.danger
                           ?{background:'rgba(248,113,113,0.12)',borderColor:'rgba(248,113,113,0.35)',color:'#f87171'}
-                          :{background:'rgba(99,102,241,0.12)',borderColor:'rgba(129,140,248,0.35)',color:'#a5b4fc'}
+                          :{background:'rgba(124,92,245,0.12)',borderColor:'rgba(167,139,250,0.35)',color:'#c4b5fd'}
                         :{background:'transparent',borderColor:'var(--border-subtle)',color:'var(--text-muted)'}}>
                       <Icon size={16}/>
                       <span className="text-[11px] font-semibold">{a.label}</span>
@@ -322,7 +322,7 @@ export default function AlertsPage() {
 
   // Stat cards config
   const stats = [
-    { label:'Active Rules',   val: activeRules,         icon: Shield,        hex:'#818cf8' },
+    { label:'Active Rules',   val: activeRules,         icon: Shield,        hex:'#a78bfa' },
     { label:'Triggered Total',val: triggered.length,    icon: BellRing,      hex:'#fbbf24' },
     { label:'Critical',       val: crits,               icon: AlertTriangle, hex:'#f87171' },
     { label:'Last 24 Hours',  val: last24h,             icon: Clock,         hex:'#34d399' },
@@ -377,7 +377,7 @@ export default function AlertsPage() {
           {[['rules','Rules'],['history','History']].map(([v,l])=>(
             <button key={v} onClick={()=>setTab(v)}
               className={`px-4 py-2 rounded-lg text-sm font-body font-medium transition-all
-                ${tab===v ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>
+                ${tab===v ? 'bg-brand-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>
               {l}
               {v==='history' && triggered.length>0 && (
                 <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-white/15">{triggered.length}</span>
@@ -480,9 +480,9 @@ export default function AlertsPage() {
                             <span key={a}
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium"
                               style={{
-                                background: ad.danger?'rgba(248,113,113,0.08)':'rgba(99,102,241,0.08)',
-                                border: `1px solid ${ad.danger?'rgba(248,113,113,0.2)':'rgba(129,140,248,0.2)'}`,
-                                color: ad.danger?'#f87171':'#a5b4fc'
+                                background: ad.danger?'rgba(248,113,113,0.08)':'rgba(124,92,245,0.08)',
+                                border: `1px solid ${ad.danger?'rgba(248,113,113,0.2)':'rgba(167,139,250,0.2)'}`,
+                                color: ad.danger?'#f87171':'#c4b5fd'
                               }}>
                               <Ic size={9}/> {ad.label}
                             </span>
@@ -579,4 +579,3 @@ export default function AlertsPage() {
     </div>
   )
 }
-

@@ -9,6 +9,7 @@ const { wake } = require('../services/wol');
 const ssh = require('../services/ssh');
 const winrm = require('../services/winrm');
 const audit = require('../services/audit');
+const webhook = require('../services/webhook');
 
 const router = express.Router();
 router.use(requireAuth, actionLimiter);
@@ -106,6 +107,14 @@ function actionRoute(action) {
           action, targetType: 'device', targetId: device.id,
           targetName: device.name, ipSource: req.realIp, result, details });
         results.push({ device: device.name, id: device.id, result, details });
+
+        if (result === 'success') {
+          webhook.fire(`device.${action}`, {
+            device_id: device.id, device_name: device.name,
+            performed_by: req.user.username, severity: 'info',
+            message: `${action} performed on ${device.name} by ${req.user.username}`,
+          }).catch(() => {});
+        }
       }
 
       if (results.every(r => r.result === 'failure')) overall = 'failure';
@@ -145,7 +154,15 @@ router.post('/exec',
         ? await ssh.execCommand(device, req.body.command)
         : await winrm.execCommand(device, req.body.command);
       output = r.stdout;
-    } catch (e) { result = 'failure'; output = e.message; }
+    } catch (e) {
+      result = 'failure'; output = e.message;
+      if (device.os_type === 'linux') {
+        webhook.fire('ssh.failure', {
+          device_id: device.id, device_name: device.name, error: e.message,
+          severity: 'critical', message: `SSH command failed on ${device.name}: ${e.message}`,
+        }).catch(() => {});
+      }
+    }
 
     await audit.log({ userId: req.user.id, username: req.user.username,
       action: 'exec_command', targetType: 'device', targetId: device.id,

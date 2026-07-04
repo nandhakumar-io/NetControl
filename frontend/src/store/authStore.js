@@ -20,6 +20,13 @@ export const useAuthStore = create((set) => ({
     }
   },
 
+  // Used by the Google OAuth callback page — the backend redirects here with
+  // the access token + user already minted, no extra API round-trip needed.
+  setSession: (token, user) => {
+    localStorage.setItem('nc_token', token)
+    set({ user, token })
+  },
+
   logout: async () => {
     try { await api.post('/auth/logout') } catch (_) {}
     localStorage.removeItem('nc_token')

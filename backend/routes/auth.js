@@ -1,11 +1,10 @@
 // routes/auth.js — local login + Google OAuth + brute-force IP ban
-// Replace backend/routes/auth.js with this file.
 'use strict';
 const express = require('express');
 const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const crypto  = require('crypto');
-const https   = require('https');
+const { OAuth2Client } = require('google-auth-library');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth } = require('../middleware/auth');
@@ -21,10 +20,13 @@ const router = express.Router();
 // ── Shared helpers ─────────────────────────────────────────────────────────────
 function signAccess(user) {
   return jwt.sign(
-    { id: user.id, username: user.username, role: user.role },
+    { id: user.id, username: user.username, role: user.role, permissions: user.permissions || 0 },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRY || '8h' }
   );
+}
+function publicUser(user) {
+  return { id: user.id, username: user.username, role: user.role, permissions: user.permissions || 0 };
 }
 async function createRefreshToken(userId, res) {
   const raw  = crypto.randomBytes(64).toString('hex');
@@ -34,12 +36,28 @@ async function createRefreshToken(userId, res) {
     'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)',
     [uuidv4(), userId, hash, exp]
   );
+  // BUG FIX ("login session expired" after Google sign-in):
+  // Local logins POST to /api/auth/login through the frontend's own nginx
+  // proxy, so the browser treats it as same-origin (netcontrol.notoriousdev.in)
+  // and the refreshToken cookie is scoped there. Google's OAuth redirect,
+  // though, must land on a publicly registered callback URI — BACKEND_URL,
+  // i.e. netcontrol-api.notoriousdev.in directly — a *different* origin from
+  // the frontend. Without an explicit cookie Domain, the refresh cookie set
+  // during that callback is scoped only to netcontrol-api.notoriousdev.in.
+  // The frontend always calls same-origin /api/... through its own nginx
+  // proxy and never talks to that host directly, so the browser never sends
+  // that cookie back — /api/auth/refresh 401s on the first token expiry, and
+  // the user gets bounced with "Session expired. Please log in again."
+  // Setting Domain to the shared parent domain (e.g. ".notoriousdev.in")
+  // makes the cookie valid on both subdomains. No-op if COOKIE_DOMAIN isn't
+  // set (previous host-only behavior), so this doesn't break same-origin setups.
   res.cookie('refreshToken', raw, {
     httpOnly: true,
     secure:   process.env.NODE_ENV === 'production',
     sameSite: 'strict',
     maxAge:   7 * 24 * 60 * 60 * 1000,
     path:     '/api/auth',
+    ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
   });
 }
 
@@ -113,7 +131,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     res.json({
       accessToken,
-      user: { id: user.id, username: user.username, role: user.role },
+      user: publicUser(user),
       mustChangePassword: !!user.must_change_password,
     });
   } catch (e) {
@@ -122,72 +140,158 @@ router.post('/login', authLimiter, async (req, res) => {
   }
 });
 
-// ── GET /api/auth/google ───────────────────────────────────────────────────────
-const oauthStates = new Map();
-setInterval(() => { const now = Date.now(); for (const [k,v] of oauthStates) if (v.expires < now) oauthStates.delete(k); }, 60_000);
-function googleEnabled() { return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET); }
-function googleTokenExchange(code, redirectUri) {
-  return new Promise((resolve, reject) => {
-    const body = new URLSearchParams({ code, client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: redirectUri, grant_type: 'authorization_code' }).toString();
-    const req = https.request({ hostname: 'oauth2.googleapis.com', path: '/token', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } }, (res) => {
-      let data = ''; res.on('data', c => data += c); res.on('end', () => { try { resolve(JSON.parse(data)); } catch { reject(new Error('Bad token response')); } });
-    });
-    req.on('error', reject); req.write(body); req.end();
-  });
+// ── Google OAuth (authorization-code flow, confidential client) ─────────────────
+// The code is exchanged for tokens server-to-server (never exposed to the
+// browser), and the returned ID token is cryptographically verified against
+// Google's public keys — not just base64-decoded — so a malicious or
+// mangled response can't be used to impersonate a user or wrong audience.
+// BUG FIX ("Login session expired" on Google sign-in, ~7/8 of the time):
+// server.js runs Node `cluster` with multiple worker processes behind
+// Traefik's round-robin load balancing. An in-memory Map here is scoped to
+// a single worker process. The request that starts the OAuth flow
+// (/api/auth/google) can land on a different worker than the one that
+// handles Google's redirect back (/api/auth/google/callback) — that worker
+// never saw the state get set, so the lookup always misses and the login
+// fails. Fixed by making the state a signed, self-verifying token (HMAC +
+// expiry) instead of something looked up in per-process memory. No shared
+// storage (Redis, DB, sticky sessions) needed — any worker can verify a
+// state issued by any other worker.
+function makeState() {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const expires = Date.now() + 10 * 60 * 1000;
+  const payload = `${nonce}.${expires}`;
+  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('hex');
+  return `${payload}.${sig}`;
 }
-function decodeIdToken(token) { try { return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')); } catch { return null; } }
+function verifyState(state) {
+  if (!state || typeof state !== 'string') return false;
+  const parts = state.split('.');
+  if (parts.length !== 3) return false;
+  const [nonce, expiresStr, sig] = parts;
+  const payload = `${nonce}.${expiresStr}`;
+  const expectedSig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('hex');
+  if (sig.length !== expectedSig.length) return false;
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return false;
+  const expires = parseInt(expiresStr, 10);
+  if (!Number.isFinite(expires) || Date.now() > expires) return false;
+  return true;
+}
+
+function googleEnabled() { return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET); }
+function redirectUri() {
+  return `${process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 4000}`}/api/auth/google/callback`;
+}
+function oauthClient() {
+  return new OAuth2Client(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, redirectUri());
+}
 
 router.get('/google', authLimiter, (req, res) => {
   if (!googleEnabled()) return res.status(501).json({ error: 'Google OAuth is not configured.' });
-  const state = crypto.randomBytes(16).toString('hex');
-  oauthStates.set(state, { expires: Date.now() + 10 * 60 * 1000 });
-  const redirectUri = `${process.env.BACKEND_URL || `http://localhost:${process.env.PORT||4000}`}/api/auth/google/callback`;
-  const params = new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email profile', state, access_type: 'online', prompt: 'select_account' });
+  const state = makeState();
+  const params = new URLSearchParams({
+    client_id: process.env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri(),
+    response_type: 'code', scope: 'openid email profile', state,
+    access_type: 'online', prompt: 'select_account',
+  });
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 });
 
-router.get('/google/callback', async (req, res) => {
+router.get('/google/callback', authLimiter, async (req, res) => {
   const frontendUrl = process.env.CORS_ORIGIN || 'http://localhost:5173';
   const ip = req.realIp || req.ip;
+  const fail = (msg) => res.redirect(`${frontendUrl}/login?error=${encodeURIComponent(msg)}`);
+
   try {
+    if (!googleEnabled()) return fail('Google sign-in is not configured.');
     const { code, state, error: oauthError } = req.query;
-    if (oauthError) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('Google sign-in was cancelled.')}`);
-    if (!code || !state || !oauthStates.get(state)) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('Login session expired. Please try again.')}`);
-    oauthStates.delete(state);
-    const redirectUri = `${process.env.BACKEND_URL || `http://localhost:${process.env.PORT||4000}`}/api/auth/google/callback`;
-    const tokenData = await googleTokenExchange(code, redirectUri);
-    if (tokenData.error) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('Google authentication failed.')}`);
-    const profile = decodeIdToken(tokenData.id_token);
-    if (!profile?.email) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('Could not retrieve email from Google.')}`);
-    const { email, name, sub: googleId } = profile;
+    if (oauthError) return fail('Google sign-in was cancelled.');
+    if (!code || !state || !verifyState(state)) return fail('Login session expired. Please try again.');
+
+    const client = oauthClient();
+    let idToken;
+    try {
+      const { tokens } = await client.getToken({ code, redirect_uri: redirectUri() });
+      idToken = tokens.id_token;
+    } catch (e) {
+      console.error('[Google OAuth] token exchange failed:', e.message);
+      return fail('Google authentication failed.');
+    }
+    if (!idToken) return fail('Google authentication failed.');
+
+    // Cryptographically verifies signature, issuer, audience and expiry —
+    // this is the step a raw base64 decode of the JWT payload would skip.
+    let payload;
+    try {
+      const ticket = await client.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
+      payload = ticket.getPayload();
+    } catch (e) {
+      console.error('[Google OAuth] id_token verification failed:', e.message);
+      return fail('Could not verify your Google identity.');
+    }
+    if (!payload?.email) return fail('Could not retrieve email from Google.');
+    if (payload.email_verified === false) return fail('Your Google email address is not verified.');
+
+    const email = payload.email.toLowerCase().trim();
+    const name = payload.name;
+    const googleId = payload.sub;
+
     const allowedDomain = process.env.GOOGLE_ALLOWED_DOMAIN;
-    if (allowedDomain && !email.endsWith(`@${allowedDomain}`)) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent(`Only @${allowedDomain} accounts are permitted.`)}`);
+    if (allowedDomain && !email.endsWith(`@${allowedDomain.toLowerCase()}`)) {
+      return fail(`Only @${allowedDomain} accounts are permitted.`);
+    }
+
     let user = await queryOne('SELECT * FROM users WHERE google_id = ?', [googleId]);
     if (!user) user = await queryOne('SELECT * FROM users WHERE email = ?', [email]);
+
     if (!user) {
-      if (process.env.GOOGLE_AUTO_PROVISION !== 'true') return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('No account found. Contact your administrator.')}`);
+      if (process.env.GOOGLE_AUTO_PROVISION !== 'true') return fail('No account found for your Google email. Contact your administrator.');
       const defaultRole = process.env.GOOGLE_DEFAULT_ROLE || 'viewer';
-      const username = email.split('@')[0].replace(/[^a-z0-9._-]/gi, '_').toLowerCase();
-      const existing = await queryOne('SELECT id FROM users WHERE username = ?', [username]);
-      const finalUsername = existing ? `${username}_${crypto.randomBytes(3).toString('hex')}` : username;
+      const baseUsername = email.split('@')[0].replace(/[^a-z0-9._-]/gi, '_').toLowerCase();
+      const existing = await queryOne('SELECT id FROM users WHERE username = ?', [baseUsername]);
+      const finalUsername = existing ? `${baseUsername}_${crypto.randomBytes(3).toString('hex')}` : baseUsername;
       const newId = uuidv4();
-      await execute(`INSERT INTO users (id, username, email, display_name, google_id, role, enabled, password, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, '', ?)`, [newId, finalUsername, email, name || email, googleId, defaultRole, Math.floor(Date.now() / 1000)]);
+      // No usable local password — a random hash (never communicated to
+      // anyone, never derivable) so bcrypt.compare() can never match it;
+      // has_password=0 tells the UI/API this account can only sign in via Google.
+      const unusableHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+      await execute(
+        `INSERT INTO users (id, username, email, display_name, google_id, role, enabled, permissions, password, has_password, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, 0, ?)`,
+        [newId, finalUsername, email, name || email, googleId, defaultRole, unusableHash, Math.floor(Date.now() / 1000)]
+      );
       user = await queryOne('SELECT * FROM users WHERE id = ?', [newId]);
+      await audit.log({ userId: newId, username: finalUsername, action: 'google_auto_provision', ipSource: ip, result: 'success', details: `role=${defaultRole} email=${email}` });
+      webhook.fire('auth.user_provisioned', { username: finalUsername, email, role: defaultRole, message: `${finalUsername} auto-provisioned via Google sign-in` }).catch(() => {});
     } else if (!user.google_id) {
-      await execute('UPDATE users SET google_id = ?, display_name = COALESCE(NULLIF(display_name, ""), ?) WHERE id = ?', [googleId, name || email, user.id]);
+      // Existing local account, same email — link it (one-time, silent).
+      await execute(
+        'UPDATE users SET google_id = ?, display_name = COALESCE(NULLIF(display_name, \'\'), ?) WHERE id = ?',
+        [googleId, name || email, user.id]
+      );
+      user.google_id = googleId;
+      await audit.log({ userId: user.id, username: user.username, action: 'google_account_linked', ipSource: ip, result: 'success', details: email });
     }
-    if (!user.enabled) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('Your account is disabled.')}`);
+
+    if (!user.enabled) return fail('Your account is disabled. Contact your administrator.');
+
     const ipCheck = await isIPAllowed(ip, user.id, user.role);
-    if (!ipCheck.allowed) return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('Access denied: your IP is not permitted.')}`);
+    if (!ipCheck.allowed) {
+      await logBlockedAttempt({ username: user.username, ip, reason: `IP allowlist: ${ipCheck.reason}` });
+      await audit.log({ userId: user.id, username: user.username, action: 'login_blocked_ip', ipSource: ip, result: 'failure', details: 'IP not in allowlist (google)' });
+      return fail('Access denied: your IP is not permitted.');
+    }
+
     bf.recordSuccess(ip);
     const accessToken = signAccess(user);
     await createRefreshToken(user.id, res);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'google_login', ipSource: ip, result: 'success', details: `via Google (${email})` });
-    res.redirect(`${frontendUrl}/auth/callback#token=${encodeURIComponent(accessToken)}&user=${encodeURIComponent(JSON.stringify({ id: user.id, username: user.username, role: user.role }))}`);
+    webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in via Google from ${ip}` }).catch(() => {});
+
+    res.redirect(`${frontendUrl}/auth/callback#token=${encodeURIComponent(accessToken)}&user=${encodeURIComponent(JSON.stringify(publicUser(user)))}`);
   } catch (e) {
     console.error('[Google OAuth]', e.message);
-    res.redirect(`${frontendUrl}/login?error=${encodeURIComponent('An unexpected error occurred.')}`);
+    return fail('An unexpected error occurred.');
   }
 });
 
@@ -199,18 +303,21 @@ router.post('/refresh', async (req, res) => {
     const rawRefresh = req.cookies?.refreshToken;
     if (!rawRefresh) return res.status(401).json({ error: 'No refresh token' });
     const hash = crypto.createHash('sha256').update(rawRefresh).digest('hex');
-    const record = await queryOne(`SELECT rt.*, u.username, u.role FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id WHERE rt.token_hash = ? AND rt.revoked = 0`, [hash]);
+    const record = await queryOne(`SELECT rt.*, u.username, u.role, u.permissions FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id WHERE rt.token_hash = ? AND rt.revoked = 0`, [hash]);
     if (!record || record.expires_at < Math.floor(Date.now() / 1000)) {
-      res.clearCookie('refreshToken', { path: '/api/auth' });
+      res.clearCookie('refreshToken', { path: '/api/auth', ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}) });
       return res.status(401).json({ error: 'Refresh token invalid or expired' });
     }
-    const liveUser = await queryOne('SELECT enabled FROM users WHERE id = ?', [record.user_id]);
+    const liveUser = await queryOne('SELECT enabled, permissions FROM users WHERE id = ?', [record.user_id]);
     if (!liveUser || !liveUser.enabled) {
       await execute('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [record.user_id]);
-      res.clearCookie('refreshToken', { path: '/api/auth' });
+      res.clearCookie('refreshToken', { path: '/api/auth', ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}) });
       return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
     }
-    res.json({ accessToken: jwt.sign({ id: record.user_id, username: record.username, role: record.role }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRY || '8h' }) });
+    res.json({ accessToken: jwt.sign(
+      { id: record.user_id, username: record.username, role: record.role, permissions: liveUser.permissions || 0 },
+      process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRY || '8h' }
+    ) });
   } catch (e) { res.status(500).json({ error: 'Internal server error' }); }
 });
 
@@ -222,7 +329,7 @@ router.post('/logout', async (req, res) => {
       const hash = crypto.createHash('sha256').update(rawRefresh).digest('hex');
       await execute('UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?', [hash]);
     }
-    res.clearCookie('refreshToken', { path: '/api/auth' });
+    res.clearCookie('refreshToken', { path: '/api/auth', ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}) });
     res.json({ message: 'Logged out' });
   } catch (e) { res.status(500).json({ error: 'Internal server error' }); }
 });

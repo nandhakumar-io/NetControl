@@ -46,7 +46,7 @@ function StatusBadge({ status, transport }) {
     relay:        { icon: <Wifi size={11}/>,                              text: 'Relay',          color: '#f97316' },
     error:        { icon: <WifiOff size={11}/>,                           text: 'Error',          color: '#f87171' },
     closed:       { icon: <WifiOff size={11}/>,                           text: 'Disconnected',   color: '#64748b' },
-    reconnecting: { icon: <Loader2 size={11} className="animate-spin"/>,  text: 'Reconnecting…',  color: '#818cf8' },
+    reconnecting: { icon: <Loader2 size={11} className="animate-spin"/>,  text: 'Reconnecting…',  color: '#a78bfa' },
     relay_wait:   { icon: <Loader2 size={11} className="animate-spin"/>,  text: 'Waiting for agent…', color: '#f97316' },
   }
   const c = cfg[status] || cfg.idle
@@ -371,7 +371,7 @@ export default function TerminalPage() {
         )}
         <div className="flex-1"/>
         {[
-          { icon: <RefreshCw size={13} className={status==='reconnecting'||status==='relay_wait'?'animate-spin':''}/>, fn: reconnect, title:'Reconnect via SSH', hover: isLight ? '#6c5ce7' : '#818cf8' },
+          { icon: <RefreshCw size={13} className={status==='reconnecting'||status==='relay_wait'?'animate-spin':''}/>, fn: reconnect, title:'Reconnect via SSH', hover: isLight ? '#6c5ce7' : '#a78bfa' },
           { icon: fullscreen ? <Minimize2 size={13}/> : <Maximize2 size={13}/>, fn: toggleFull, title: fullscreen?'Exit fullscreen':'Fullscreen', hover: textPri },
           { icon: <X size={13}/>, fn: () => window.close(), title:'Close', hover:'#f87171' },
         ].map(({icon,fn,title,hover},i) => (

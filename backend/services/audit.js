@@ -53,6 +53,16 @@ async function log(opts) {
   }
 
   logger.info('AUDIT', entry);
+
+  // Relay to the configured SNMP server (if enabled). Intentionally not
+  // awaited — SNMP delivery (or an unreachable trap receiver) must never
+  // slow down or fail the action that triggered this audit entry. The
+  // audit_log row is updated with the delivery result once it lands.
+  try {
+    // Lazy require avoids a circular-require edge case at module load time
+    // and keeps audit.js usable even if snmpForwarder.js has an issue.
+    require('./snmpForwarder').forwardAndMark(entry).catch(() => {});
+  } catch { /* SNMP module unavailable — audit logging still succeeds */ }
 }
 
 module.exports = { log };

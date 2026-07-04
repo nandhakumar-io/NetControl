@@ -292,6 +292,10 @@ function attachSSHProxy(httpServer) {
 
         } catch (e) {
           send('error', `Failed to connect: ${e.message}`);
+          require('./webhook').fire('ssh.failure', {
+            device_id: device.id, device_name: device.name, error: e.message,
+            severity: 'critical', message: `SSH terminal connection failed for ${device.name}: ${e.message}`,
+          }).catch(() => {});
           ws.close(1011);
         }
 

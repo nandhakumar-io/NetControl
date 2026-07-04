@@ -165,7 +165,10 @@ router.get('/webhooks/:id/log', param('id').isUUID(), async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 50, 200);
     res.json(await whSvc.getDeliveryLog(req.params.id, limit));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[Security] webhook log fetch failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /api/security/events — list all supported event names

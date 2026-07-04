@@ -118,8 +118,8 @@ export default function SchedulesPage() {
         </div>
       ) : schedules.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
-          <div className="w-16 h-16 rounded-2xl bg-surface-3 border border-white/6 flex items-center justify-center mb-4">
-            <Clock size={28} className="text-slate-600" />
+          <div className="w-16 h-16 rounded-2xl bg-accent-purple/15 border border-accent-purple/25 flex items-center justify-center mb-4">
+            <Clock size={28} className="text-accent-purple" />
           </div>
           <p className="text-slate-400 font-body font-medium">No schedules yet</p>
           <p className="text-sm text-slate-600 font-body mt-1">Automate boots and shutdowns to save energy</p>

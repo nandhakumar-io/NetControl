@@ -81,6 +81,50 @@ function buildPayload(provider, event, data) {
   }
 }
 
+// ── Ensure delivery-log table exists ──────────────────────────────────────────
+// webhook_log previously only got created inside db/migrate-security.js, in the
+// same try block as `webhooks` + `ip_allowlist`, guarded by a FOREIGN KEY.
+// If that one CREATE TABLE throws (FK name collision from a prior partial
+// migration run, missing privileges, etc.) the whole function's catch just
+// logs a warning and moves on — so `webhooks` can exist and work fine while
+// `webhook_log` silently never gets created. That breaks both delivery
+// logging (insert fails, swallowed by .catch(() => {})) and reading the log
+// (select throws "table doesn't exist" -> 500 -> "Failed to load log").
+//
+// This makes table creation self-healing and independent of the FK, so it
+// can never be blocked by an unrelated constraint failure.
+let _logTableReady = false;
+async function ensureLogTable() {
+  if (_logTableReady) return;
+  try {
+    await execute(`
+      CREATE TABLE IF NOT EXISTS webhook_log (
+        id            CHAR(36)     NOT NULL PRIMARY KEY,
+        webhook_id    CHAR(36)     NOT NULL,
+        event         VARCHAR(100) NOT NULL,
+        status        SMALLINT     NOT NULL DEFAULT 0,
+        duration_ms   INT          DEFAULT NULL,
+        error         TEXT         DEFAULT NULL,
+        response_body TEXT         DEFAULT NULL,
+        fired_at      INT UNSIGNED NOT NULL,
+        INDEX idx_whl_webhook(webhook_id),
+        INDEX idx_whl_time  (fired_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    // Add response_body to older installs that already have the table but
+    // predate this column.
+    await execute(`
+      ALTER TABLE webhook_log
+      ADD COLUMN IF NOT EXISTS response_body TEXT DEFAULT NULL
+    `).catch(() => {});
+    _logTableReady = true;
+  } catch (e) {
+    console.error('[Webhook] Failed to ensure webhook_log table:', e.message);
+  }
+}
+module.exports.ensureLogTable = ensureLogTable;
+ensureLogTable().catch(() => {}); // proactive — don't wait for first delivery/read
+
 // ── HTTP POST helper with timeout ─────────────────────────────────────────────
 function doPost(urlStr, body, headers = {}, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -127,16 +171,17 @@ async function deliverOne(webhook, event, data) {
     extraHeaders['X-NetControl-Signature'] = `sha256=${sig}`;
   }
 
-  let status = 0, durationMs = 0, error = null;
+  let status = 0, durationMs = 0, error = null, responseBody = null;
 
   try {
     const res = await doPost(webhook.url, payload, extraHeaders);
-    status     = res.status;
-    durationMs = res.ms;
+    status       = res.status;
+    durationMs   = res.ms;
+    responseBody = (res.body || '').slice(0, 2000); // truncate — some receivers echo huge bodies
 
     // 2xx = success; anything else = failure
     if (status < 200 || status >= 300) {
-      throw new Error(`HTTP ${status}`);
+      throw new Error(`HTTP ${status}${responseBody ? `: ${responseBody.slice(0, 200)}` : ''}`);
     }
   } catch (e) {
     error  = e.message;
@@ -145,11 +190,12 @@ async function deliverOne(webhook, event, data) {
 
   // Log delivery attempt
   const now = Math.floor(Date.now() / 1000);
+  await ensureLogTable();
   await execute(
-    `INSERT INTO webhook_log (id, webhook_id, event, status, duration_ms, error, fired_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [uuidv4(), webhook.id, event, status, durationMs, error, now]
-  ).catch(() => {});
+    `INSERT INTO webhook_log (id, webhook_id, event, status, duration_ms, error, response_body, fired_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [uuidv4(), webhook.id, event, status, durationMs, error, responseBody, now]
+  ).catch(e => console.error(`[Webhook] Failed to write delivery log for "${webhook.name}":`, e.message));
 
   // Update last_status, last_fired, fail_count
   const failed = error || (status < 200 || status >= 300);
@@ -245,10 +291,17 @@ async function deleteHook(id) {
   invalidateHookCache();
 }
 async function getDeliveryLog(webhookId, limit = 50) {
-  return query(
-    'SELECT * FROM webhook_log WHERE webhook_id = ? ORDER BY fired_at DESC LIMIT ?',
-    [webhookId, limit]
-  );
+  await ensureLogTable();
+  const safeLimit = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
+  try {
+    return await query(
+      `SELECT * FROM webhook_log WHERE webhook_id = ? ORDER BY fired_at DESC LIMIT ${safeLimit}`,
+      [webhookId]
+    );
+  } catch (e) {
+    console.error('[Webhook] getDeliveryLog failed:', e.message);
+    return [];
+  }
 }
 
 module.exports.listHooks     = listHooks;

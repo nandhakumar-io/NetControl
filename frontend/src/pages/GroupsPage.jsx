@@ -47,7 +47,7 @@ function GroupFormModal({ open, onClose, onSaved, group }) {
                    boxShadow: '0 24px 64px rgba(0,0,0,0.4)' }}>
 
           {/* Accent bar */}
-          <div style={{ height: 2, background: 'linear-gradient(90deg, #a855f7, #818cf8)' }} />
+          <div style={{ height: 2, background: 'linear-gradient(90deg, #a855f7, #a78bfa)' }} />
 
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4"
@@ -161,7 +161,7 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
             <button onClick={() => onEdit(group)} title="Edit group"
               className="p-1.5 rounded-lg transition-all"
               style={{ color: 'var(--text-muted)' }}
-              onMouseEnter={e => { e.currentTarget.style.color = isLight ? '#6c5ce7' : '#818cf8'; e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.1)' : 'rgba(129,140,248,0.1)' }}
+              onMouseEnter={e => { e.currentTarget.style.color = isLight ? '#6c5ce7' : '#a78bfa'; e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.1)' : 'rgba(167,139,250,0.1)' }}
               onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent' }}>
               <Pencil size={13} />
             </button>
@@ -413,7 +413,7 @@ export default function GroupsPage() {
         <div className="flex flex-col items-center justify-center py-16">
           <Search size={22} style={{ color: 'var(--text-muted)', opacity: 0.4 }} className="mb-2" />
           <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No groups match "{search}"</p>
-          <button onClick={() => setSearch('')} className="text-xs mt-2" style={{ color: isLight ? '#6c5ce7' : '#818cf8' }}>Clear search</button>
+          <button onClick={() => setSearch('')} className="text-xs mt-2" style={{ color: isLight ? '#6c5ce7' : '#a78bfa' }}>Clear search</button>
         </div>
 
       ) : (
