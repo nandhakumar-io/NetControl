@@ -380,6 +380,82 @@ router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POST /api/devices/bulk-maintenance ───────────────────────────────────────
+// Toggle maintenance mode across many devices at once (patch windows,
+// whole-group maintenance — pair with the frontend's "select all" in a
+// group, or select individual devices then bulk-apply).
+//
+//  Accepts: { deviceIds: [uuid, ...], enabled: bool, note?: string }
+//
+//  Operators are restricted to devices in their accessible groups — any
+//  requested id outside that set is silently dropped from the update rather
+//  than failing the whole batch, and the response reports how many were
+//  actually skipped so the UI can tell the operator.
+router.post('/bulk-maintenance',
+  requireRole('admin', 'operator'),
+  body('deviceIds').isArray({ min: 1, max: 500 }).withMessage('deviceIds must be an array of 1–500 items'),
+  body('deviceIds.*').isUUID().withMessage('Invalid device id'),
+  body('enabled').isBoolean(),
+  body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
+
+    try {
+      let { deviceIds } = req.body;
+      const enabled = !!req.body.enabled;
+      const note    = req.body.note || null;
+      const now     = Math.floor(Date.now() / 1000);
+
+      let skipped = 0;
+      if (req.user.role === 'operator') {
+        const placeholders = deviceIds.map(() => '?').join(',');
+        const accessible = await query(
+          `SELECT d.id FROM devices d
+           INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?
+           WHERE d.id IN (${placeholders})`,
+          [req.user.id, ...deviceIds]
+        );
+        const allowedSet = new Set(accessible.map(r => r.id));
+        skipped = deviceIds.length - allowedSet.size;
+        deviceIds = deviceIds.filter(id => allowedSet.has(id));
+      }
+
+      if (!deviceIds.length) {
+        return res.status(403).json({ error: 'Access denied to all requested devices' });
+      }
+
+      const placeholders = deviceIds.map(() => '?').join(',');
+      const result = await execute(
+        `UPDATE devices
+           SET maintenance_mode = ?, maintenance_note = ?,
+               maintenance_since = ?, maintenance_by = ?
+         WHERE id IN (${placeholders})`,
+        [enabled ? 1 : 0, enabled ? note : null,
+         enabled ? now : null, enabled ? req.user.id : null,
+         ...deviceIds]
+      );
+
+      // Invalidate the webhook service's per-device cache for each affected
+      // device so the new maintenance state takes effect immediately.
+      const { invalidateMaintenanceCache } = require('../services/webhook');
+      deviceIds.forEach(id => invalidateMaintenanceCache(id));
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: enabled ? 'bulk_enable_maintenance_mode' : 'bulk_disable_maintenance_mode',
+        targetType: 'device', targetId: null,
+        targetName: `${deviceIds.length} device(s)`,
+        ipSource: req.realIp || req.ip, result: 'success',
+        details: `[${req.user.role}] ${enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled'}` +
+                 (skipped ? ` (${skipped} skipped — no group access)` : ''),
+      });
+
+      res.json({ updated: result.affectedRows ?? deviceIds.length, skipped });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
 // ── POST /api/devices/:id/maintenance ────────────────────────────────────────
 // Toggle maintenance mode for a device. While enabled=true, this device's
 // alerts (routes/alerts.js evaluateAlerts) and device-scoped webhooks
@@ -396,8 +472,18 @@ router.post('/:id/maintenance',
     if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
 
     try {
-      const device = await queryOne('SELECT id, name, maintenance_mode FROM devices WHERE id = ?', [req.params.id]);
+      const device = await queryOne('SELECT id, name, group_id, maintenance_mode FROM devices WHERE id = ?', [req.params.id]);
       if (!device) return res.status(404).json({ error: 'Device not found' });
+
+      // SECURITY: operators are restricted to devices in their accessible
+      // groups (same rule as GET /:id and actions/exec).
+      if (req.user.role === 'operator') {
+        const access = await queryOne(
+          'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+          [req.user.id, device.group_id]
+        );
+        if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+      }
 
       const enabled = !!req.body.enabled;
       const note    = req.body.note || null;
@@ -424,7 +510,7 @@ router.post('/:id/maintenance',
         action: enabled ? 'enable_maintenance_mode' : 'disable_maintenance_mode',
         targetType: 'device', targetId: req.params.id, targetName: device.name,
         ipSource: req.realIp || req.ip, result: 'success',
-        details: enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled',
+        details: `[${req.user.role}] ${enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled'}`,
       });
 
       const updated = await queryOne('SELECT * FROM devices WHERE id = ?', [req.params.id]);

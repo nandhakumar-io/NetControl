@@ -407,7 +407,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
 }
 
 // ── Bulk bar ──────────────────────────────────────────────────────────────────
-function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onEditSelected, onClear, canEdit }) {
+function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onEditSelected, onMaintenanceAll, onClear, canEdit }) {
   if (!count) return null
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 animate-slide-up">
@@ -429,6 +429,7 @@ function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, on
           { fn: onWakeAll,     label: 'Wake All',  icon: <Zap size={11} />,       c: '#22c55e', bg: 'rgba(34,197,94,0.1)',  bc: 'rgba(34,197,94,0.25)'  },
           { fn: onShutdownAll, label: 'Shutdown',  icon: <Power size={11} />,     c: '#f87171', bg: 'rgba(239,68,68,0.1)',  bc: 'rgba(239,68,68,0.25)'  },
           { fn: onRestartAll,  label: 'Restart',   icon: <RotateCcw size={11} />, c: '#fbbf24', bg: 'rgba(251,191,36,0.1)', bc: 'rgba(251,191,36,0.25)' },
+          { fn: onMaintenanceAll, label: 'Maintenance', icon: <Wrench size={11} />, c: '#fb923c', bg: 'rgba(251,146,60,0.1)', bc: 'rgba(251,146,60,0.25)' },
           { fn: onPushFile,    label: 'Push File', icon: <Upload size={11} />,    c: '#38bdf8', bg: 'rgba(56,189,248,0.1)', bc: 'rgba(56,189,248,0.25)' },
         ].map((b, i) => (
           <button key={i} onClick={b.fn}
@@ -553,6 +554,35 @@ export default function DevicesPage() {
     try {
       await api.post(`/devices/${device.id}/maintenance`, { enabled: enabling, note: note || undefined })
       toast.success(enabling ? `${device.name} marked under maintenance` : `${device.name} marked OK`)
+      fetchAll(true)
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
+    }
+  }
+
+  const bulkToggleMaintenance = async () => {
+    const targets = devices.filter(d => selectedIds.has(d.id))
+    if (!targets.length) return
+    // Mixed selection (some already under maintenance, some not) — default
+    // to enabling, since that's the far more common bulk action (start of
+    // a patch window). Clearing a mixed batch is still one click away by
+    // re-selecting just the ones that need it.
+    const enabling = !targets.every(d => d.maintenance_mode)
+    let note = null
+    if (enabling) {
+      note = window.prompt(`Mark ${targets.length} device(s) under maintenance?\nAlerts & webhooks for them will pause until marked OK again.\n\nOptional note:`, '')
+      if (note === null) return // cancelled
+    }
+    try {
+      const { data } = await api.post('/devices/bulk-maintenance', {
+        deviceIds: targets.map(d => d.id), enabled: enabling, note: note || undefined,
+      })
+      toast.success(
+        enabling ? `${data.updated} device(s) marked under maintenance` : `${data.updated} device(s) marked OK`,
+        data.skipped ? { duration: 5000 } : undefined
+      )
+      if (data.skipped) toast(`${data.skipped} device(s) skipped — no access`, { icon: '⚠️' })
+      clearSelection()
       fetchAll(true)
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
@@ -877,6 +907,7 @@ export default function DevicesPage() {
         onRestartAll={() => bulkAction('restart')}
         onPushFile={() => setFilePushOpen(true)}
         onEditSelected={() => setBulkEditOpen(true)}
+        onMaintenanceAll={bulkToggleMaintenance}
         canEdit={isAdmin}
         onClear={clearSelection} />
 
