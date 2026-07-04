@@ -49,12 +49,13 @@ router.get('/', requirePermission(MANAGE_COMPLIANCE), async (req, res) => {
         cc.last_checked_at          AS last_checked_at,
         cb.created_at               AS baseline_created_at,
         ls.status                   AS latest_status,
-        ls.diff                     AS latest_diff
+        ls.diff                     AS latest_diff,
+        ls.unreachable              AS latest_unreachable
       FROM devices d
       LEFT JOIN compliance_config cc ON cc.device_id = d.id
       LEFT JOIN compliance_baselines cb ON cb.device_id = d.id
       LEFT JOIN (
-        SELECT s1.device_id, s1.status, s1.diff
+        SELECT s1.device_id, s1.status, s1.diff, s1.unreachable
         FROM compliance_snapshots s1
         INNER JOIN (
           SELECT device_id, MAX(taken_at) AS max_taken
@@ -124,7 +125,7 @@ router.get('/:deviceId/snapshots', requirePermission(MANAGE_COMPLIANCE), param('
   if (!(await assertDevice(req.params.deviceId, res))) return;
   try {
     const rows = await query(
-      `SELECT id, device_id, raw_hash, status, diff, error, taken_at
+      `SELECT id, device_id, raw_hash, status, diff, error, unreachable, taken_at
          FROM compliance_snapshots WHERE device_id = ? ORDER BY taken_at DESC LIMIT 50`,
       [req.params.deviceId]
     );
@@ -181,6 +182,70 @@ router.post('/:deviceId/baseline',
         details: req.body.snapshotId ? `From snapshot ${req.body.snapshotId}` : 'From fresh collection',
       });
       res.json(result);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── GET /api/compliance/:deviceId/files — list watched file paths ────────────
+router.get('/:deviceId/files', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
+  if (validate(req, res)) return;
+  if (!(await assertDevice(req.params.deviceId, res))) return;
+  try {
+    const rows = await query(
+      'SELECT id, file_path, label, created_at FROM compliance_watched_files WHERE device_id = ? ORDER BY file_path ASC',
+      [req.params.deviceId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/compliance/:deviceId/files — watch a new file path ─────────────
+router.post('/:deviceId/files',
+  requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(),
+  body('file_path').isString().trim().isLength({ min: 1, max: 500 }),
+  body('label').optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
+  async (req, res) => {
+    if (validate(req, res)) return;
+    const device = await assertDevice(req.params.deviceId, res);
+    if (!device) return;
+    const { v4: uuidv4 } = require('uuid');
+    const id = uuidv4();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await execute(
+        `INSERT INTO compliance_watched_files (id, device_id, file_path, label, created_at) VALUES (?,?,?,?,?)`,
+        [id, req.params.deviceId, req.body.file_path, req.body.label || null, now]
+      );
+      await audit.log({
+        userId: req.user.id, username: req.user.username, ipSource: req.realIp,
+        action: 'compliance_file_watched', targetType: 'device', targetId: req.params.deviceId,
+        targetName: device.name, result: 'success', details: req.body.file_path,
+      });
+      res.json({ id, device_id: req.params.deviceId, file_path: req.body.file_path, label: req.body.label || null, created_at: now });
+    } catch (e) {
+      if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'That file path is already being watched for this device' });
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// ── DELETE /api/compliance/:deviceId/files/:id — stop watching a file ────────
+router.delete('/:deviceId/files/:id',
+  requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), param('id').isUUID(),
+  async (req, res) => {
+    if (validate(req, res)) return;
+    const device = await assertDevice(req.params.deviceId, res);
+    if (!device) return;
+    try {
+      const row = await queryOne('SELECT file_path FROM compliance_watched_files WHERE id = ? AND device_id = ?', [req.params.id, req.params.deviceId]);
+      if (!row) return res.status(404).json({ error: 'Watched file not found' });
+      await execute('DELETE FROM compliance_watched_files WHERE id = ? AND device_id = ?', [req.params.id, req.params.deviceId]);
+      await audit.log({
+        userId: req.user.id, username: req.user.username, ipSource: req.realIp,
+        action: 'compliance_file_unwatched', targetType: 'device', targetId: req.params.deviceId,
+        targetName: device.name, result: 'success', details: row.file_path,
+      });
+      res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
   }
 );

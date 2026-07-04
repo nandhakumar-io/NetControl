@@ -43,6 +43,50 @@ const WINDOWS_CMDS = {
     `powershell -NoProfile -Command "Get-NetFirewallRule -Enabled True -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName" 2>nul`,
 };
 
+// A quick, cheap probe used purely to tell "device unreachable" apart from
+// "device reachable, but this particular command found nothing." If this
+// fails, we treat the whole check as a connection failure rather than
+// attributing it to any one probe (packages/services/firewall/files).
+async function probeReachable(device) {
+  const exec = device.os_type === 'linux' ? require('./ssh').execCommand : require('./winrm').execCommand;
+  const cmd = device.os_type === 'linux' ? 'echo __ok__' : 'echo __ok__';
+  await exec(device, cmd); // throws on connection/auth failure
+}
+
+function linuxCatCmd(path) {
+  // -q makes it produce nothing (not an error) when the file doesn't exist,
+  // so "file was removed" shows up as an empty-body diff rather than a
+  // command failure the caller can't attribute to anything.
+  return `cat -- ${JSON.stringify(path)} 2>/dev/null`;
+}
+
+function windowsCatCmd(path) {
+  return `powershell -NoProfile -Command "Get-Content -Raw -ErrorAction SilentlyContinue -LiteralPath ${JSON.stringify(path)}" 2>nul`;
+}
+
+/** Read the current content of every watched file for a device. Best-effort
+ * per file — a single missing/unreadable file becomes empty content rather
+ * than failing the whole snapshot, same philosophy as the built-in probes. */
+async function collectFiles(device, watchedPaths) {
+  const exec = device.os_type === 'linux' ? require('./ssh').execCommand : require('./winrm').execCommand;
+  const buildCmd = device.os_type === 'linux' ? linuxCatCmd : windowsCatCmd;
+  const files = {};
+  for (const path of watchedPaths) {
+    try {
+      const { stdout } = await exec(device, buildCmd(path));
+      files[path] = stdout || '';
+    } catch {
+      files[path] = '';
+    }
+  }
+  return files;
+}
+
+function safeJsonParse(str) {
+  if (!str) return {};
+  try { return JSON.parse(str); } catch { return {}; }
+}
+
 function normalizeList(raw) {
   return String(raw || '')
     .split('\n')
@@ -51,14 +95,42 @@ function normalizeList(raw) {
     .sort();
 }
 
-function hashSnapshot({ packages, services, firewall_rules }) {
-  return crypto.createHash('sha256')
+function hashSnapshot({ packages, services, firewall_rules, files }) {
+  const h = crypto.createHash('sha256')
     .update(packages || '')
     .update('\u0000')
     .update(services || '')
     .update('\u0000')
-    .update(firewall_rules || '')
-    .digest('hex');
+    .update(firewall_rules || '');
+  // Fold in watched-file contents in a stable (sorted-path) order so the
+  // hash doesn't depend on object key iteration order.
+  for (const path of Object.keys(files || {}).sort()) {
+    h.update('\u0000').update(path).update('\u0001').update(files[path] || '');
+  }
+  return h.digest('hex');
+}
+
+/** Diff two {path: content} maps. A path present in only one side counts as
+ * fully added/removed; a path in both with different content is reported
+ * with its own added/removed line sets. */
+function diffFiles(oldFiles, newFiles) {
+  const oldMap = oldFiles || {};
+  const newMap = newFiles || {};
+  const paths = new Set([...Object.keys(oldMap), ...Object.keys(newMap)]);
+  const result = {};
+  for (const path of paths) {
+    const before = oldMap[path];
+    const after = newMap[path];
+    if (before === after) continue; // unchanged, or both missing
+    if (before === undefined) {
+      result[path] = { status: 'added', ...diffList('', after) };
+    } else if (after === undefined) {
+      result[path] = { status: 'removed', ...diffList(before, '') };
+    } else {
+      result[path] = { status: 'modified', ...diffList(before, after) };
+    }
+  }
+  return result;
 }
 
 /** Set diff between two newline-joined, already-sorted lists. */
@@ -114,16 +186,29 @@ async function runCheck(deviceId) {
   let status = 'clean';
   let diff = null;
   let error = null;
+  let unreachable = 0;
   let current = { packages: '', services: '', firewall_rules: '' };
+  let currentFiles = {};
+
+  const watched = await query(
+    'SELECT file_path FROM compliance_watched_files WHERE device_id = ?', [deviceId]
+  );
+  const watchedPaths = watched.map(w => w.file_path);
 
   try {
+    // Check reachability first, separately from the individual probes below.
+    // A device that's simply down/unauthenticated must not be reported as
+    // "clean" just because every best-effort probe degraded to empty output.
+    await probeReachable(device);
     current = await collect(device);
+    if (watchedPaths.length) currentFiles = await collectFiles(device, watchedPaths);
   } catch (e) {
     status = 'error';
-    error = e.message;
+    unreachable = 1;
+    error = `Device unreachable: ${e.message}`;
   }
 
-  const rawHash = status === 'error' ? null : hashSnapshot(current);
+  const rawHash = status === 'error' ? null : hashSnapshot({ ...current, files: currentFiles });
   const baseline = await queryOne('SELECT * FROM compliance_baselines WHERE device_id = ?', [deviceId]);
 
   if (status !== 'error') {
@@ -137,16 +222,17 @@ async function runCheck(deviceId) {
         packages:       diffList(baseline.packages, current.packages),
         services:       diffList(baseline.services, current.services),
         firewall_rules: diffList(baseline.firewall_rules, current.firewall_rules),
+        files:          diffFiles(safeJsonParse(baseline.files), currentFiles),
       };
     }
   }
 
   await execute(
     `INSERT INTO compliance_snapshots
-       (id, device_id, packages, services, firewall_rules, raw_hash, status, diff, error, taken_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+       (id, device_id, packages, services, firewall_rules, files, raw_hash, status, diff, error, unreachable, taken_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     [snapshotId, deviceId, current.packages, current.services, current.firewall_rules,
-     rawHash, status, diff ? JSON.stringify(diff) : null, error, now]
+     JSON.stringify(currentFiles), rawHash, status, diff ? JSON.stringify(diff) : null, error, unreachable, now]
   );
 
   await execute(
@@ -191,12 +277,18 @@ async function runCheck(deviceId) {
     });
   }
 
-  return { id: snapshotId, status, diff, error, taken_at: now };
+  return { id: snapshotId, status, diff, error, unreachable: !!unreachable, taken_at: now };
 }
 
 function summarizeDiff(diff) {
   const parts = [];
-  for (const [category, { added, removed }] of Object.entries(diff)) {
+  for (const [category, val] of Object.entries(diff)) {
+    if (category === 'files') {
+      const changed = Object.keys(val || {});
+      if (changed.length) parts.push(`${changed.length} watched file${changed.length === 1 ? '' : 's'} changed`);
+      continue;
+    }
+    const { added, removed } = val;
     if (added.length) parts.push(`+${added.length} ${category}`);
     if (removed.length) parts.push(`-${removed.length} ${category}`);
   }
@@ -211,21 +303,26 @@ async function setBaseline(deviceId, { snapshotId, userId } = {}) {
   if (snapshotId) {
     source = await queryOne('SELECT * FROM compliance_snapshots WHERE id = ? AND device_id = ?', [snapshotId, deviceId]);
     if (!source) throw new Error('Snapshot not found');
+    source.filesMap = safeJsonParse(source.files);
   } else {
     const deviceRow = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
     if (!deviceRow) throw new Error('Device not found');
     const device = buildDevice(deviceRow);
+    const watched = await query('SELECT file_path FROM compliance_watched_files WHERE device_id = ?', [deviceId]);
+    const watchedPaths = watched.map(w => w.file_path);
     const current = await collect(device);
-    source = { ...current, raw_hash: hashSnapshot(current) };
+    const currentFiles = watchedPaths.length ? await collectFiles(device, watchedPaths) : {};
+    source = { ...current, filesMap: currentFiles, raw_hash: hashSnapshot({ ...current, files: currentFiles }) };
   }
 
   await execute(
-    `INSERT INTO compliance_baselines (device_id, packages, services, firewall_rules, raw_hash, set_by, created_at)
-     VALUES (?,?,?,?,?,?,?)
+    `INSERT INTO compliance_baselines (device_id, packages, services, firewall_rules, files, raw_hash, set_by, created_at)
+     VALUES (?,?,?,?,?,?,?,?)
      ON DUPLICATE KEY UPDATE packages=VALUES(packages), services=VALUES(services),
-       firewall_rules=VALUES(firewall_rules), raw_hash=VALUES(raw_hash),
+       firewall_rules=VALUES(firewall_rules), files=VALUES(files), raw_hash=VALUES(raw_hash),
        set_by=VALUES(set_by), created_at=VALUES(created_at)`,
-    [deviceId, source.packages, source.services, source.firewall_rules, source.raw_hash, userId || null, now]
+    [deviceId, source.packages, source.services, source.firewall_rules,
+     JSON.stringify(source.filesMap || {}), source.raw_hash, userId || null, now]
   );
 
   return { device_id: deviceId, raw_hash: source.raw_hash, created_at: now };
@@ -265,4 +362,4 @@ function stop() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { runCheck, setBaseline, runDueChecks, start, stop, diffList, hashSnapshot };
+module.exports = { runCheck, setBaseline, runDueChecks, start, stop, diffList, diffFiles, hashSnapshot };

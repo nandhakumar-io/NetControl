@@ -3,6 +3,7 @@ import {
   ShieldCheck, RefreshCw, Loader2, ChevronDown, ChevronRight, Lock,
   CheckCircle2, AlertTriangle, XCircle, HelpCircle, Play, Anchor,
   Package, Server as ServerIcon, Flame, Plus, Minus, Clock,
+  FileText, Trash2, FolderPlus, WifiOff,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -16,11 +17,13 @@ const STATUS_CFG = {
   clean:        { color: '#34d399', icon: CheckCircle2, label: 'Clean' },
   drift:        { color: '#fbbf24', icon: AlertTriangle,label: 'Drift Detected' },
   error:        { color: '#f87171', icon: XCircle,      label: 'Check Failed' },
+  unreachable:  { color: '#f87171', icon: WifiOff,      label: 'Unreachable' },
 }
 
 function deviceStatus(d) {
   if (!d.enabled) return 'unconfigured'
   if (!d.latest_status) return 'pending'
+  if (d.latest_status === 'error' && d.latest_unreachable) return 'unreachable'
   return d.latest_status
 }
 
@@ -77,15 +80,55 @@ function DiffCategory({ icon: Icon, label, added = [], removed = [] }) {
   )
 }
 
+function FileDiffCard({ path, status, added = [], removed = [] }) {
+  const statusColor = status === 'added' ? '#34d399' : status === 'removed' ? '#f87171' : '#fbbf24'
+  return (
+    <div className="px-3 py-2.5 rounded-lg" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <FileText size={12} style={{ color: 'var(--text-muted)' }} />
+        <span className="text-[11px] font-mono font-bold truncate" style={{ color: 'var(--text-primary)' }}>{path}</span>
+        <span className="text-[10px] font-body font-semibold px-1.5 py-0.5 rounded uppercase" style={{ color: statusColor, background: `${statusColor}18` }}>
+          {status}
+        </span>
+      </div>
+      <div className="space-y-1 font-mono text-[11px] max-h-40 overflow-y-auto">
+        {added.map((x, i) => (
+          <div key={`a${i}`} className="flex items-center gap-1.5" style={{ color: '#34d399' }}>
+            <Plus size={10} className="shrink-0" /> <span className="truncate">{x}</span>
+          </div>
+        ))}
+        {removed.map((x, i) => (
+          <div key={`r${i}`} className="flex items-center gap-1.5" style={{ color: '#f87171' }}>
+            <Minus size={10} className="shrink-0" /> <span className="truncate">{x}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function DiffView({ diff }) {
   if (!diff) return <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>No changes.</p>
-  const hasAny = ['packages', 'services', 'firewall_rules'].some(k => (diff[k]?.added?.length || diff[k]?.removed?.length))
+  const fileEntries = Object.entries(diff.files || {})
+  const hasAny = ['packages', 'services', 'firewall_rules'].some(k => (diff[k]?.added?.length || diff[k]?.removed?.length)) || fileEntries.length > 0
   if (!hasAny) return <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>No changes.</p>
   return (
-    <div className="grid gap-2 sm:grid-cols-3">
-      <DiffCategory icon={Package}     label="Packages"       {...diff.packages} />
-      <DiffCategory icon={ServerIcon}  label="Services"       {...diff.services} />
-      <DiffCategory icon={Flame}       label="Firewall Rules" {...diff.firewall_rules} />
+    <div className="space-y-3">
+      <div className="grid gap-2 sm:grid-cols-3">
+        <DiffCategory icon={Package}     label="Packages"       {...diff.packages} />
+        <DiffCategory icon={ServerIcon}  label="Services"       {...diff.services} />
+        <DiffCategory icon={Flame}       label="Firewall Rules" {...diff.firewall_rules} />
+      </div>
+      {fileEntries.length > 0 && (
+        <div>
+          <span className="text-[11px] font-body font-bold uppercase tracking-wider mb-1.5 block" style={{ color: 'var(--text-muted)' }}>
+            Watched Files
+          </span>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {fileEntries.map(([path, d]) => <FileDiffCard key={path} path={path} {...d} />)}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -93,12 +136,13 @@ function DiffView({ diff }) {
 // ── Snapshot history row ──────────────────────────────────────────────────────
 function SnapshotRow({ snap }) {
   const [open, setOpen] = useState(false)
-  const c = STATUS_CFG[snap.status] || STATUS_CFG.pending
+  const snapStatus = snap.status === 'error' && snap.unreachable ? 'unreachable' : snap.status
+  const c = STATUS_CFG[snapStatus] || STATUS_CFG.pending
   return (
     <div style={{ borderBottom: '1px solid var(--border-subtle)' }}>
       <div className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-white/[0.02]" onClick={() => setOpen(o => !o)}>
         {open ? <ChevronDown size={12} style={{ color: 'var(--text-muted)' }} /> : <ChevronRight size={12} style={{ color: 'var(--text-muted)' }} />}
-        <StatusPill status={snap.status} />
+        <StatusPill status={snapStatus} />
         <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
           {new Date(snap.taken_at * 1000).toLocaleString()}
         </span>
@@ -126,6 +170,10 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
   const [interval_, setInterval_] = useState(d.check_interval_hours || 24)
   const [savingConfig, setSavingConfig] = useState(false)
   const [confirmBaseline, setConfirmBaseline] = useState(false)
+  const [watchedFiles, setWatchedFiles] = useState([])
+  const [loadingFiles, setLoadingFiles] = useState(false)
+  const [newFilePath, setNewFilePath] = useState('')
+  const [addingFile, setAddingFile] = useState(false)
 
   const status = deviceStatus(d)
 
@@ -138,7 +186,37 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
     finally { setLoadingSnaps(false) }
   }, [d.device_id])
 
-  useEffect(() => { if (expanded) loadSnapshots() }, [expanded, loadSnapshots])
+  const loadWatchedFiles = useCallback(async () => {
+    setLoadingFiles(true)
+    try {
+      const { data } = await api.get(`/compliance/${d.device_id}/files`)
+      setWatchedFiles(data)
+    } catch { toast.error('Failed to load watched files') }
+    finally { setLoadingFiles(false) }
+  }, [d.device_id])
+
+  useEffect(() => { if (expanded) { loadSnapshots(); loadWatchedFiles() } }, [expanded, loadSnapshots, loadWatchedFiles])
+
+  const addWatchedFile = async () => {
+    const path = newFilePath.trim()
+    if (!path) return
+    setAddingFile(true)
+    try {
+      await api.post(`/compliance/${d.device_id}/files`, { file_path: path })
+      toast.success('Now watching that file')
+      setNewFilePath('')
+      loadWatchedFiles()
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to add watched file') }
+    finally { setAddingFile(false) }
+  }
+
+  const removeWatchedFile = async (id) => {
+    try {
+      await api.delete(`/compliance/${d.device_id}/files/${id}`)
+      toast.success('Stopped watching that file')
+      loadWatchedFiles()
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to remove watched file') }
+  }
 
   const toggleEnabled = async () => {
     setSavingConfig(true)
@@ -235,6 +313,47 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
               <DiffView diff={d.latest_diff} />
             </div>
           )}
+
+          <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+            <div className="flex items-center gap-1.5 mb-2">
+              <FileText size={12} style={{ color: 'var(--text-muted)' }} />
+              <span className="text-[11px] font-body font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                Watched Files
+              </span>
+            </div>
+            <p className="text-[11px] font-body mb-2" style={{ color: 'var(--text-muted)' }}>
+              Specify a file path on this device (e.g. <code>/etc/nginx/nginx.conf</code>) to track its exact contents alongside packages/services/firewall rules.
+            </p>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input-field text-xs py-1.5 flex-1 font-mono"
+                placeholder={d.os_type === 'windows' ? 'C:\\path\\to\\file.conf' : '/etc/path/to/file.conf'}
+                value={newFilePath}
+                onChange={e => setNewFilePath(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addWatchedFile()}
+              />
+              <button onClick={addWatchedFile} disabled={addingFile || !newFilePath.trim()} className="btn-primary text-xs px-3 py-1.5">
+                {addingFile ? <Loader2 size={12} className="animate-spin" /> : <FolderPlus size={12} />} Watch
+              </button>
+            </div>
+            {loadingFiles ? (
+              <div className="py-2 flex justify-center"><Loader2 size={14} className="animate-spin" style={{ color: 'var(--text-muted)' }} /></div>
+            ) : watchedFiles.length === 0 ? (
+              <p className="text-[11px] font-body py-1" style={{ color: 'var(--text-muted)' }}>No files being watched yet.</p>
+            ) : (
+              <div className="space-y-1">
+                {watchedFiles.map(f => (
+                  <div key={f.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg" style={{ background: 'var(--bg-input)' }}>
+                    <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-primary)' }}>{f.file_path}</span>
+                    <button onClick={() => removeWatchedFile(f.id)} className="icon-btn shrink-0" title="Stop watching this file">
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {loadingSnaps ? (
             <div className="py-8 flex justify-center"><Loader2 size={16} className="animate-spin" style={{ color: 'var(--text-muted)' }} /></div>

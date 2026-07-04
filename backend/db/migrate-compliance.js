@@ -68,7 +68,38 @@ async function migrateComplianceTables() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
-    console.log('  ✓ compliance_tables (compliance_config, compliance_baselines, compliance_snapshots)');
+    // ── Watched files — user-specified paths on a device to fingerprint
+    // and diff, same as the built-in packages/services/firewall probes ──────
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS compliance_watched_files (
+        id          CHAR(36)     NOT NULL PRIMARY KEY,
+        device_id   CHAR(36)     NOT NULL,
+        file_path   VARCHAR(500) NOT NULL,
+        label       VARCHAR(100) DEFAULT NULL,
+        created_at  INT UNSIGNED NOT NULL,
+        FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+        UNIQUE KEY uniq_device_path (device_id, file_path)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // ── Add JSON-blob columns to hold {path: content} for watched files.
+    // Kept separate from packages/services/firewall_rules since file
+    // content isn't a sorted set — it's compared verbatim, one file at a
+    // time, keyed by path. Nullable/no-op for existing rows (files
+    // predates this migration, so old snapshots simply have no file data). ─
+    const addColIfMissing = async (table, col, ddl) => {
+      const [rows] = await conn.query(
+        `SELECT COUNT(*) AS c FROM information_schema.columns
+          WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+        [table, col]
+      );
+      if (rows[0].c === 0) await conn.query(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    };
+    await addColIfMissing('compliance_baselines', 'files', 'files LONGTEXT COMMENT \'JSON: {path: content}\'');
+    await addColIfMissing('compliance_snapshots', 'files', 'files LONGTEXT COMMENT \'JSON: {path: content}\'');
+    await addColIfMissing('compliance_snapshots', 'unreachable', 'unreachable TINYINT(1) NOT NULL DEFAULT 0 COMMENT \'true if the device itself could not be reached (auth/connection failure), distinct from a probe just returning empty\'');
+
+    console.log('  ✓ compliance_tables (compliance_config, compliance_baselines, compliance_snapshots, compliance_watched_files)');
   } finally {
     await conn.end();
   }
