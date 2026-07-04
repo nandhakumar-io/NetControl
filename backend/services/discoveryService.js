@@ -101,7 +101,7 @@ function expandCidr(cidr) {
 }
 
 // ── ICMP ping sweep ───────────────────────────────────────────────────────────
-function pingOnce(ip) {
+function pingOnce(ip, activeProcs) {
   return new Promise((resolve) => {
     const isWin = os.platform() === 'win32';
     // -c/-n: one packet.  -W/-w: per-reply timeout (ms on Windows, s on *nix).
@@ -110,7 +110,8 @@ function pingOnce(ip) {
       : ['-c', '1', '-W', String(Math.ceil(PING_TIMEOUT_MS / 1000)), ip];
 
     const start = Date.now();
-    execFile('ping', args, { timeout: PING_TIMEOUT_MS + 1000 }, (err, stdout) => {
+    const child = execFile('ping', args, { timeout: PING_TIMEOUT_MS + 1000 }, (err, stdout) => {
+      if (activeProcs) activeProcs.delete(child);
       const rtt = Date.now() - start;
       if (err) return resolve({ alive: false, rtt: null });
       // execFile resolves without error on non-zero exit for `ping` on some
@@ -121,6 +122,7 @@ function pingOnce(ip) {
         : /\d+ (bytes|received)/i.test(stdout) && !/100% packet loss/i.test(stdout) && !/0 (packets )?received/i.test(stdout);
       resolve({ alive: ok, rtt: ok ? rtt : null });
     });
+    if (activeProcs) activeProcs.add(child);
   });
 }
 
@@ -320,11 +322,13 @@ function parseNmapXml(stdout) {
   }
 }
 
-function runNmap(args) {
+function runNmap(args, activeProcs) {
   return new Promise((resolve) => {
-    execFile('nmap', args, { timeout: NMAP_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+    const child = execFile('nmap', args, { timeout: NMAP_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (activeProcs) activeProcs.delete(child);
       resolve(err ? null : stdout);
     });
+    if (activeProcs) activeProcs.add(child);
   });
 }
 
@@ -353,7 +357,7 @@ function runNmap(args) {
  *
  * `opts` is a whitelist of typed values — no raw flag strings from the client.
  */
-async function nmapScanHost(ip, opts = {}) {
+async function nmapScanHost(ip, opts = {}, activeProcs) {
   const portArgs = [];
   if (opts.topPorts && Number.isInteger(opts.topPorts) && opts.topPorts > 0) {
     portArgs.push('--top-ports', String(Math.min(opts.topPorts, NMAP_TOP_PORTS_MAX)));
@@ -372,7 +376,7 @@ async function nmapScanHost(ip, opts = {}) {
   if (opts.serviceDetection) svcArgs.push('-sV');
   svcArgs.push(ip);
 
-  const svcOut = await runNmap(svcArgs);
+  const svcOut = await runNmap(svcArgs, activeProcs);
   const { ports, osGuess: svcOsGuess } = parseNmapXml(svcOut);
 
   // ── Pass 2: OS detection (separate invocation, requires root for -sS) ─────
@@ -397,7 +401,7 @@ async function nmapScanHost(ip, opts = {}) {
     }
     osArgs.push(ip);
 
-    const osOut = await runNmap(osArgs);
+    const osOut = await runNmap(osArgs, activeProcs);
     const { osGuess: nmapOsGuess } = parseNmapXml(osOut);
     if (nmapOsGuess) osGuess = nmapOsGuess;
   }
@@ -497,16 +501,30 @@ async function runScan(scanId, { userId, username, ipSource } = {}) {
   let nmapUsed = 0;
   let cancelled = false;
 
+  // Every currently-running ping/nmap child process for this scan, so we can
+  // kill them the instant cancellation is detected instead of waiting for
+  // them to finish on their own (nmap with OS+service detection can take up
+  // to ~90s per host — waiting that out made "cancel" feel like it did
+  // nothing if the person didn't sit around for a minute or two).
+  const activeProcs = new Set();
+
   // Poll cancel_requested on a wall-clock timer instead of gating the check
   // on scannedCount. The old `scannedCount % 10 === 0` check meant cancellation
   // was only re-checked once every 10 *completed* hosts — for small scans that
   // count never lands on a multiple of 10 again, and for slow scans (nmap
   // OS/service detection) it could take minutes of real time to line up.
   // Result: clicking "cancel" often did nothing until the scan just finished
-  // on its own. A 1s timer bounds detection latency to ~1s plus however long
-  // whatever's currently in flight takes to finish, regardless of scan size.
+  // on its own. A 1s timer bounds detection latency to ~1s, and killing
+  // in-flight processes below means we don't also wait out their runtime.
   const cancelPoll = setInterval(async () => {
-    if (!cancelled && await isCancelled(scanId)) cancelled = true;
+    if (cancelled) return;
+    if (await isCancelled(scanId)) {
+      cancelled = true;
+      for (const child of activeProcs) {
+        try { child.kill('SIGTERM'); } catch { /* already exited */ }
+      }
+      activeProcs.clear();
+    }
   }, 1000);
 
   try {
@@ -518,11 +536,13 @@ async function runScan(scanId, { userId, username, ipSource } = {}) {
       let rtt = null;
 
       if (doPing) {
-        const pr = await pingOnce(ip);
+        const pr = await pingOnce(ip, activeProcs);
         alive = pr.alive;
         rtt = pr.rtt;
         if (alive) via.push('ping');
       }
+
+      if (cancelled) return;
 
       // Only spend SNMP/nmap effort on hosts we believe are up (or when ping
       // was never run at all, since some hosts silently drop ICMP).
@@ -554,13 +574,17 @@ async function runScan(scanId, { userId, username, ipSource } = {}) {
         }
       }
 
+      if (cancelled) return;
+
       if (nmapReady && nmapUsed < MAX_NMAP_HOSTS) {
         nmapUsed++;
-        const nmapResult = await nmapScanHost(ip, nmapOpts);
+        const nmapResult = await nmapScanHost(ip, nmapOpts, activeProcs);
         if (nmapResult.ports.length) via.push('nmap');
         ports = nmapResult.ports;
         if (!osGuess && nmapResult.osGuess) osGuess = nmapResult.osGuess;
       }
+
+      if (cancelled) return;
 
       if (via.length > 0 || mac) {
         aliveCount++;
@@ -578,6 +602,9 @@ async function runScan(scanId, { userId, username, ipSource } = {}) {
     });
   } finally {
     clearInterval(cancelPoll);
+    for (const child of activeProcs) {
+      try { child.kill('SIGTERM'); } catch { /* already exited */ }
+    }
   }
 
   const now = Math.floor(Date.now() / 1000);
