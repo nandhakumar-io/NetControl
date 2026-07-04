@@ -99,6 +99,23 @@ async function setup() {
       INDEX idx_audit_snmp_synced (snmp_synced)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+    -- Device online/offline transition history — powers the "Device Changes"
+    -- timeline & compare-snapshots feature on the Audit page. Populated by
+    -- services/statusPoller.js whenever a device's status actually changes
+    -- (not every poll tick — only real transitions).
+    CREATE TABLE IF NOT EXISTS device_status_history (
+      id          CHAR(36)     PRIMARY KEY,
+      device_id   CHAR(36)     NOT NULL,
+      device_name VARCHAR(100) NOT NULL,
+      old_status  VARCHAR(20),
+      new_status  VARCHAR(20)  NOT NULL,
+      timestamp   INT UNSIGNED NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+      INDEX idx_dsh_device_ts (device_id, timestamp),
+      INDEX idx_dsh_timestamp (timestamp),
+      CONSTRAINT fk_dsh_device FOREIGN KEY (device_id)
+        REFERENCES devices(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
     -- Generic admin-editable settings (SNMP forwarder config today)
     CREATE TABLE IF NOT EXISTS system_settings (
       \`key\`      VARCHAR(100) NOT NULL PRIMARY KEY,

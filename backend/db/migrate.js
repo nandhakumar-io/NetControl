@@ -424,6 +424,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  snmp_tables:', e.message);
     }
+    try {
+      const { migrateDeviceHistoryTables } = require('./migrate-device-history');
+      await migrateDeviceHistoryTables();
+      console.log('  ✓ device_history (device_status_history)');
+    } catch (e) {
+      console.warn('  ⚠  device_history:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

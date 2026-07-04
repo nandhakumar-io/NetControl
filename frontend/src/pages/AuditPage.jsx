@@ -4,7 +4,8 @@ import {
   Shield, ChevronLeft, ChevronRight, UserCheck,
   Plus, Pencil, Trash2, Clock, CheckCircle2, XCircle, AlertCircle,
   Radio, Download, FileSpreadsheet, FileText, ChevronDown, Settings2, MinusCircle,
-  Calendar, X as XIcon
+  Calendar, X as XIcon, ArrowUpCircle, ArrowDownCircle, GitCompare, History,
+  Server, Minus, ArrowRight
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -238,6 +239,319 @@ function SnmpBadge({ status, isAdmin, onOpenSettings }) {
   )
 }
 
+// ── Device Changes — timeline & compare-snapshots ───────────────────────────
+// Answers "what changed" instead of "who did what": online/offline
+// transitions detected automatically by the status poller, browsable as a
+// chronological feed or diffed between two points in time.
+function relativeTime(ts) {
+  const diff = Math.floor(Date.now() / 1000) - ts
+  if (diff < 60) return 'just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+function StatusPill({ status }) {
+  const map = {
+    online:  { cls: 'text-accent-green bg-accent-green/10 border-accent-green/25', label: 'Online' },
+    offline: { cls: 'text-slate-400 bg-surface-4 border-white/10', label: 'Offline' },
+    unknown: { cls: 'text-accent-yellow bg-accent-yellow/10 border-accent-yellow/25', label: 'Unknown' },
+    needs_approval: { cls: 'text-brand-400 bg-brand-500/10 border-brand-500/25', label: 'Pending' },
+  }
+  const m = map[status] || map.unknown
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-body font-medium border ${m.cls}`}>
+      {m.label}
+    </span>
+  )
+}
+
+// yyyy-mm-ddThh:mm (local) <-> epoch seconds, for <input type="datetime-local">
+function localToEpoch(value) {
+  if (!value) return null
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return null
+  return Math.floor(d.getTime() / 1000)
+}
+function epochToLocalInput(epochSec) {
+  const d = new Date(epochSec * 1000)
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function DeviceChangesPanel() {
+  const [mode, setMode] = useState('timeline') // 'timeline' | 'compare'
+
+  // ── Timeline mode ──────────────────────────────────────────────────────
+  const [changes, setChanges]   = useState([])
+  const [tallies, setTallies]   = useState({ wentOnline: 0, wentOffline: 0 })
+  const [total, setTotal]       = useState(0)
+  const [loading, setLoading]   = useState(true)
+  const [page, setPage]         = useState(1)
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate]     = useState('')
+  const LIMIT = 20
+
+  const fetchChanges = useCallback(async () => {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ page, limit: LIMIT })
+      const fromEpoch = fromDate ? Math.floor(new Date(`${fromDate}T00:00:00`).getTime() / 1000) : null
+      const toEpoch   = toDate   ? Math.floor(new Date(`${toDate}T23:59:59`).getTime() / 1000)   : null
+      if (fromEpoch) params.set('from', fromEpoch)
+      if (toEpoch)   params.set('to', toEpoch)
+      const { data } = await api.get(`/audit/device-changes?${params}`)
+      setChanges(data.changes ?? [])
+      setTotal(data.total ?? 0)
+      setTallies(data.tallies ?? { wentOnline: 0, wentOffline: 0 })
+    } catch (err) {
+      toast.error(err?.response?.data?.error || 'Failed to load device changes')
+    } finally {
+      setLoading(false)
+    }
+  }, [page, fromDate, toDate])
+
+  useEffect(() => { if (mode === 'timeline') fetchChanges() }, [mode, fetchChanges])
+  useEffect(() => { setPage(1) }, [fromDate, toDate])
+
+  const totalPages = Math.max(1, Math.ceil(total / LIMIT))
+
+  // ── Compare mode ───────────────────────────────────────────────────────
+  const now = Math.floor(Date.now() / 1000)
+  const [pointA, setPointA] = useState(epochToLocalInput(now - 86400)) // 24h ago
+  const [pointB, setPointB] = useState(epochToLocalInput(now))
+  const [comparing, setComparing] = useState(false)
+  const [compareResult, setCompareResult] = useState(null)
+
+  const runCompare = useCallback(async () => {
+    const a = localToEpoch(pointA)
+    const b = localToEpoch(pointB)
+    if (!a || !b) return toast.error('Pick two valid points in time to compare')
+    setComparing(true)
+    try {
+      const { data } = await api.get(`/audit/device-compare?a=${a}&b=${b}`)
+      setCompareResult(data)
+    } catch (err) {
+      toast.error(err?.response?.data?.error || 'Comparison failed')
+    } finally {
+      setComparing(false)
+    }
+  }, [pointA, pointB])
+
+  useEffect(() => { if (mode === 'compare' && !compareResult) runCompare() }, [mode]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div className="animate-fade-in">
+      {/* Mode toggle */}
+      <div className="flex items-center gap-2 mb-5">
+        <button
+          onClick={() => setMode('timeline')}
+          className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
+            mode === 'timeline'
+              ? 'bg-brand-500/15 border-brand-500/30 text-brand-400'
+              : 'border-white/8 hover:bg-surface-3'
+          }`}
+          style={mode === 'timeline' ? {} : { color: 'var(--text-secondary)' }}
+        >
+          <History size={16} /> Timeline
+        </button>
+        <button
+          onClick={() => setMode('compare')}
+          className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
+            mode === 'compare'
+              ? 'bg-brand-500/15 border-brand-500/30 text-brand-400'
+              : 'border-white/8 hover:bg-surface-3'
+          }`}
+          style={mode === 'compare' ? {} : { color: 'var(--text-secondary)' }}
+        >
+          <GitCompare size={16} /> Compare Snapshots
+        </button>
+      </div>
+
+      {mode === 'timeline' ? (
+        <>
+          {/* Filters + tallies */}
+          <div className="glass rounded-xl border border-white/8 px-4 py-3.5 mb-5 flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <Calendar size={16} className="text-brand-400 shrink-0" />
+              <input type="date" aria-label="From date" className="input-field h-9 text-sm px-2 w-[136px]"
+                value={fromDate} max={toDate || undefined} onChange={e => setFromDate(e.target.value)} />
+              <span className="text-sm" style={{ color: 'var(--text-faint)' }}>–</span>
+              <input type="date" aria-label="To date" className="input-field h-9 text-sm px-2 w-[136px]"
+                value={toDate} min={fromDate || undefined} onChange={e => setToDate(e.target.value)} />
+              {(fromDate || toDate) && (
+                <button onClick={() => { setFromDate(''); setToDate('') }} title="Clear date range"
+                  className="p-1.5 rounded-md transition-colors" style={{ color: 'var(--text-muted)' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)' }}>
+                  <XIcon size={16} />
+                </button>
+              )}
+            </div>
+            <div className="ml-auto flex items-center gap-4">
+              <span className="flex items-center gap-1.5 text-sm text-accent-green font-body">
+                <ArrowUpCircle size={15} /> {tallies.wentOnline} came online
+              </span>
+              <span className="flex items-center gap-1.5 text-sm text-accent-red font-body">
+                <ArrowDownCircle size={15} /> {tallies.wentOffline} went offline
+              </span>
+            </div>
+          </div>
+
+          {/* Feed */}
+          <div className="glass rounded-xl border border-white/8 overflow-hidden">
+            {loading ? (
+              <div className="p-5 space-y-3">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-10 rounded-lg animate-pulse" style={{ background: 'var(--bg-input)' }} />
+                ))}
+              </div>
+            ) : changes.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <div className="w-14 h-14 rounded-2xl bg-brand-500/15 border border-brand-500/25 flex items-center justify-center">
+                  <History size={26} className="text-brand-400" />
+                </div>
+                <p className="font-body text-sm" style={{ color: 'var(--text-secondary)' }}>No status changes recorded</p>
+                <p className="font-body text-sm max-w-sm text-center" style={{ color: 'var(--text-muted)' }}>
+                  Changes appear here automatically as the status poller detects devices going online or offline.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/5">
+                {changes.map(c => {
+                  const up = c.new_status === 'online'
+                  return (
+                    <div key={c.id} className="flex items-center gap-3 px-5 py-3 hover:bg-surface-3/40 transition-colors">
+                      {up
+                        ? <ArrowUpCircle size={18} className="text-accent-green shrink-0" />
+                        : <ArrowDownCircle size={18} className="text-accent-red shrink-0" />}
+                      <Server size={15} className="text-brand-400 shrink-0" />
+                      <span className="font-body font-medium text-sm truncate" style={{ color: 'var(--text-primary)' }}>
+                        {c.device_name}
+                      </span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        <StatusPill status={c.old_status || 'unknown'} />
+                        <ArrowRight size={12} style={{ color: 'var(--text-faint)' }} />
+                        <StatusPill status={c.new_status} />
+                      </span>
+                      <span className="ml-auto flex items-center gap-1.5 text-xs font-mono shrink-0" style={{ color: 'var(--text-muted)' }}>
+                        <Clock size={12} />
+                        {formatTime(c.timestamp)} · {relativeTime(c.timestamp)}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-4">
+              <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
+                Page <span style={{ color: 'var(--text-secondary)' }}>{page}</span> of {totalPages} · {total} changes
+              </p>
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
+                  className="btn-ghost py-1.5 px-3 disabled:opacity-30 text-sm">
+                  <ChevronLeft size={16} className="text-brand-400" /> Prev
+                </button>
+                <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
+                  className="btn-ghost py-1.5 px-3 disabled:opacity-30 text-sm">
+                  Next <ChevronRight size={16} className="text-brand-400" />
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {/* Compare controls */}
+          <div className="glass rounded-xl border border-white/8 px-4 py-3.5 mb-5 flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>Point A</label>
+              <input type="datetime-local" className="input-field h-9 text-sm px-2"
+                value={pointA} onChange={e => setPointA(e.target.value)} />
+            </div>
+            <ArrowRight size={16} style={{ color: 'var(--text-faint)' }} />
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>Point B</label>
+              <input type="datetime-local" className="input-field h-9 text-sm px-2"
+                value={pointB} onChange={e => setPointB(e.target.value)} />
+            </div>
+            <button onClick={runCompare} disabled={comparing} className="btn-primary h-9 ml-auto disabled:opacity-50">
+              {comparing ? <RefreshCw size={16} className="animate-spin" /> : <GitCompare size={16} />}
+              Compare
+            </button>
+          </div>
+
+          {compareResult && (
+            <>
+              {/* Summary cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mb-5">
+                <div className="glass rounded-xl border border-white/8 p-4">
+                  <div className="flex items-center gap-2 text-accent-green mb-1">
+                    <ArrowUpCircle size={16} /><span className="text-xs font-body font-semibold uppercase tracking-widest">Came Online</span>
+                  </div>
+                  <p className="text-2xl font-display font-bold" style={{ color: 'var(--text-primary)' }}>{compareResult.wentOnline.length}</p>
+                </div>
+                <div className="glass rounded-xl border border-white/8 p-4">
+                  <div className="flex items-center gap-2 text-accent-red mb-1">
+                    <ArrowDownCircle size={16} /><span className="text-xs font-body font-semibold uppercase tracking-widest">Went Offline</span>
+                  </div>
+                  <p className="text-2xl font-display font-bold" style={{ color: 'var(--text-primary)' }}>{compareResult.wentOffline.length}</p>
+                </div>
+                <div className="glass rounded-xl border border-white/8 p-4">
+                  <div className="flex items-center gap-2 text-accent-yellow mb-1">
+                    <AlertCircle size={16} /><span className="text-xs font-body font-semibold uppercase tracking-widest">Other Change</span>
+                  </div>
+                  <p className="text-2xl font-display font-bold" style={{ color: 'var(--text-primary)' }}>{compareResult.otherChange.length}</p>
+                </div>
+                <div className="glass rounded-xl border border-white/8 p-4">
+                  <div className="flex items-center gap-2 mb-1" style={{ color: 'var(--text-muted)' }}>
+                    <Minus size={16} /><span className="text-xs font-body font-semibold uppercase tracking-widest">Unchanged</span>
+                  </div>
+                  <p className="text-2xl font-display font-bold" style={{ color: 'var(--text-primary)' }}>{compareResult.unchangedCount}</p>
+                </div>
+              </div>
+
+              {/* Change lists */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {[
+                  { key: 'wentOnline',  title: 'Came online',   icon: ArrowUpCircle,   color: 'text-accent-green' },
+                  { key: 'wentOffline', title: 'Went offline',  icon: ArrowDownCircle, color: 'text-accent-red' },
+                ].map(({ key, title, icon: Icon, color }) => (
+                  <div key={key} className="glass rounded-xl border border-white/8 overflow-hidden">
+                    <div className={`flex items-center gap-2 px-4 py-3 border-b border-white/8 ${color}`}>
+                      <Icon size={16} /><span className="text-sm font-body font-semibold">{title} ({compareResult[key].length})</span>
+                    </div>
+                    {compareResult[key].length === 0 ? (
+                      <p className="px-4 py-6 text-sm font-body text-center" style={{ color: 'var(--text-muted)' }}>None</p>
+                    ) : (
+                      <div className="divide-y divide-white/5 max-h-72 overflow-y-auto">
+                        {compareResult[key].map(d => (
+                          <div key={d.id} className="flex items-center gap-2.5 px-4 py-2.5">
+                            <Server size={14} className="text-brand-400 shrink-0" />
+                            <span className="text-sm font-body truncate" style={{ color: 'var(--text-primary)' }}>{d.name}</span>
+                            <span className="ml-auto flex items-center gap-1.5 shrink-0">
+                              <StatusPill status={d.before} />
+                              <ArrowRight size={11} style={{ color: 'var(--text-faint)' }} />
+                              <StatusPill status={d.status} />
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 export default function AuditPage() {
   const [logs, setLogs]               = useState([])
@@ -254,6 +568,7 @@ export default function AuditPage() {
   const [snmpStatus, setSnmpStatus]   = useState(null)
   const [snmpModalOpen, setSnmpModalOpen] = useState(false)
   const { isAdmin } = usePermissions()
+  const [tab, setTab] = useState('events') // 'events' | 'changes'
   const LIMIT = 25
 
   // Local yyyy-mm-dd -> epoch seconds. `from` = start of that day, `to` = end
@@ -378,6 +693,36 @@ export default function AuditPage() {
         </p>
       </div>
 
+      {/* ── Tabs ────────────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 mb-5">
+        <button
+          onClick={() => setTab('events')}
+          className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
+            tab === 'events'
+              ? 'bg-brand-500/15 border-brand-500/30 text-brand-400'
+              : 'border-white/8 hover:bg-surface-3'
+          }`}
+          style={tab === 'events' ? {} : { color: 'var(--text-secondary)' }}
+        >
+          <ScrollText size={16} /> Event Log
+        </button>
+        <button
+          onClick={() => setTab('changes')}
+          className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
+            tab === 'changes'
+              ? 'bg-brand-500/15 border-brand-500/30 text-brand-400'
+              : 'border-white/8 hover:bg-surface-3'
+          }`}
+          style={tab === 'changes' ? {} : { color: 'var(--text-secondary)' }}
+        >
+          <GitCompare size={16} /> Device Changes
+        </button>
+      </div>
+
+      {tab === 'changes' ? (
+        <DeviceChangesPanel />
+      ) : (
+      <>
       {/* ── Filters ─────────────────────────────────────────────────────── */}
       <div className="glass rounded-xl border border-white/8 px-4 py-3.5 mb-5 space-y-3">
 
@@ -456,7 +801,7 @@ export default function AuditPage() {
             doesn't read as one undifferentiated wall of chips */}
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pt-3 border-t border-white/6">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-muted)' }}>Action</span>
+            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-secondary)' }}>Action</span>
             {FILTER_ACTIONS.map(a => (
               <button key={a} onClick={() => setActionFilter(a)}
                 className={`chip h-8 px-3 text-sm capitalize ${actionFilter === a ? 'chip-selected' : ''}`}>
@@ -466,7 +811,7 @@ export default function AuditPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-muted)' }}>Result</span>
+            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-secondary)' }}>Result</span>
             {FILTER_RESULTS.map(r => (
               <button key={r} onClick={() => setResultFilter(r)}
                 className={`chip h-8 px-3 text-sm capitalize ${resultFilter === r ? 'chip-selected' : ''}`}>
@@ -486,12 +831,12 @@ export default function AuditPage() {
           style={{ gridTemplateColumns: gridCols }}
         >
           {['Timestamp', 'User', 'Action', 'Target', 'Source IP', 'Result'].map(h => (
-            <span key={h} className="text-xs font-body font-semibold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>
+            <span key={h} className="text-xs font-body font-semibold uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>
               {h}
             </span>
           ))}
           {showSync && (
-            <span className="text-xs font-body font-semibold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>
+            <span className="text-xs font-body font-semibold uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>
               Sync
             </span>
           )}
@@ -637,6 +982,8 @@ export default function AuditPage() {
             </button>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   )

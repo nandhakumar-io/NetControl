@@ -191,6 +191,25 @@ async function flushToDB(results, nowSec) {
 
   await Promise.all(tasks);
 
+  // ── Record transitions for the Device Changes timeline / compare feature ──
+  // Only genuine transitions (old !== new) are written — a poll tick that
+  // reconfirms the same status is not "history", it's just noise.
+  const { v4: uuidv4 } = require('uuid');
+  const { batchInsert } = require('../db');
+  const transitions = results.filter(r => r.method !== 'skip' && r.oldStatus !== r.newStatus);
+  if (transitions.length) {
+    const rows = transitions.map(r => ({
+      id:          uuidv4(),
+      device_id:   r.id,
+      device_name: r.name,
+      old_status:  r.oldStatus || null,
+      new_status:  r.newStatus,
+      timestamp:   nowSec,
+    }));
+    batchInsert('device_status_history', ['id', 'device_id', 'device_name', 'old_status', 'new_status', 'timestamp'], rows)
+      .catch(e => console.error('[Poller] device_status_history insert:', e.message));
+  }
+
   // Fire offline alerts + webhooks for devices that just transitioned status
   const webhook = require('./webhook');
   for (const r of results) {

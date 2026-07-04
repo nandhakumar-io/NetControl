@@ -7,7 +7,7 @@ services:
     networks:
       - frontend-net
     volumes:
-      - ./cloudflared:/etc/cloudflared
+      -  ./cloudflared:/etc/cloudflared
 
 
   traefik:
