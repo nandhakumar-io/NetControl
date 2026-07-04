@@ -41,21 +41,29 @@ function StatusPill({ status }) {
 }
 
 // ── Determine os_type from an nmap/SNMP OS guess string ─────────────────────
+// No guess at all (e.g. a ping-only ICMP sweep — ping tells you nothing about
+// the OS) must NOT be silently assumed to be Linux. Same for a guess that's
+// neither confidently Windows nor Linux (e.g. "Cisco IOS", "FreeBSD") — those
+// need a human to pick, not a guess baked in as if it were a fact.
 function osGuessToType(osGuess) {
-  if (!osGuess) return 'linux'
+  if (!osGuess) return 'unknown'
   const s = osGuess.toLowerCase()
   if (s.includes('windows') || s.includes('microsoft')) return 'windows'
-  return 'linux'
+  if (s.includes('linux') || s.includes('ubuntu') || s.includes('debian') || s.includes('centos') || s.includes('red hat') || s.includes('unix')) return 'linux'
+  return 'unknown'
 }
 
 // ── OS type badge (matches DeviceModal style) ─────────────────────────────────
 function OsBadge({ type }) {
-  const isWin = type === 'windows'
+  const label = type === 'windows' ? 'WIN' : type === 'linux' ? 'LNX' : 'UNK'
+  const style = type === 'windows'
+    ? 'bg-sky-400/10 text-sky-400'
+    : type === 'linux'
+      ? 'bg-emerald-400/10 text-emerald-400'
+      : 'bg-slate-400/10 text-slate-400'
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold shrink-0 ${
-      isWin ? 'bg-sky-400/10 text-sky-400' : 'bg-emerald-400/10 text-emerald-400'
-    }`}>
-      {isWin ? 'WIN' : 'LNX'}
+    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold shrink-0 ${style}`}>
+      {label}
     </span>
   )
 }
@@ -295,6 +303,12 @@ function ImportModal({ open, onClose, onDone, scanId, results }) {
   const handleSubmit = async () => {
     const invalid = specs.find(s => !s.name.trim())
     if (invalid) { toast.error(`Device at ${invalid.ip} needs a name`); return }
+    // os_type is a strict windows/linux enum on the backend — a scan that
+    // couldn't confidently guess the OS (e.g. a ping-only sweep) leaves this
+    // as 'unknown' on purpose, and must be resolved by a human before import
+    // rather than silently defaulting to Linux.
+    const unresolved = specs.find(s => s.os_type === 'unknown')
+    if (unresolved) { toast.error(`${unresolved.ip} — OS type unknown, please select Windows or Linux`); return }
     setSaving(true)
     try {
       const payload = specs.map(s => ({
@@ -430,8 +444,10 @@ function ImportModal({ open, onClose, onDone, scanId, results }) {
 
                 {/* ── OS Type ───────────────────────────────────────── */}
                 <Field label="">
-                  <select className={inp} value={s.os_type}
+                  <select className={`${inp} ${s.os_type === 'unknown' ? 'border-amber-500/50' : ''}`}
+                    value={s.os_type}
                     onChange={e => setField(s.resultId, 'os_type', e.target.value)}>
+                    <option value="unknown" disabled>Unknown — pick one</option>
                     <option value="linux">Linux</option>
                     <option value="windows">Windows</option>
                   </select>
