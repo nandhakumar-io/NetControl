@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon, Users
+  SlidersHorizontal, X, AlertOctagon, Users, Wrench
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -45,6 +45,20 @@ function StatusBadge({ status }) {
       }}>
       <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${status === 'online' ? 'animate-pulse' : ''}`} />
       {s.text}
+    </span>
+  )
+}
+
+// ── Maintenance badge ─────────────────────────────────────────────────────────
+// Shown whenever a device is flagged under maintenance — alerts and webhooks
+// for that device are suppressed backend-side until it's marked ok again.
+function MaintenanceBadge({ note }) {
+  return (
+    <span title={note ? `Maintenance: ${note}` : 'Alerts & webhooks paused for this device'}
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold"
+      style={{ background: 'rgba(251,146,60,0.12)', border: '1px solid rgba(251,146,60,0.3)', color: '#fb923c' }}>
+      <Wrench size={10} />
+      Maintenance
     </span>
   )
 }
@@ -121,10 +135,11 @@ function Skeleton({ count = 8, view = 'grid' }) {
 }
 
 // ── Device Card (grid) ────────────────────────────────────────────────────────
-function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete }) {
+function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance }) {
   const isLight = useThemeStore(s => s.theme === 'light')
   const status  = device.status || 'unknown'
   const isOnline = status === 'online'
+  const inMaintenance = !!device.maintenance_mode
 
   const openTerminal = (e) => {
     e.stopPropagation()
@@ -179,8 +194,11 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       </div>
 
       {/* Status + OS row */}
-      <div className="flex items-center justify-between mb-3">
-        <StatusBadge status={status} />
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <StatusBadge status={status} />
+          {inMaintenance && <MaintenanceBadge note={device.maintenance_note} />}
+        </div>
         <OsBadge osType={device.os_type} />
       </div>
 
@@ -191,6 +209,16 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
         <ActionBtn onClick={() => onRestart(device)}  title="Restart"     color="yellow"><RotateCcw size={11} />Restart</ActionBtn>
 
         {/* Icon buttons */}
+        <button onClick={() => onToggleMaintenance(device)}
+          title={inMaintenance ? 'Mark as OK (resume alerts & webhooks)' : 'Mark under maintenance (pause alerts & webhooks)'}
+          className="px-2 py-1.5 rounded-lg transition-all text-sm"
+          style={inMaintenance
+            ? { background: 'rgba(251,146,60,0.14)', border: '1px solid rgba(251,146,60,0.35)', color: '#fb923c' }
+            : { background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}
+          onMouseEnter={e => { if (!inMaintenance) { e.currentTarget.style.color = 'var(--text-primary)'; e.currentTarget.style.borderColor = 'var(--border-mid)' } }}
+          onMouseLeave={e => { if (!inMaintenance) { e.currentTarget.style.color = 'var(--text-muted)';   e.currentTarget.style.borderColor = 'var(--border-subtle)' } }}>
+          <Wrench size={12} />
+        </button>
         <button onClick={() => onEdit(device)} title="Edit"
           className="px-2 py-1.5 rounded-lg transition-all text-sm"
           style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}
@@ -233,7 +261,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 }
 
 // ── Group section header ──────────────────────────────────────────────────────
-function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete }) {
+function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance }) {
   const [open, setOpen] = useState(true)
   const online  = devices.filter(d => d.status === 'online').length
   const total   = devices.length
@@ -274,7 +302,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
               selected={selectedIds.has(d.id)}
               onSelect={id => onSelect(id, !selectedIds.has(id))}
               onWake={onWake} onShutdown={onShutdown} onRestart={onRestart}
-              onEdit={onEdit} onDelete={onDelete} />
+              onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance} />
           ))}
         </div>
       )}
@@ -283,9 +311,10 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
 }
 
 // ── List row ──────────────────────────────────────────────────────────────────
-function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete }) {
+function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
+  const inMaintenance = !!device.maintenance_mode
 
   const openTerminal = (e) => {
     e.stopPropagation()
@@ -339,7 +368,10 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
       <div><OsBadge osType={device.os_type} /></div>
 
       {/* Status */}
-      <div><StatusBadge status={status} /></div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <StatusBadge status={status} />
+        {inMaintenance && <MaintenanceBadge note={device.maintenance_note} />}
+      </div>
 
       {/* Actions */}
       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
@@ -348,13 +380,15 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
           { fn: () => onWake(device),     icon: <Zap size={12} />,        color: '#22c55e', bg: 'rgba(34,197,94,0.1)',   title: 'Wake'     },
           { fn: () => onShutdown(device), icon: <Power size={12} />,      color: '#f87171', bg: 'rgba(239,68,68,0.1)',   title: 'Shutdown' },
           { fn: () => onRestart(device),  icon: <RotateCcw size={12} />,  color: '#fbbf24', bg: 'rgba(251,191,36,0.1)',  title: 'Restart'  },
+          { fn: () => onToggleMaintenance(device), icon: <Wrench size={12} />, color: '#fb923c', bg: 'rgba(251,146,60,0.1)',
+            title: inMaintenance ? 'Mark as OK (resume alerts & webhooks)' : 'Mark under maintenance (pause alerts & webhooks)' },
           { fn: () => onEdit(device),     icon: <Pencil size={12} />,     color: null,       bg: null,                   title: 'Edit'     },
         ].map((a, i) => (
           <button key={i} onClick={a.fn} title={a.title}
             className="p-1.5 rounded-lg transition-all"
-            style={{ color: a.color || 'var(--text-muted)' }}
+            style={{ color: a.title === 'Mark as OK (resume alerts & webhooks)' ? '#fb923c' : (a.color || 'var(--text-muted)') }}
             onMouseEnter={e => { if (a.bg) { e.currentTarget.style.background = a.bg }; e.currentTarget.style.color = a.color || 'var(--text-primary)' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = a.color || 'var(--text-muted)' }}>
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = a.title === 'Mark as OK (resume alerts & webhooks)' ? '#fb923c' : (a.color || 'var(--text-muted)') }}>
             {a.icon}
           </button>
         ))}
@@ -507,6 +541,22 @@ export default function DevicesPage() {
       setDeleteTarget(null)
       fetchAll(true)
     } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
+  }
+
+  const handleToggleMaintenance = async (device) => {
+    const enabling = !device.maintenance_mode
+    let note = null
+    if (enabling) {
+      note = window.prompt(`Mark "${device.name}" under maintenance?\nAlerts & webhooks for it will pause until you mark it OK again.\n\nOptional note:`, '')
+      if (note === null) return // cancelled
+    }
+    try {
+      await api.post(`/devices/${device.id}/maintenance`, { enabled: enabling, note: note || undefined })
+      toast.success(enabling ? `${device.name} marked under maintenance` : `${device.name} marked OK`)
+      fetchAll(true)
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
+    }
   }
 
   const handleDeleteAll = async () => {
@@ -773,7 +823,8 @@ export default function DevicesPage() {
               onShutdown={d => handleAction('shutdown', d)}
               onRestart={d => handleAction('restart', d)}
               onEdit={d => setDeviceModal(d)}
-              onDelete={d => setDeleteTarget(d)} />
+              onDelete={d => setDeleteTarget(d)}
+              onToggleMaintenance={handleToggleMaintenance} />
           ))}
         </div>
 
@@ -812,7 +863,8 @@ export default function DevicesPage() {
                 onShutdown={dev => handleAction('shutdown', dev)}
                 onRestart={dev => handleAction('restart', dev)}
                 onEdit={dev => setDeviceModal(dev)}
-                onDelete={dev => setDeleteTarget(dev)} />
+                onDelete={dev => setDeleteTarget(dev)}
+                onToggleMaintenance={handleToggleMaintenance} />
             ))}
           </div>
         </div>

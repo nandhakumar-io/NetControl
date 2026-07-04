@@ -5,7 +5,7 @@
 const https = require('https');
 const http  = require('http');
 const crypto = require('crypto');
-const { query, execute } = require('../db');
+const { query, execute, queryOne } = require('../db');
 const { v4: uuidv4 } = require('uuid');
 
 // ── All supported event names ─────────────────────────────────────────────────
@@ -225,11 +225,47 @@ async function getEnabledHooks() {
 function invalidateHookCache() { _hooks = null; }
 module.exports.invalidateHookCache = invalidateHookCache;
 
+// ── Maintenance-mode gate ──────────────────────────────────────────────────────
+// Devices flagged maintenance_mode=1 have all their device-scoped webhook
+// events suppressed (device.offline/online, alert.*, ssh.failure, etc.) until
+// maintenance is cleared. Short TTL cache since fire() can be called very
+// frequently (every metrics tick / poll cycle).
+const _maintenanceCache = new Map(); // deviceId -> { value, ts }
+const MAINTENANCE_TTL_MS = 10_000;
+
+async function isDeviceUnderMaintenance(deviceId) {
+  if (!deviceId) return false;
+  const now = Date.now();
+  const cached = _maintenanceCache.get(deviceId);
+  if (cached && (now - cached.ts) < MAINTENANCE_TTL_MS) return cached.value;
+
+  let value = false;
+  try {
+    const row = await queryOne('SELECT maintenance_mode FROM devices WHERE id = ?', [deviceId]);
+    value = !!(row && row.maintenance_mode);
+  } catch { value = false; }
+
+  _maintenanceCache.set(deviceId, { value, ts: now });
+  return value;
+}
+
+function invalidateMaintenanceCache(deviceId) {
+  if (deviceId) _maintenanceCache.delete(deviceId);
+  else _maintenanceCache.clear();
+}
+module.exports.invalidateMaintenanceCache = invalidateMaintenanceCache;
+
 /**
  * Fire webhooks for a given event.
  * Runs concurrently; errors are caught per-webhook so one failure doesn't block others.
+ * Device-scoped events (data.device_id set) are suppressed while that device
+ * is flagged as under maintenance.
  */
 async function fire(event, data = {}) {
+  if (data.device_id && await isDeviceUnderMaintenance(data.device_id)) {
+    return []; // suppressed — device under maintenance
+  }
+
   let hooks;
   try {
     hooks = await getEnabledHooks();

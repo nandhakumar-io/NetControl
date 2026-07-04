@@ -341,6 +341,41 @@ const MIGRATIONS = [
     `,
   },
 
+  // FEATURE: Maintenance mode — lets an operator mark a device as "under
+  // maintenance" so status-change alerts and webhooks (device.offline/online,
+  // alert.*, ssh.failure, etc.) are suppressed for it until it's marked ok
+  // again. See services/webhook.js (fire) and routes/alerts.js (evaluateAlerts)
+  // for the enforcement side.
+  {
+    id: '009_devices_maintenance_mode',
+    sql: `
+      SET @m1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'maintenance_mode');
+      SET @sqlm1 = IF(@m1 = 0, 'ALTER TABLE devices ADD COLUMN maintenance_mode TINYINT(1) NOT NULL DEFAULT 0', 'SELECT 1');
+      PREPARE stmtm1 FROM @sqlm1; EXECUTE stmtm1; DEALLOCATE PREPARE stmtm1;
+
+      SET @m2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'maintenance_note');
+      SET @sqlm2 = IF(@m2 = 0, 'ALTER TABLE devices ADD COLUMN maintenance_note VARCHAR(255) DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtm2 FROM @sqlm2; EXECUTE stmtm2; DEALLOCATE PREPARE stmtm2;
+
+      SET @m3 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'maintenance_since');
+      SET @sqlm3 = IF(@m3 = 0, 'ALTER TABLE devices ADD COLUMN maintenance_since INT UNSIGNED DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtm3 FROM @sqlm3; EXECUTE stmtm3; DEALLOCATE PREPARE stmtm3;
+
+      SET @m4 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND COLUMN_NAME = 'maintenance_by');
+      SET @sqlm4 = IF(@m4 = 0, 'ALTER TABLE devices ADD COLUMN maintenance_by CHAR(36) DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtm4 FROM @sqlm4; EXECUTE stmtm4; DEALLOCATE PREPARE stmtm4;
+
+      SET @m5 = (SELECT COUNT(*) FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devices' AND INDEX_NAME = 'idx_devices_maintenance');
+      SET @sqlm5 = IF(@m5 = 0, 'ALTER TABLE devices ADD INDEX idx_devices_maintenance (maintenance_mode)', 'SELECT 1');
+      PREPARE stmtm5 FROM @sqlm5; EXECUTE stmtm5; DEALLOCATE PREPARE stmtm5;
+    `,
+  },
+
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────

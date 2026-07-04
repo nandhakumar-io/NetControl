@@ -188,6 +188,13 @@ const cooldowns = new Map();
 async function evaluateAlerts(deviceId, snapshot) {
   try {
     if (!await tableExists('alert_rules')) return;
+
+    const device = await queryOne('SELECT id, name, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
+    if (!device) return;
+    // Device is under maintenance — suppress alerts (no log entry, no admin
+    // notification, no webhook) until it's marked ok again.
+    if (device.maintenance_mode) return;
+
     const rules = await query(
       `SELECT * FROM alert_rules WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)`,
       [deviceId]
@@ -195,8 +202,6 @@ async function evaluateAlerts(deviceId, snapshot) {
     if (!rules.length) return;
 
     const now = Math.floor(Date.now() / 1000);
-    const device = await queryOne('SELECT id, name FROM devices WHERE id = ?', [deviceId]);
-    if (!device) return;
 
     for (const rule of rules) {
       const actions = JSON.parse(rule.actions || '[]');

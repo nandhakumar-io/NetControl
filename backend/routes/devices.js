@@ -380,6 +380,61 @@ router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POST /api/devices/:id/maintenance ────────────────────────────────────────
+// Toggle maintenance mode for a device. While enabled=true, this device's
+// alerts (routes/alerts.js evaluateAlerts) and device-scoped webhooks
+// (services/webhook.js fire) are suppressed entirely — no triggered-log
+// entries, no admin notifications, no outbound webhook deliveries — until
+// it's marked ok (enabled=false) again.
+router.post('/:id/maintenance',
+  requireRole('admin', 'operator'),
+  param('id').isUUID(),
+  body('enabled').isBoolean(),
+  body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
+
+    try {
+      const device = await queryOne('SELECT id, name, maintenance_mode FROM devices WHERE id = ?', [req.params.id]);
+      if (!device) return res.status(404).json({ error: 'Device not found' });
+
+      const enabled = !!req.body.enabled;
+      const note    = req.body.note || null;
+      const now     = Math.floor(Date.now() / 1000);
+
+      await execute(
+        `UPDATE devices
+           SET maintenance_mode = ?, maintenance_note = ?,
+               maintenance_since = ?, maintenance_by = ?
+         WHERE id = ?`,
+        [enabled ? 1 : 0, enabled ? note : null,
+         enabled ? now : null, enabled ? req.user.id : null,
+         req.params.id]
+      );
+
+      // Drop the webhook service's cached maintenance flag for this device
+      // immediately — otherwise a stale "not under maintenance" value could
+      // linger for up to MAINTENANCE_TTL_MS and let one more event slip
+      // through right after the operator flips the switch.
+      require('../services/webhook').invalidateMaintenanceCache(req.params.id);
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: enabled ? 'enable_maintenance_mode' : 'disable_maintenance_mode',
+        targetType: 'device', targetId: req.params.id, targetName: device.name,
+        ipSource: req.realIp || req.ip, result: 'success',
+        details: enabled ? (note || 'Maintenance mode enabled') : 'Maintenance mode disabled',
+      });
+
+      const updated = await queryOne('SELECT * FROM devices WHERE id = ?', [req.params.id]);
+      res.json(sanitizeDevice(updated));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
 // Add this endpoint to routes/devices.js
 // POST /api/devices/:id/approve-registration — Approve a pending agent registration
 // This endpoint finalizes the device registration and marks it as approved
