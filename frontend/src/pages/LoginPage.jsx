@@ -38,9 +38,21 @@ export default function LoginPage() {
   }, [])
 
   useEffect(() => {
-    api.get('/auth/google/status')
-      .then(({ data }) => setGoogleEnabled(!!data.enabled))
-      .catch(() => setGoogleEnabled(false))
+    let cancelled = false
+    const checkStatus = (retries = 2) => {
+      api.get('/auth/google/status')
+        .then(({ data }) => { if (!cancelled) setGoogleEnabled(!!data.enabled) })
+        .catch((err) => {
+          // A 429 (rate-limited) or network hiccup isn't "Google is disabled" —
+          // retry briefly instead of silently hiding the button. Only a real
+          // response (enabled: false) should turn it off.
+          if (cancelled) return
+          if (retries > 0) setTimeout(() => checkStatus(retries - 1), 1500)
+          else if (err.response && err.response.status !== 429) setGoogleEnabled(false)
+        })
+    }
+    checkStatus()
+    return () => { cancelled = true }
   }, [])
 
   const handleSubmit = async (e) => {
@@ -162,4 +174,3 @@ export default function LoginPage() {
     </div>
   )
 }
-

@@ -101,8 +101,35 @@ app.use((req, _res, next) => {
   next();
 });
 
+// ── Soft identity peek (rate-limiting only) ──────────────────────────────────
+// apiLimiter's keyGenerator wants req.user.id so each signed-in user gets
+// their own bucket, but requireAuth only runs later, per-route. Without this,
+// req.user is always undefined here and every request falls back to req.ip —
+// which means everyone behind the same NAT/VPN/proxy IP shares ONE bucket.
+// This does a non-enforcing JWT decode (no DB hit, no 401 on failure) purely
+// so the limiter can key by user. Real auth/enabled checks still happen in
+// requireAuth further down the chain — this changes nothing about security.
+const jwt = require('jsonwebtoken');
+app.use((req, _res, next) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    try {
+      const payload = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+      req.user = { id: payload.id };
+    } catch { /* invalid/expired — fall back to IP in the limiter; requireAuth rejects it properly later */ }
+  }
+  next();
+});
+
 // ── Rate limiting ─────────────────────────────────────────────────────────────
-app.use('/api', apiLimiter);
+// Auth-session endpoints (refresh, google status, logout) are excluded — they
+// must keep working even when a busy dashboard has used up the general API
+// budget, otherwise a 429 there cascades into a forced logout / a Google
+// button that looks "unavailable" when it's really just rate-limited.
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth/refresh' || req.path === '/auth/google/status' || req.path === '/auth/logout') return next();
+  return apiLimiter(req, res, next);
+});
 app.use('/api/devices/bulk-import', bulkImportLimiter);
 
 // ── Disabled-account check ────────────────────────────────────────────────────
