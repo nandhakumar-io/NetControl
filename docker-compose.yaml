@@ -49,8 +49,11 @@ services:
   
   backend:
     build: ./backend
-    depends_on: 
+    depends_on:
       - mysql
+      - redis
+    environment:
+      - PROCESS_ROLE=web
     expose:
       - "8000"
     labels:
@@ -65,6 +68,38 @@ services:
       - backend-net
       - frontend-net
 
+  # ── Poller: status polling + cron schedules + compliance checks ─────────────
+  # Runs as ONE instance (do not scale this) so scheduled actions and device
+  # polling never execute more than once per tick. See backend/poller.js for
+  # the full rationale. Shares the same image/env as `backend`, different
+  # entrypoint, no exposed port — it talks to MySQL and Redis only.
+  poller:
+    build: ./backend
+    command: ["node", "poller.js"]
+    depends_on:
+      - mysql
+      - redis
+    environment:
+      - PROCESS_ROLE=poller
+    env_file:
+      - .env
+    networks:
+      - backend-net
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  # ── Redis: cross-process bus for SSE fan-out + metrics sync ─────────────────
+  # Used by the clustered `backend` workers to share live metric snapshots/SSE
+  # broadcasts with each other (see backend/services/bus.js). Not used as a
+  # cache or queue — just pub/sub, so default config is fine.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - backend-net
+    volumes:
+      - netcontrol_redis_data:/data
 
   mysql:
     image: mysql:8.4
@@ -83,6 +118,7 @@ services:
       - netcontrol_db_data:/var/lib/mysql 
 volumes:
   netcontrol_db_data:
+  netcontrol_redis_data:
 
 networks:
   frontend-net:

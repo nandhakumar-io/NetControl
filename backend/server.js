@@ -196,9 +196,22 @@ async function boot() {
     console.log(`\n🚀 NetControl worker ${process.pid} on port ${PORT}`);
     console.log(`   Environment : ${process.env.NODE_ENV || 'development'}`);
     console.log(`   CORS origin : ${process.env.CORS_ORIGIN || 'http://localhost:5173'}\n`);
-    loadAllSchedules();
-    statusPoller.start();
-    complianceService.start();
+
+    // PROCESS_ROLE=web (default) | all
+    // In production, polling/scheduling/compliance run in their own
+    // `poller` process (see poller.js) so they run exactly ONCE regardless
+    // of how many clustered web workers are handling HTTP traffic. Before
+    // this change, every worker called these independently — with
+    // WORKERS>1 that meant scheduled wake/shutdown/etc actions fired once
+    // PER WORKER, and the status poller ran N times in parallel hammering
+    // the same devices. PROCESS_ROLE=all restores the old single-process
+    // behaviour for local dev where there's no separate poller container.
+    const role = process.env.PROCESS_ROLE || 'web';
+    if (role === 'all') {
+      loadAllSchedules();
+      statusPoller.start();
+      complianceService.start();
+    }
   });
 }
 
@@ -207,4 +220,4 @@ boot().catch(err => {
   process.exit(1);
 });
 
-module.exports = app;                                                                                                                                                            
+module.exports = app;

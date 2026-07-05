@@ -12,14 +12,20 @@ const { evaluateAlerts }       = require('./alerts');
 const jwt    = require('jsonwebtoken');
 const crypto = require('crypto');
 require('dotenv').config();
+const bus = require('../services/bus');
 
 const router = express.Router();
 
 // ── In-memory metrics store ────────────────────────────────────────────────────
+// NOTE: this is a per-worker MIRROR, not the source of truth. Every worker
+// subscribes to the 'metrics' bus channel below and applies every snapshot
+// locally — including ones that arrived on a *different* worker via a
+// different agent POST. That's what makes GET /api/metrics and the SSE
+// stream consistent no matter which clustered worker a request lands on.
 const HISTORY_LEN = 300; // ~25 min at 5s intervals
 const store = new Map();
 
-function push(deviceId, snapshot) {
+function applySnapshot(deviceId, snapshot) {
   if (!store.has(deviceId)) store.set(deviceId, { latest: null, history: [] });
   const entry = store.get(deviceId);
   entry.latest = snapshot;
@@ -27,7 +33,7 @@ function push(deviceId, snapshot) {
   if (entry.history.length > HISTORY_LEN) entry.history.shift();
 }
 
-// ── SSE client registry ────────────────────────────────────────────────────────
+// ── SSE client registry (local to this worker only) ───────────────────────────
 // userId → Set<res>  — only send data the user is allowed to see
 const sseClients = new Map();
 
@@ -38,13 +44,10 @@ function sseAdd(userId, res) {
 function sseDel(userId, res) {
   sseClients.get(userId)?.delete(res);
 }
-function sseBroadcast(deviceId, snapshot) {
-  // Fan out to all connected browsers — each browser re-checks authorisation
-  // via the snapshot deviceId if needed; for simplicity we push to everyone
-  // (same as the GET /api/metrics endpoint which returns all devices).
-  // Operators with restricted access: we can't easily filter here without
-  // a DB query per push, so we send the deviceId and let the frontend ignore
-  // devices it doesn't have in its device list.
+function sseBroadcastLocal(deviceId, snapshot) {
+  // Fan out to browsers connected to THIS worker. Cross-worker fan-out is
+  // handled by the bus subscription below, which calls this same function
+  // on every worker once a snapshot is published.
   const payload = JSON.stringify({ deviceId, latest: snapshot });
   for (const [, clients] of sseClients) {
     for (const res of clients) {
@@ -52,6 +55,28 @@ function sseBroadcast(deviceId, snapshot) {
     }
   }
 }
+
+// ── Cross-worker sync ──────────────────────────────────────────────────────────
+// Single subscription point: whether a snapshot originated on this worker or
+// another one, it flows through here so local store + local SSE clients stay
+// in sync everywhere.
+bus.subscribe('metrics', ({ deviceId, snapshot }) => {
+  applySnapshot(deviceId, snapshot);
+  sseBroadcastLocal(deviceId, snapshot);
+});
+
+// Device status transitions (from the poller's TCP probes, or agent
+// heartbeats coming back online) — pushed as a distinct message `type` so
+// the frontend can tell it apart from a metrics snapshot and patch its
+// devices list instead of its metrics map.
+bus.subscribe('device_status', ({ deviceId, status }) => {
+  const payload = JSON.stringify({ type: 'device_status', deviceId, status });
+  for (const [, clients] of sseClients) {
+    for (const res of clients) {
+      try { res.write(`data: ${payload}\n\n`); } catch {}
+    }
+  }
+});
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function genApiKey() { return 'nca_' + crypto.randomBytes(24).toString('hex'); }
@@ -265,6 +290,7 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     run('UPDATE devices SET status=?, last_seen=? WHERE id=?', ['online', now, device.id])
       .catch(() => {});
     if (device.status && device.status !== 'online') {
+      bus.publish('device_status', { deviceId: device.id, status: 'online' });
       require('../services/webhook').fire('device.online', {
         device_id: device.id, device_name: device.name, severity: 'info',
         message: `${device.name} came back online`,
@@ -289,10 +315,10 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     processes:    Array.isArray(processes) ? processes.slice(0, 10) : null,
   };
 
-  push(device.id, snapshot);
-
-  // Push to all SSE clients in real time
-  setImmediate(() => sseBroadcast(device.id, snapshot));
+  // Publish to bus instead of writing local store directly — the bus
+  // subscription above applies it locally AND every other worker (and the
+  // poller, if it ever needs to read metrics) gets it too.
+  bus.publish('metrics', { deviceId: device.id, snapshot });
 
   // Fire alert evaluation asynchronously
   setImmediate(() => evaluateAlerts(device.id, snapshot));

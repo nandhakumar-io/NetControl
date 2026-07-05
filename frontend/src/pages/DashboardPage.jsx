@@ -336,6 +336,14 @@ export default function DashboardPage() {
         if (msg.type === 'snapshot') {
           metricsRef.current = msg.data || {}
           setMetrics(msg.data || {})
+        } else if (msg.type === 'device_status') {
+          // Poller/agent-driven status flip — patch devices list live instead
+          // of waiting for the next fallback poll of GET /api/devices.
+          const updated = devicesRef.current.map(d =>
+            d.id === msg.deviceId ? { ...d, status: msg.status } : d
+          )
+          devicesRef.current = updated
+          setDevices(updated)
         } else if (msg.deviceId && msg.latest) {
           const prev  = metricsRef.current
           const entry = prev[msg.deviceId] || { latest: null, history: [] }

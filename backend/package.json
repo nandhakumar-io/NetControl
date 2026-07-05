@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "poller": "node poller.js",
     "setup": "node db/setup.js",
     "migrate": "node db/migrate.js"
   },
@@ -22,6 +23,7 @@
     "fast-xml-parser": "^5.5.12",
     "google-auth-library": "^9.15.0",
     "helmet": "^7.2.0",
+    "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
     "mysql2": "^3.22.0",

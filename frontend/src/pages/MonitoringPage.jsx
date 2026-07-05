@@ -637,6 +637,12 @@ export default function MonitoringPage() {
           // Full snapshot on connect — replaces everything
           metricsRef.current = {}
           mergeMetrics(msg.data || {}, true)
+        } else if (msg.type === 'device_status') {
+          // Poller/agent-driven status flip — patch devices list live instead
+          // of waiting for the 10s fallback poll of GET /api/devices.
+          setDevices(prev => prev.map(d =>
+            d.id === msg.deviceId ? { ...d, status: msg.status } : d
+          ))
         } else if (msg.deviceId && msg.latest) {
           // Single-device push — merge into existing
           const prev = metricsRef.current

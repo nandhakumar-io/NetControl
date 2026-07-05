@@ -17,6 +17,7 @@
 
 const net     = require('net');
 const { query, execute, queryOne } = require('../db');
+const bus     = require('./bus');
 
 const POLL_INTERVAL_MS = 5 * 1000;   // poll every 5 seconds (was 20s — too slow)
 const TCP_TIMEOUT_MS   = 2000;
@@ -190,6 +191,18 @@ async function flushToDB(results, nowSec) {
   }
 
   await Promise.all(tasks);
+
+  // ── Push transitions to the web tier in real time ────────────────────────
+  // The poller writes MySQL directly (source of truth), but browsers get
+  // their live view from the bus/SSE, same channel the metrics route uses.
+  // Without this, a device flipping online/offline via the poller (as
+  // opposed to an agent heartbeat, which already goes through the bus via
+  // routes/metrics.js) would only show up after the frontend's next
+  // fallback poll of GET /api/devices.
+  for (const r of results) {
+    if (r.method === 'skip' || r.oldStatus === r.newStatus) continue;
+    bus.publish('device_status', { deviceId: r.id, status: r.newStatus });
+  }
 
   // ── Record transitions for the Device Changes timeline / compare feature ──
   // Only genuine transitions (old !== new) are written — a poll tick that
