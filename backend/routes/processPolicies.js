@@ -39,12 +39,16 @@ router.get('/', requirePermission(4096), async (req, res) => {
 router.get('/violations', requirePermission(4096), async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    // NOTE: limit is interpolated directly (not bound as `LIMIT ?`) because
+    // mysql2's execute() — which db/index.js's query() always uses, i.e. the
+    // prepared-statement protocol — doesn't reliably accept a bound parameter
+    // inside LIMIT and throws on it. `limit` is safe to inline here since
+    // it's already coerced to a bounded integer via parseInt + Math.min above.
     const rows = await query(
       `SELECT pv.*, d.name AS device_name
          FROM process_violations pv
          JOIN devices d ON pv.device_id = d.id
-        ORDER BY pv.detected_at DESC LIMIT ?`,
-      [limit]
+        ORDER BY pv.detected_at DESC LIMIT ${limit}`
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }

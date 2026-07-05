@@ -83,14 +83,19 @@ router.get('/triggered', async (req, res) => {
   try {
     if (!await tableExists('alert_triggered_log')) return res.json([]);
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    // limit is inlined (not bound as `LIMIT ?`) — see routes/processPolicies.js
+    // for why: mysql2's execute()-based query() doesn't reliably support a
+    // bound parameter inside LIMIT. Safe here since limit is already coerced
+    // to a bounded integer above. This route's catch previously masked the
+    // failure by returning [] instead of a 500, so it silently showed no
+    // triggered alerts on every request rather than erroring visibly.
     const rows = await query(
       `SELECT tl.*, ar.metric, ar.severity, ar.threshold, ar.operator,
               ar.name AS rule_name, d.name AS device_name
          FROM alert_triggered_log tl
          JOIN alert_rules ar ON tl.rule_id = ar.id
     LEFT JOIN devices d ON tl.device_id = d.id
-        ORDER BY tl.triggered_at DESC LIMIT ?`,
-      [limit]
+        ORDER BY tl.triggered_at DESC LIMIT ${limit}`
     );
     res.json(rows);
   } catch (e) { res.json([]); }

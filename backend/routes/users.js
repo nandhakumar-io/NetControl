@@ -308,12 +308,16 @@ router.get('/:id/activity', requireRole('admin'), param('id').isUUID(), async (r
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const limit  = Math.min(parseInt(req.query.limit)  || 50, 200);
-    const offset = parseInt(req.query.offset) || 0;
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
 
+    // limit/offset inlined, not bound as `LIMIT ? OFFSET ?` — see
+    // routes/processPolicies.js for why: mysql2's execute()-based query()
+    // doesn't reliably support bound parameters inside LIMIT/OFFSET. Safe
+    // here since both are already coerced to bounded non-negative integers.
     const entries = await query(
       `SELECT * FROM audit_log WHERE username = ?
-       ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
-      [user.username, limit, offset]
+       ORDER BY timestamp DESC LIMIT ${limit} OFFSET ${offset}`,
+      [user.username]
     );
     res.json(entries);
   } catch (e) {
