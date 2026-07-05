@@ -133,9 +133,16 @@ function FleetOverview({ devices, metrics, groups }) {
   },[metrics])
 
   // Process-level aggregates: top 5 processes by CPU across all agents
+  // BUG FIX: this used to include e.latest.processes from every device
+  // regardless of freshness, so a device whose agent had gone silent (and
+  // was correctly showing "Agent silent" everywhere else on this page)
+  // kept contributing its last-known process list here forever — the
+  // fleet-wide table looked "alive" while the rest of the UI said otherwise.
+  // Skip stale/missing snapshots, same rule the rest of this component uses.
   const topProcs = useMemo(()=>{
     const map={}
     for(const [,e] of Object.entries(metrics)){
+      if(!e.latest||isStale(e.latest.ts)) continue
       for(const p of (e.latest?.processes||[])){
         if(!map[p.name]) map[p.name]={name:p.name,cpu:0,mem:0,cnt:0}
         map[p.name].cpu+=p.cpu||0
