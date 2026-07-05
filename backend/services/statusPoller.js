@@ -10,8 +10,17 @@
 //    not N individual UPDATEs. Scales to thousands.
 // 4. Non-agent devices skip probing if probed recently (NON_AGENT_POLL_S).
 //    This slashes unnecessary socket churn on stable fleets.
-// 5. AGENT_GRACE_SEC = 45 (was 90). Agents post every 5s. 9 missed posts = dead.
+// 5. AGENT_GRACE_SEC = 25. Agents post every 5s but last_seen is only
+//    written to the DB every ~10s (write-throttled in routes/metrics.js) —
+//    25s gives real margin over that throttle plus poll-cycle jitter, so a
+//    healthy, actively-reporting agent never gets falsely flagged.
 // 6. TCP_TIMEOUT_MS = 2000 (was 3000). LAN devices respond in <200ms.
+// 7. Lapsed agent heartbeat -> offline DIRECTLY, no TCP-probe fallback.
+//    Agent devices are typically outbound-only with no listening port, so
+//    the TCP probe failed almost every time regardless of real agent
+//    health, flipping actively-reporting agents to "offline"/"silent" the
+//    moment they brushed past the grace window. TCP reachability answers
+//    "is the host up", not "is the agent reporting" — don't conflate them.
 
 'use strict';
 
@@ -22,7 +31,7 @@ const bus     = require('./bus');
 const POLL_INTERVAL_MS = 5 * 1000;   // poll every 5 seconds (was 20s — too slow)
 const TCP_TIMEOUT_MS   = 2000;
 const MAX_CONCURRENT   = 50;          // max simultaneous open sockets
-const AGENT_GRACE_SEC  = 15;          // 3 missed 5s heartbeats = dead (was 45 — way too lenient)
+const AGENT_GRACE_SEC  = 25;          // margin over the ~10s last_seen write-throttle + poll jitter (see routes/metrics.js)
 const NON_AGENT_POLL_S = 10;          // TCP-probe non-agent devices every 10s (was 60 — too stale)
 
 // Track last TCP probe time per device (in-memory, reset on restart)
@@ -120,7 +129,18 @@ async function pollDevice(device, nowSec) {
       }
       return { id: device.id, name: device.name, newStatus: 'online', oldStatus: device.status, method: 'agent' };
     }
-    // Agent has gone silent — fall through to TCP probe
+
+    // Agent heartbeat has genuinely lapsed past grace — mark offline directly.
+    // BUG FIX: this used to "fall through to TCP probe" here, but agent
+    // devices are typically outbound-only with no listening service port —
+    // the TCP probe fails almost every time regardless of agent health, so
+    // a device that's still actively POSTing metrics (just briefly outside
+    // the grace window due to the metrics-route write-throttle, see below)
+    // got yanked to 'offline' by an unrelated, unreliable signal. TCP
+    // reachability tells you whether the HOST is up, not whether the AGENT
+    // is reporting — conflating the two caused exactly the "agent is
+    // reporting but shows silent" symptom.
+    return { id: device.id, name: device.name, newStatus: 'offline', oldStatus: device.status, method: 'agent' };
   }
 
   // Non-agent throttle: skip if probed recently
