@@ -63,20 +63,23 @@ function sseBroadcastLocal(deviceId, snapshot) {
 bus.subscribe('metrics', ({ deviceId, snapshot }) => {
   applySnapshot(deviceId, snapshot);
   sseBroadcastLocal(deviceId, snapshot);
-});
+}, { skipSelf: true });
 
 // Device status transitions (from the poller's TCP probes, or agent
 // heartbeats coming back online) — pushed as a distinct message `type` so
 // the frontend can tell it apart from a metrics snapshot and patch its
 // devices list instead of its metrics map.
-bus.subscribe('device_status', ({ deviceId, status }) => {
+function sseBroadcastDeviceStatus(deviceId, status) {
   const payload = JSON.stringify({ type: 'device_status', deviceId, status });
   for (const [, clients] of sseClients) {
     for (const res of clients) {
       try { res.write(`data: ${payload}\n\n`); } catch {}
     }
   }
-});
+}
+bus.subscribe('device_status', ({ deviceId, status }) => {
+  sseBroadcastDeviceStatus(deviceId, status);
+}, { skipSelf: true });
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function genApiKey() { return 'nca_' + crypto.randomBytes(24).toString('hex'); }
@@ -290,6 +293,7 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     run('UPDATE devices SET status=?, last_seen=? WHERE id=?', ['online', now, device.id])
       .catch(() => {});
     if (device.status && device.status !== 'online') {
+      sseBroadcastDeviceStatus(device.id, 'online');
       bus.publish('device_status', { deviceId: device.id, status: 'online' });
       require('../services/webhook').fire('device.online', {
         device_id: device.id, device_name: device.name, severity: 'info',
@@ -315,9 +319,20 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     processes:    Array.isArray(processes) ? processes.slice(0, 10) : null,
   };
 
-  // Publish to bus instead of writing local store directly — the bus
-  // subscription above applies it locally AND every other worker (and the
-  // poller, if it ever needs to read metrics) gets it too.
+  // Apply locally FIRST, unconditionally — this is what makes the data show
+  // up for the agent that just posted it, regardless of Redis's health.
+  // BUG FIX: previously this only happened via the bus subscription below,
+  // which meant a message had to make a full round-trip through Redis
+  // before even the SAME worker that received the POST would see it. If
+  // Redis was down/unreachable/misconfigured, the agent still got its 200
+  // OK (this route doesn't await the publish), but the snapshot vanished —
+  // nothing local, nothing cross-worker. An actively-reporting agent would
+  // show up as fully silent on every dashboard with no error surfaced
+  // anywhere. Applying locally here removes Redis as a single point of
+  // failure for the worker that's actually talking to the agent; the bus
+  // publish below is now purely a "let other workers know too" nice-to-have.
+  applySnapshot(device.id, snapshot);
+  sseBroadcastLocal(device.id, snapshot);
   bus.publish('metrics', { deviceId: device.id, snapshot });
 
   // Fire alert evaluation asynchronously

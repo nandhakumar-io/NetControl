@@ -17,6 +17,13 @@
 
 'use strict';
 const { EventEmitter } = require('events');
+const crypto = require('crypto');
+
+// Unique per-process id. Used so a worker that both publishes AND applies a
+// message locally (see routes/metrics.js) can tell its own message apart
+// from the Redis loopback echo of that same message, and skip re-applying
+// it a second time.
+const PROCESS_ID = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
 
 const REDIS_URL = process.env.REDIS_URL || '';
 
@@ -49,18 +56,31 @@ if (REDIS_URL) {
 const subscribedChannels = new Set();
 
 function publish(channel, payload) {
+  const wrapped = { ...payload, _origin: PROCESS_ID };
   if (publisher) {
-    publisher.publish(channel, JSON.stringify(payload)).catch(e =>
-      console.error('[Bus] publish failed:', e.message));
+    publisher.publish(channel, JSON.stringify(wrapped)).catch(e =>
+      console.error('[Bus] publish failed — Redis unreachable? Cross-worker ' +
+        'sync for this event will NOT happen:', e.message));
   } else {
     // Local fallback: still go through the emitter so subscribers get it
     // asynchronously, same as the Redis path would deliver it.
-    setImmediate(() => local.emit(channel, payload));
+    setImmediate(() => local.emit(channel, wrapped));
   }
 }
 
-function subscribe(channel, handler) {
-  local.on(channel, handler);
+function subscribe(channel, handler, opts = {}) {
+  // skipSelf: true means "I already applied this locally at the point of
+  // publish() — only act on it here if it came from ANOTHER process."
+  // This matters specifically because publish() no longer guarantees
+  // delivery on its own (e.g. Redis down) — callers that need a guarantee
+  // (like metrics ingestion) apply state directly and use the bus purely
+  // for fanning out to other workers, so a failed publish degrades to
+  // "other workers miss this update" instead of "nothing happens at all."
+  const wrapped = (payload) => {
+    if (opts.skipSelf && payload._origin === PROCESS_ID) return;
+    handler(payload);
+  };
+  local.on(channel, wrapped);
   if (subscriber && !subscribedChannels.has(channel)) {
     subscribedChannels.add(channel);
     subscriber.subscribe(channel).catch(e =>
@@ -68,4 +88,4 @@ function subscribe(channel, handler) {
   }
 }
 
-module.exports = { publish, subscribe };
+module.exports = { publish, subscribe, PROCESS_ID };
