@@ -59,7 +59,24 @@ process.on('unhandledRejection', (err) => {
 const app = express();
 
 // ── Gzip compression — major win for JSON API responses ──────────────────────
-app.use(compression({ level: 4, threshold: 1024 }));
+// IMPORTANT: never compress the SSE stream. compression's default filter
+// treats any "text/*" content-type (including text/event-stream) as
+// compressible, so without this exclusion it wraps the stream response in a
+// gzip Transform that buffers output waiting to fill its window. That
+// silently breaks real-time flushing of the 20s keep-alive pings and live
+// metric pushes in routes/metrics.js's GET /stream handler — the proxy in
+// front of this (nginx/traefik) then sees long gaps with no bytes and kills
+// the connection on its read timeout, which looks like "metrics never show
+// up" / a stream that endlessly reconnects, even though an agent is actively
+// posting data every few seconds.
+app.use(compression({
+  level: 4,
+  threshold: 1024,
+  filter: (req, res) => {
+    if (req.path === '/api/metrics/stream') return false;
+    return compression.filter(req, res);
+  },
+}));
 
 // ── Security headers ──────────────────────────────────────────────────────────
 app.use(helmet({
