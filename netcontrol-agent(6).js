@@ -17,6 +17,11 @@
  *
  * ENV VARS:
  *   NC_SERVER_URL   — required: http(s)://host:port of your NetControl server
+ *   NC_REG_SECRET   — required for first-time registration: must match the
+ *                     server's AGENT_REGISTRATION_SECRET (see backend .env).
+ *                     Not needed on subsequent runs once credentials are
+ *                     cached, unless the agent has to re-register (e.g. the
+ *                     credentials file was deleted or the key was rejected).
  *   NC_INTERVAL     — metrics push interval seconds (default 5, min 3)
  *   NC_CRED_FILE    — override credential storage path
  */
@@ -31,6 +36,7 @@ const { execSync, spawnSync, spawn } = require('child_process');
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const SERVER_URL   = (process.env.NC_SERVER_URL || '').replace(/\/$/, '');
+const REG_SECRET    = process.env.NC_REG_SECRET || '';
 const INTERVAL_SEC = Math.max(3, parseInt(process.env.NC_INTERVAL || '5', 10));
 const IS_WINDOWS   = os.platform() === 'win32';
 const AGENT_PATH   = path.resolve(process.argv[1]);
@@ -302,6 +308,13 @@ function getPrimaryIface() {
 }
 
 async function register() {
+  if (!REG_SECRET) {
+    throw new Error(
+      'NC_REG_SECRET is not set. The server requires a registration secret ' +
+      '(x-registration-secret header) matching AGENT_REGISTRATION_SECRET in ' +
+      'its .env. Run with: NC_SERVER_URL=... NC_REG_SECRET=... node netcontrol-agent.js'
+    );
+  }
   const net = getPrimaryIface();
   const payload = {
     hostname:   os.hostname(),
@@ -312,7 +325,11 @@ async function register() {
     arch:       os.arch(),
   };
   console.log(`[Agent] Registering: ${payload.hostname} (${payload.ip})`);
-  const res = await httpReq(`${SERVER_URL}/api/metrics/register`, { method: 'POST' }, payload);
+  const res = await httpReq(
+    `${SERVER_URL}/api/metrics/register`,
+    { method: 'POST', headers: { 'x-registration-secret': REG_SECRET } },
+    payload
+  );
   if (res.status !== 200 && res.status !== 201)
     throw new Error(`Registration failed (HTTP ${res.status}): ${JSON.stringify(res.body)}`);
   const creds = {
