@@ -262,6 +262,32 @@ function saveCreds(c) {
   }
 }
 
+// ── Shared, de-duplicated re-registration ───────────────────────────────────────
+// BUG FIX: the main metrics loop and relayLoop() each used to call register()
+// independently whenever they saw a 403. The server issues a brand-new random
+// API key and overwrites the device's stored key hash on EVERY /register call
+// (even for an already-valid existing device). That meant: whichever loop's
+// register() finished last invalidated the key the OTHER loop had just been
+// handed — so that loop's next request 403'd too, triggering IT to
+// re-register, invalidating the first loop's key right back. Once triggered
+// by any transient blip, this ping-pongs forever: metrics never land because
+// by the time a POST goes out, its key has already been rotated out from
+// under it by the other loop.
+//
+// Fix: at most ONE real /register call is ever in flight at a time. Every
+// caller that sees a 403 awaits the SAME promise and gets the SAME result,
+// so a single rejection event causes exactly one key rotation, not two
+// racing ones.
+let reRegisterPromise = null;
+async function reRegister(creds) {
+  if (!reRegisterPromise) {
+    reRegisterPromise = register().finally(() => { reRegisterPromise = null; });
+  }
+  const fresh = await reRegisterPromise;
+  Object.assign(creds, fresh); // mutate in place — all holders of this object see it
+  return creds;
+}
+
 // ── Registration ───────────────────────────────────────────────────────────────
 function getPrimaryIface() {
   const nets = os.networkInterfaces();
@@ -392,8 +418,7 @@ async function relayLoop(getCredsFn) {
       if (res.status === 403) {
         console.warn('[Agent] Relay: key rejected — re-registering…');
         try {
-          const newCreds = await register();
-          Object.assign(creds, newCreds);
+          await reRegister(creds);
         } catch (e) {
           console.error('[Agent] Re-register failed:', e.message);
           await new Promise(r => setTimeout(r, 5000));
@@ -447,7 +472,7 @@ async function main() {
       );
       if (res.status === 403) {
         console.warn('[Agent] Key rejected — re-registering…');
-        creds = await register();
+        await reRegister(creds);
         continue;
       }
       if (res.status !== 200) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
