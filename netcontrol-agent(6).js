@@ -379,7 +379,116 @@ async function collectMetrics() {
     uptime:   Math.floor(time.uptime || 0),
     os:       `${osInfo?.distro || os.type()} ${osInfo?.release || os.release()}`.trim(),
     hostname: os.hostname(),
+    // Full process list (not just top-10-by-CPU) — used locally for
+    // restricted-program enforcement, then stripped before the metrics
+    // POST so the server payload contract doesn't change.
+    _allProcesses: (procs?.list || []).map(p => ({ pid: p.pid, name: p.name })),
   };
+}
+
+// ── Restricted process policies ─────────────────────────────────────────────────
+// The agent polls the server for its effective rule set (global + group +
+// device-specific) every POLICY_REFRESH_SEC, then checks every running
+// process against it on every metrics tick. Matches are either just
+// reported ("alert") or killed and then reported ("kill"). A per-pid+policy
+// cooldown keeps a persistent "alert"-only violation from spamming a
+// notification every single tick while the process keeps running.
+const POLICY_REFRESH_SEC = 60;
+const VIOLATION_COOLDOWN_SEC = 300;
+let policyCache = [];
+let lastPolicyFetch = 0;
+const violationCooldowns = new Map(); // `${pid}:${policyId}` -> last reported ts
+
+async function refreshPolicies(creds) {
+  try {
+    const res = await httpReq(`${SERVER_URL}/api/metrics/policies`, {
+      method: 'GET', headers: { 'x-api-key': creds.api_key },
+    });
+    if (res.status === 200 && Array.isArray(res.body)) {
+      policyCache = res.body;
+      lastPolicyFetch = Date.now();
+    }
+  } catch (e) {
+    // Non-fatal — keep using the last known policy set until this succeeds.
+    console.warn('[Agent] Policy refresh failed:', e.message);
+  }
+}
+
+function matchesPolicy(procName, policy) {
+  if (!procName) return false;
+  const a = procName.toLowerCase();
+  const b = (policy.process_name || '').toLowerCase();
+  if (!b) return false;
+  return policy.match_type === 'exact' ? a === b : a.includes(b);
+}
+
+function killProcess(pid) {
+  try {
+    if (IS_WINDOWS) {
+      const r = spawnSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore' });
+      return r.status === 0 ? 'killed' : 'failed';
+    }
+    process.kill(pid, 'SIGKILL');
+    return 'killed';
+  } catch {
+    return 'failed';
+  }
+}
+
+async function reportViolation(creds, { policy_id, process_name, pid, action_taken, kill_result }) {
+  try {
+    await httpReq(
+      `${SERVER_URL}/api/metrics/violation`,
+      { method: 'POST', headers: { 'x-api-key': creds.api_key } },
+      { policy_id, process_name, pid, action_taken, kill_result }
+    );
+  } catch (e) {
+    console.warn('[Agent] Violation report failed:', e.message);
+  }
+}
+
+async function enforcePolicies(allProcesses, creds) {
+  if (!policyCache.length || !allProcesses?.length) return;
+  const now = Date.now();
+
+  for (const proc of allProcesses) {
+    for (const policy of policyCache) {
+      if (!matchesPolicy(proc.name, policy)) continue;
+
+      const ck = `${proc.pid}:${policy.id}`;
+      const isKill = policy.action === 'kill';
+      // Kill actions always get retried (a still-running matched process
+      // means the previous kill attempt either hasn't happened yet or
+      // failed); alert-only actions are cooled down to avoid spamming the
+      // same long-running violation every 5s.
+      if (!isKill && (now - (violationCooldowns.get(ck) || 0)) < VIOLATION_COOLDOWN_SEC * 1000) {
+        continue;
+      }
+
+      let killResult = 'not_attempted';
+      if (isKill) {
+        killResult = killProcess(proc.pid);
+        console.warn(`[Agent] Restricted process "${proc.name}" (PID ${proc.pid}) — kill ${killResult}`);
+      } else {
+        console.warn(`[Agent] Restricted process detected: "${proc.name}" (PID ${proc.pid})`);
+      }
+
+      violationCooldowns.set(ck, now);
+      await reportViolation(creds, {
+        policy_id: policy.id, process_name: proc.name, pid: proc.pid,
+        action_taken: policy.action, kill_result: killResult,
+      });
+
+      break; // one match is enough per process per tick
+    }
+  }
+
+  // Trim the cooldown map occasionally so it doesn't grow unbounded on
+  // long-running agents watching many short-lived processes.
+  if (violationCooldowns.size > 2000) {
+    const cutoff = now - VIOLATION_COOLDOWN_SEC * 1000 * 2;
+    for (const [k, ts] of violationCooldowns) if (ts < cutoff) violationCooldowns.delete(k);
+  }
 }
 
 // ── HTTP relay terminal ────────────────────────────────────────────────────────
@@ -482,6 +591,19 @@ async function main() {
   while (running) {
     try {
       const metrics = await collectMetrics();
+      const allProcesses = metrics._allProcesses;
+      delete metrics._allProcesses; // internal-only — not part of the metrics payload
+
+      // Refresh the restricted-process rule set periodically (non-fatal —
+      // enforcement just keeps using whatever it last successfully fetched).
+      if (Date.now() - lastPolicyFetch > POLICY_REFRESH_SEC * 1000) {
+        await refreshPolicies(creds);
+      }
+      if (policyCache.length) {
+        enforcePolicies(allProcesses, creds).catch(e =>
+          console.warn('[Agent] Policy enforcement error:', e.message));
+      }
+
       const res = await httpReq(
         `${SERVER_URL}/api/metrics`,
         { method: 'POST', headers: { 'x-api-key': creds.api_key } },

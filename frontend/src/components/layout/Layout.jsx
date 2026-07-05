@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck,
+  ShieldBan,
   ChevronRight as ArrowIcon
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
@@ -185,6 +186,7 @@ export default function Layout() {
     { to: '/alerts',        icon: Bell,            label: 'Alerts',        show: can(1) },
     { to: '/discovery',     icon: Radar,           label: 'Discovery',     show: can(1024) },
     { to: '/compliance',    icon: ShieldCheck,     label: 'Compliance',    show: can(2048) },
+    { to: '/process-policies', icon: ShieldBan,    label: 'Process Rules', show: can(4096) },
   ].filter(n => n.show)
 
   const ADMIN_NAV = [

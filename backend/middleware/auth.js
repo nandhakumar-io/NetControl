@@ -89,6 +89,10 @@ function requireRole(...roles) {
  *                                only by convention, same reasoning as
  *                                discover_network: this touches every
  *                                device's package/service/firewall state)
+ *   4096 - manage_process_policies (restricted-program rules + kill
+ *                                actions on agents — admin only by
+ *                                convention; this can terminate arbitrary
+ *                                processes on end-user machines)
  *
  * Admins always pass; operators pass bits 1|4|8|32; viewers pass 1|8|32|128.
  */

@@ -396,6 +396,45 @@ const MIGRATIONS = [
     `,
   },
 
+  // FEATURE: Process restriction policies — lets an admin block/alert on
+  // specific programs/processes running on agents (global, per-group, or
+  // per-device), and a log of every time an agent detected/enforced one.
+  // Enforced by the agent (netcontrol-agent.js), reported via
+  // POST /api/metrics/violation, defined via /api/process-policies.
+  {
+    id: '011_process_policies',
+    sql: `
+      CREATE TABLE IF NOT EXISTS process_policies (
+        id            CHAR(36)     NOT NULL PRIMARY KEY,
+        device_id     CHAR(36)     DEFAULT NULL COMMENT 'NULL = not device-specific',
+        group_id      CHAR(36)     DEFAULT NULL COMMENT 'NULL = not group-specific; both NULL = global',
+        process_name  VARCHAR(255) NOT NULL,
+        match_type    VARCHAR(10)  NOT NULL DEFAULT 'contains' COMMENT 'exact|contains',
+        action        VARCHAR(10)  NOT NULL DEFAULT 'alert' COMMENT 'alert|kill',
+        os_type       VARCHAR(10)  DEFAULT NULL COMMENT 'NULL = any, linux|windows',
+        enabled       TINYINT(1)   NOT NULL DEFAULT 1,
+        created_by    CHAR(36)     DEFAULT NULL,
+        created_at    INT UNSIGNED NOT NULL,
+        INDEX idx_pp_device  (device_id),
+        INDEX idx_pp_group   (group_id),
+        INDEX idx_pp_enabled (enabled)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+      CREATE TABLE IF NOT EXISTS process_violations (
+        id            CHAR(36)     NOT NULL PRIMARY KEY,
+        device_id     CHAR(36)     NOT NULL,
+        policy_id     CHAR(36)     DEFAULT NULL,
+        process_name  VARCHAR(255) NOT NULL,
+        pid           INT          DEFAULT NULL,
+        action_taken  VARCHAR(10)  NOT NULL DEFAULT 'alert' COMMENT 'alert|kill',
+        kill_result   VARCHAR(20)  DEFAULT NULL COMMENT 'killed|failed|not_attempted',
+        detected_at   INT UNSIGNED NOT NULL,
+        INDEX idx_pv_device (device_id),
+        INDEX idx_pv_time   (detected_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `,
+  },
+
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────

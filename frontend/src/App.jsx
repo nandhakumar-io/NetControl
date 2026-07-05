@@ -21,6 +21,7 @@ import SecurityPage    from './pages/SecurityPage'
 import AlertsPage      from './pages/AlertsPage'
 import DiscoveryPage   from './pages/DiscoveryPage'
 import CompliancePage  from './pages/CompliancePage'
+import ProcessPoliciesPage from './pages/ProcessPoliciesPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -106,6 +107,7 @@ export default function App() {
           <Route path="alerts"          element={<RequirePermission bit={1}><AlertsPage /></RequirePermission>} />
           <Route path="discovery"       element={<RequirePermission bit={1024}><DiscoveryPage /></RequirePermission>} />
           <Route path="compliance"      element={<RequirePermission bit={2048}><CompliancePage /></RequirePermission>} />
+          <Route path="process-policies" element={<RequirePermission bit={4096}><ProcessPoliciesPage /></RequirePermission>} />
 
           {/* Admin-only routes */}
           <Route

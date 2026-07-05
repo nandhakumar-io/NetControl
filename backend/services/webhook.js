@@ -27,6 +27,8 @@ const EVENTS = {
   'file.push':               'File pushed to device(s)',
   // SSH / terminal
   'ssh.failure':             'SSH connection failed',
+  // Process restriction policies
+  'process.violation':       'Restricted process detected/blocked',
   // System
   'system.agent_registered': 'New agent registered',
 };
@@ -41,6 +43,7 @@ function buildPayload(provider, event, data) {
     'alert.critical': '🚨', 'alert.triggered': '⚠️', 'ssh.failure': '🔐',
     'auth.login_failed': '⛔', 'file.push': '📤', 'device.wake': '⚡',
     'device.shutdown': '🔴', 'device.restart': '🔄', 'system.agent_registered': '🤖',
+    'process.violation': '🚫',
   }[event] || 'ℹ️';
 
   const text  = `${emoji} *${EVENTS[event] || event}*\n${data.message || JSON.stringify(data)}`;

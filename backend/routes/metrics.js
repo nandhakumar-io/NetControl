@@ -8,7 +8,8 @@ const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute: run } = require('../db');
 const { requireAuth }          = require('../middleware/auth');
 const { agentIngestLimiter, registerLimiter } = require('../middleware/rateLimiter');
-const { evaluateAlerts }       = require('./alerts');
+const { evaluateAlerts, pushNotification } = require('./alerts');
+const webhook = require('../services/webhook');
 const jwt    = require('jsonwebtoken');
 const crypto = require('crypto');
 require('dotenv').config();
@@ -339,6 +340,79 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   setImmediate(() => evaluateAlerts(device.id, snapshot));
 
   res.json({ ok: true, device_id: device.id });
+});
+
+// ── GET /api/metrics/policies — agent fetches its effective restriction rules ──
+// Returns the union of: global policies (device_id AND group_id both NULL),
+// policies scoped to this device's group, and policies scoped to this exact
+// device. The agent caches this locally and re-polls every ~60s.
+router.get('/policies', agentAuth, async (req, res) => {
+  try {
+    const device = req.agentDevice;
+    const full = await queryOne('SELECT group_id, os_type FROM devices WHERE id = ?', [device.id]);
+    const rows = await query(
+      `SELECT id, process_name, match_type, action, os_type FROM process_policies
+        WHERE enabled = 1
+          AND (
+            device_id = ?
+            OR (device_id IS NULL AND (group_id IS NULL OR group_id = ?))
+          )`,
+      [device.id, full?.group_id || null]
+    );
+    // Filter by OS if the policy specifies one
+    const deviceOs = (full?.os_type || '').toLowerCase();
+    const filtered = rows.filter(r => !r.os_type || r.os_type.toLowerCase() === deviceOs);
+    res.json(filtered.map(r => ({ id: r.id, process_name: r.process_name, match_type: r.match_type, action: r.action })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/metrics/violation — agent reports a restricted-process hit ──────
+router.post('/violation', agentIngestLimiter, agentAuth, async (req, res) => {
+  try {
+    const device = req.agentDevice;
+    const { policy_id, process_name, pid, action_taken, kill_result } = req.body;
+    if (!process_name?.trim()) return res.status(400).json({ error: 'process_name is required' });
+
+    const id  = uuidv4();
+    const now = Math.floor(Date.now() / 1000);
+    await run(
+      `INSERT INTO process_violations
+         (id, device_id, policy_id, process_name, pid, action_taken, kill_result, detected_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, device.id, policy_id || null, process_name.trim(), pid || null,
+       ['alert', 'kill'].includes(action_taken) ? action_taken : 'alert',
+       kill_result || null, now]
+    );
+
+    const blocked  = action_taken === 'kill';
+    const severity = blocked ? 'critical' : 'warning';
+    const message  = `Restricted process "${process_name.trim()}"${pid ? ` (PID ${pid})` : ''} ${blocked ? 'was blocked' : 'was detected'} on ${device.name}`;
+
+    // Notify admins — same pattern as alert_notifications so they show up
+    // in the existing Alerts bell/page without any new UI plumbing.
+    try {
+      const admins = await query('SELECT id FROM users WHERE role = ? AND enabled = 1', ['admin']);
+      for (const admin of admins) {
+        await run(
+          `INSERT INTO alert_notifications (id, user_id, rule_id, device_id, severity, message, triggered_at, read_at)
+           VALUES (?, ?, NULL, ?, ?, ?, ?, NULL)`,
+          [uuidv4(), admin.id, device.id, severity, message, now]
+        );
+      }
+      pushNotification(admins.map(a => a.id), {
+        type: 'process_violation', severity, device_id: device.id, device_name: device.name,
+        process_name: process_name.trim(), pid: pid || null, action_taken: blocked ? 'kill' : 'alert',
+        message, triggered_at: now,
+      });
+    } catch (e) { console.error('[Violation] notify failed:', e.message); }
+
+    webhook.fire('process.violation', {
+      device_id: device.id, device_name: device.name, process_name: process_name.trim(),
+      pid: pid || null, action_taken: blocked ? 'kill' : 'alert', severity, message,
+    }).catch(() => {});
+
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/metrics ───────────────────────────────────────────────────────────
