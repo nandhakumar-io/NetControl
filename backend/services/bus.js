@@ -29,6 +29,8 @@ const REDIS_URL = process.env.REDIS_URL || '';
 
 let publisher = null;
 let subscriber = null;
+let lastPublisherError = null;
+let lastSubscriberError = null;
 const local = new EventEmitter();
 local.setMaxListeners(50);
 
@@ -37,8 +39,10 @@ if (REDIS_URL) {
   publisher  = new Redis(REDIS_URL, { lazyConnect: false });
   subscriber = new Redis(REDIS_URL, { lazyConnect: false });
 
-  publisher.on('error',  e => console.error('[Bus] publisher error:', e.message));
-  subscriber.on('error', e => console.error('[Bus] subscriber error:', e.message));
+  publisher.on('error',  e => { lastPublisherError  = e.message; console.error('[Bus] publisher error:', e.message); });
+  subscriber.on('error', e => { lastSubscriberError = e.message; console.error('[Bus] subscriber error:', e.message); });
+  publisher.on('ready',  () => { lastPublisherError  = null; });
+  subscriber.on('ready', () => { lastSubscriberError = null; });
 
   subscriber.on('message', (channel, raw) => {
     let payload;
@@ -88,4 +92,27 @@ function subscribe(channel, handler, opts = {}) {
   }
 }
 
-module.exports = { publish, subscribe, PROCESS_ID };
+// ── Health introspection ──────────────────────────────────────────────────────
+// Used by GET /api/health/full so "agent shows offline / no metrics" can be
+// diagnosed from the app itself instead of grepping container logs. When
+// mode is 'in-process-fallback', cross-worker metric/status sync is NOT
+// happening at all — every clustered web worker only sees what its own
+// process received directly, which is exactly the "agent sends metrics but
+// dashboard shows it offline" symptom whenever the browser and the agent's
+// most recent POST don't land on the same worker.
+function getStatus() {
+  if (!REDIS_URL) {
+    return { mode: 'in-process-fallback', connected: false, reason: 'REDIS_URL not set' };
+  }
+  const ready = publisher?.status === 'ready' && subscriber?.status === 'ready';
+  return {
+    mode: 'redis',
+    connected: ready,
+    publisherStatus:  publisher?.status  || 'unknown',
+    subscriberStatus: subscriber?.status || 'unknown',
+    lastPublisherError,
+    lastSubscriberError,
+  };
+}
+
+module.exports = { publish, subscribe, PROCESS_ID, getStatus };

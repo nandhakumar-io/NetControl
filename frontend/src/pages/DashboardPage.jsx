@@ -325,6 +325,18 @@ export default function DashboardPage() {
   useEffect(() => { fetchAll() }, [fetchAll])
 
   // SSE for real-time metric updates
+  //
+  // BUG FIX: the fallback poll used to gate purely on `es.readyState ===
+  // EventSource.OPEN`. That only proves the browser<->worker socket is up —
+  // it says nothing about whether that worker is actually receiving
+  // anything to push. If the Redis bus (services/bus.js) is down or
+  // misconfigured, cross-worker fan-out of metrics/device-status silently
+  // stops while the socket itself stays perfectly "open", so this never
+  // fired — a device could sit stuck showing offline/stale forever even
+  // though its agent was reporting fine to a different worker. Now it also
+  // polls whenever no message has actually arrived recently, regardless of
+  // socket state.
+  const lastMsgAt = useRef(Date.now())
   useEffect(() => {
     const token = localStorage.getItem('nc_token') || ''
     const es = new EventSource(
@@ -333,6 +345,7 @@ export default function DashboardPage() {
     es.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data)
+        lastMsgAt.current = Date.now()
         if (msg.type === 'snapshot') {
           metricsRef.current = msg.data || {}
           setMetrics(msg.data || {})
@@ -357,7 +370,8 @@ export default function DashboardPage() {
       } catch {}
     }
     const t = setInterval(() => {
-      if (es.readyState === EventSource.OPEN) return
+      const dataIsFresh = Date.now() - lastMsgAt.current < REFRESH_MS + 5000
+      if (es.readyState === EventSource.OPEN && dataIsFresh) return
       fetchAll(true)
     }, REFRESH_MS)
     return () => { es.close(); clearInterval(t) }

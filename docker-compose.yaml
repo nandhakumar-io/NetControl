@@ -47,11 +47,34 @@ services:
     networks:
       - frontend-net
   
+  # ── Migrate: runs backend/db/migrate.js once, then exits ─────────────────────
+  # backend + poller both depend on this completing successfully before they
+  # start. Without this, a new migration (like 011_process_policies) can ship
+  # in the image but never actually get applied to the live database unless
+  # someone remembers to run `node db/migrate.js` by hand after every deploy —
+  # which is exactly what caused the Process Policies page to fail to load
+  # (the process_policies/process_violations tables didn't exist yet).
+  migrate:
+    build: ./backend
+    command: ["node", "db/migrate.js"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - backend-net
+    restart: "no"
+
   backend:
     build: ./backend
     depends_on:
-      - mysql
-      - redis
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
     environment:
       - PROCESS_ROLE=web
     expose:
@@ -77,8 +100,12 @@ services:
     build: ./backend
     command: ["node", "poller.js"]
     depends_on:
-      - mysql
-      - redis
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
     environment:
       - PROCESS_ROLE=poller
     env_file:
@@ -111,6 +138,12 @@ services:
       MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     networks:
       - backend-net
 

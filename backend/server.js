@@ -179,6 +179,44 @@ app.get('/api/health', (_req, res) => res.json({
   time:   new Date().toISOString(),
 }));
 
+// ── GET /api/health/full — admin-only deep diagnostics ───────────────────────
+// Exists specifically so "agent is sending metrics but the dashboard shows
+// it offline / no data" can be diagnosed from the app itself. That symptom
+// is almost always the Redis bus being down or misconfigured (see
+// services/bus.js): without it, each clustered web worker only sees
+// metrics/status changes that arrived on ITS OWN process, so whichever
+// worker a given browser request lands on may simply never have heard
+// about a device another worker is actively receiving agent POSTs for.
+app.get('/api/health/full', require('./middleware/auth').requireAuth, require('./middleware/auth').requireRole('admin'), async (_req, res) => {
+  const { ping: dbPing } = require('./db');
+  const bus = require('./services/bus');
+
+  const [dbOk, busStatus] = await Promise.all([
+    dbPing(),
+    Promise.resolve(bus.getStatus()),
+  ]);
+
+  const healthy = dbOk && (busStatus.mode !== 'redis' || busStatus.connected);
+
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
+    time:   new Date().toISOString(),
+    pid:    process.pid,
+    uptimeSec: Math.round(process.uptime()),
+    checks: {
+      database: { connected: dbOk },
+      bus: {
+        ...busStatus,
+        note: busStatus.mode === 'in-process-fallback'
+          ? 'REDIS_URL is not set on this worker — cross-worker metric/status sync is OFF. Fine for a single-process/dev setup only.'
+          : busStatus.connected
+            ? 'Redis reachable — metrics and device-status changes sync across all web workers.'
+            : 'REDIS_URL is set but Redis is NOT reachable right now — cross-worker sync is broken. Agents may appear offline/silent on some workers while genuinely online.',
+      },
+    },
+  });
+});
+
 // ── 404 & error handlers ──────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, _req, res, _next) => {

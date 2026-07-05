@@ -69,4 +69,11 @@ async function batchInsert(table, columns, rows) {
   return result;
 }
 
-module.exports = { getPool, query, queryOne, execute, batchInsert };
+// Lightweight connectivity check for /api/health/full — doesn't touch any
+// real table, just confirms the pool can actually reach MySQL right now.
+async function ping() {
+  try { await getPool().query('SELECT 1'); return true; }
+  catch { return false; }
+}
+
+module.exports = { getPool, query, queryOne, execute, batchInsert, ping };

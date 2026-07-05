@@ -627,7 +627,21 @@ export default function MonitoringPage() {
   useEffect(() => { load() }, [load])
 
   // SSE stream — receives pushed updates the instant agents send data
-  // Falls back to 10s polling if SSE connection drops
+  // Falls back to polling if no *data* has arrived in a while.
+  //
+  // BUG FIX: this used to gate the fallback purely on `es.readyState ===
+  // EventSource.OPEN` — but an open SSE socket only proves the browser is
+  // connected to *some* worker; it says nothing about whether that worker
+  // is actually receiving anything to push. If the Redis bus (services/
+  // bus.js) is down/misconfigured, cross-worker fan-out of metrics AND
+  // device-status flips silently stops — the socket stays open (nothing is
+  // wrong with the browser<->worker connection itself), so this fallback
+  // never fired, and a device could sit stuck showing stale metrics/status
+  // forever even though the agent was reporting fine to a different worker.
+  // Tracking the last time we actually received a message (not just
+  // "socket looks open") makes this self-healing regardless of which
+  // worker the SSE connection happens to land on.
+  const lastMsgAt = useRef(Date.now())
   const failCount = useRef(0)
   useEffect(() => {
     const token = localStorage.getItem('nc_token') || ''
@@ -639,6 +653,7 @@ export default function MonitoringPage() {
       try {
         const msg = JSON.parse(e.data)
         failCount.current = 0
+        lastMsgAt.current = Date.now()
 
         if (msg.type === 'snapshot') {
           // Full snapshot on connect — replaces everything
@@ -646,7 +661,7 @@ export default function MonitoringPage() {
           mergeMetrics(msg.data || {}, true)
         } else if (msg.type === 'device_status') {
           // Poller/agent-driven status flip — patch devices list live instead
-          // of waiting for the 10s fallback poll of GET /api/devices.
+          // of waiting for the fallback poll of GET /api/devices.
           setDevices(prev => prev.map(d =>
             d.id === msg.deviceId ? { ...d, status: msg.status } : d
           ))
@@ -672,13 +687,19 @@ export default function MonitoringPage() {
       }
     }
 
-    // Fallback poll every 10s in case SSE is blocked by a proxy
+    // Fallback poll every 10s if no message has actually arrived recently —
+    // refreshes BOTH devices (status) and metrics, so a stuck "offline"/
+    // "no data" view recovers on its own even if the SSE pipe never
+    // reports an error (because, from the socket's point of view, nothing
+    // IS wrong — the data just isn't reaching it via the broken bus).
     const fallback = setInterval(async () => {
-      if (es.readyState === EventSource.OPEN) return // SSE is working, skip poll
+      const dataIsFresh = Date.now() - lastMsgAt.current < 15000
+      if (es.readyState === EventSource.OPEN && dataIsFresh) return
       try {
-        const { data } = await api.get('/metrics')
+        const [d, m] = await Promise.all([api.get('/devices'), api.get('/metrics')])
+        setDevices(d.data || [])
         failCount.current = 0
-        mergeMetrics(data || {})
+        mergeMetrics(m.data || {})
         setLastRefresh(Date.now())
       } catch {
         failCount.current++
