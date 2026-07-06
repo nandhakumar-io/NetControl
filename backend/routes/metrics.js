@@ -283,14 +283,29 @@ router.post('/register', registerLimiter, async (req, res) => {
 });
 
 // ── POST /api/metrics (agent ingest) ──────────────────────────────────────────
+// Tracks the last time we actually wrote last_seen/status to the DB per
+// device — deliberately NOT stored on the snapshot object. Storing it there
+// (as `_dbUpdatedAt`) meant it got re-stamped to `now` on every single
+// request whether or not a write happened, so the very next request's
+// "(now - prev._dbUpdatedAt) >= 10" check always read a ~5s-old value (the
+// agent's own post interval) and was permanently false after the first ever
+// write. Net effect: the DB got updated exactly once — right after a
+// process restart when `store` was empty — and never again, while the
+// in-memory store kept accumulating fine. last_seen froze, the poller
+// correctly (from its point of view) aged it past the grace window and
+// marked it offline forever, and the frontend's `live` check (which gates
+// on device.status==='online') kept showing "offline / no metrics" even
+// though fresh data was arriving the whole time.
+const lastDbWrite = new Map();
+
 router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   const device = req.agentDevice;
   const { cpu, ram, disk, network, uptime, os, hostname, processes } = req.body;
 
-  const now  = Math.floor(Date.now() / 1000);
-  const prev = store.get(device.id)?.latest;
+  const now = Math.floor(Date.now() / 1000);
 
-  if ((!prev || (now - (prev._dbUpdatedAt || 0)) >= 10) && device.status !== 'needs_approval') {
+  if ((now - (lastDbWrite.get(device.id) || 0)) >= 10 && device.status !== 'needs_approval') {
+    lastDbWrite.set(device.id, now);
     run('UPDATE devices SET status=?, last_seen=? WHERE id=?', ['online', now, device.id])
       .catch(() => {});
     if (device.status && device.status !== 'online') {
@@ -309,7 +324,6 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
 
   const snapshot = {
     ts:           now,
-    _dbUpdatedAt: now,
     cpu:          typeof cpu === 'number' ? Math.round(cpu * 10) / 10 : null,
     ram:          ram?.used != null && ram?.total != null ? ram : null,
     disk:         Array.isArray(disk) ? disk : null,
