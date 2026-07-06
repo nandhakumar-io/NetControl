@@ -8,6 +8,7 @@ services:
       - frontend-net
     volumes:
       -  ./cloudflared:/etc/cloudflared
+      
 
 
   traefik:
@@ -33,6 +34,7 @@ services:
       - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS}"
       - "traefik.http.routers.traefik.middlewares=traefik-auth"
       - "traefik.http.routers.traefik.service=api@internal"
+    
 
   frontend:
     build: ./frontend

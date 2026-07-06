@@ -7,7 +7,7 @@ const wol = require('wol');
  * @param {string} [broadcastAddr] — subnet broadcast, e.g. "192.168.1.255"
  * @returns {Promise<void>}
  */
-function wake(mac, broadcastAddr = '255.255.255.255') {
+function wake(mac, broadcastAddr = '10.10.15.255') {
   return new Promise((resolve, reject) => {
     const opts = { address: broadcastAddr, port: 9 };
     wol.wake(mac, opts, (err) => {
