@@ -678,13 +678,23 @@ export default function MonitoringPage() {
       } catch {}
     }
 
+    es.onopen = () => {
+      // Reconnected successfully — give it a clean slate instead of letting
+      // a stale failCount from before the drop immediately re-trigger below.
+      failCount.current = 0
+    }
+
     es.onerror = () => {
-      // SSE dropped — fall back to polling until it reconnects
+      // SSE dropped — the 10s fallback poll below is what actually keeps
+      // data fresh from here; do NOT clear metrics state here. Wiping state
+      // on socket-level errors alone (independent of whether the fallback
+      // poll is succeeding) meant a flaky/reconnecting SSE stream could
+      // erase perfectly good, freshly-polled data every few seconds — the
+      // dashboard would flicker data in via polling then go blank again via
+      // this handler moments later. Losing the SSE socket just means "rely
+      // on polling until it reconnects", which the fallback interval below
+      // already does on its own.
       failCount.current++
-      if (failCount.current >= 3) {
-        metricsRef.current = {}
-        setMetrics({})
-      }
     }
 
     // Fallback poll every 10s if no message has actually arrived recently —
