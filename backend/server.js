@@ -117,7 +117,7 @@ app.use(cookieParser());
 // request volume. If you add/remove a reverse-proxy layer in front of this
 // app, this number must be updated to match, or rate limiting silently
 // breaks the same way again.
-app.set('trust proxy', 2);
+app.set('trust proxy', Number.isInteger(parseInt(process.env.TRUST_PROXY_HOPS)) ? parseInt(process.env.TRUST_PROXY_HOPS) : 2);
 
 // ── Real IP ───────────────────────────────────────────────────────────────────
 // SECURITY FIX: x-forwarded-for can be spoofed by clients.

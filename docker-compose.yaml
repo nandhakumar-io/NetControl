@@ -1,61 +1,6 @@
 services:
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel run
-    restart: unless-stopped
-    networks:
-      - frontend-net
-    volumes:
-      -  ./cloudflared:/etc/cloudflared
-      
-
-
-  traefik:
-    image: traefik:latest
-    command:
-      - "--configFile=/traefik.yaml"
-    restart: unless-stopped 
-    security_opt:
-      - no-new-privileges:true 
-    networks:
-      - frontend-net
-    expose:
-      - "80"
-    env_file: .env 
-    volumes:
-      - /etc/localtime:/etc/localtime:ro 
-      - /var/run/docker.sock:/var/run/docker.sock:ro 
-      - ./data/traefik.yaml:/traefik.yaml:ro 
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.traefik.entrypoints=http"
-      - "traefik.http.routers.traefik.rule=Host(`traefik-dashboard.notoriousdev.in`)"
-      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS}"
-      - "traefik.http.routers.traefik.middlewares=traefik-auth"
-      - "traefik.http.routers.traefik.service=api@internal"
-    
-
-  frontend:
-    build: ./frontend
-    depends_on:
-      - backend
-    expose: 
-      - "80"
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.frontend.rule=Host(`netcontrol.notoriousdev.in`)
-      - traefik.http.services.frontend.loadbalancer.server.port=80
-    networks:
-      - frontend-net
-  
   # ── Migrate: runs backend/db/migrate.js once, then exits ─────────────────────
-  # backend + poller both depend on this completing successfully before they
-  # start. Without this, a new migration (like 011_process_policies) can ship
-  # in the image but never actually get applied to the live database unless
-  # someone remembers to run `node db/migrate.js` by hand after every deploy —
-  # which is exactly what caused the Process Policies page to fail to load
-  # (the process_policies/process_violations tables didn't exist yet).
   migrate:
     build: ./backend
     command: ["node", "db/migrate.js"]
@@ -63,9 +8,9 @@ services:
       mysql:
         condition: service_healthy
     env_file:
-      - .env
+      - .env.local
     networks:
-      - backend-net
+      - netcontrol-net
     restart: "no"
 
   backend:
@@ -79,25 +24,18 @@ services:
         condition: service_completed_successfully
     environment:
       - PROCESS_ROLE=web
-    expose:
-      - "8000"
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.backend.rule=Host(`netcontrol-api.notoriousdev.in`)
-      - traefik.http.services.backend.loadbalancer.server.port=8000
-      - "traefik.docker.network=netcontrol_frontend-net"
-
-    env_file: 
-      - .env
+    ports:
+      # Exposed directly so you can hit the API on the host without a
+      # reverse proxy in front of it (e.g. for testing with curl/Postman,
+      # or pointing an agent at http://localhost:8000).
+      - "8000:8000"
+    env_file:
+      - .env.local
     networks:
-      - backend-net
-      - frontend-net
+      - netcontrol-net
 
   # ── Poller: status polling + cron schedules + compliance checks ─────────────
-  # Runs as ONE instance (do not scale this) so scheduled actions and device
-  # polling never execute more than once per tick. See backend/poller.js for
-  # the full rationale. Shares the same image/env as `backend`, different
-  # entrypoint, no exposed port — it talks to MySQL and Redis only.
+  # Runs as ONE instance — do not scale this.
   poller:
     build: ./backend
     command: ["node", "poller.js"]
@@ -111,35 +49,44 @@ services:
     environment:
       - PROCESS_ROLE=poller
     env_file:
-      - .env
+      - .env.local
     networks:
-      - backend-net
+      - netcontrol-net
     restart: unless-stopped
-    deploy:
-      replicas: 1
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      # This is the URL you open in the browser: http://localhost:8080
+      - "8080:80"
+    networks:
+      - netcontrol-net
 
   # ── Redis: cross-process bus for SSE fan-out + metrics sync ─────────────────
-  # Used by the clustered `backend` workers to share live metric snapshots/SSE
-  # broadcasts with each other (see backend/services/bus.js). Not used as a
-  # cache or queue — just pub/sub, so default config is fine.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     networks:
-      - backend-net
+      - netcontrol-net
     volumes:
-      - netcontrol_redis_data:/data
+      - netcontrol_redis_data_local:/data
 
   mysql:
     image: mysql:8.4
     restart: unless-stopped
     env_file:
-      - .env
+      - .env.local
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
       MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
+    ports:
+      # Optional — lets you connect a local MySQL client/GUI to inspect data.
+      # Remove this if you don't need host access to the DB.
+      - "3306:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
       interval: 5s
@@ -147,16 +94,14 @@ services:
       retries: 20
       start_period: 30s
     networks:
-      - backend-net
-
+      - netcontrol-net
     volumes:
-      - netcontrol_db_data:/var/lib/mysql 
+      - netcontrol_db_data_local:/var/lib/mysql
+
 volumes:
-  netcontrol_db_data:
-  netcontrol_redis_data:
+  netcontrol_db_data_local:
+  netcontrol_redis_data_local:
 
 networks:
-  frontend-net:
-    driver: bridge
-  backend-net:
+  netcontrol-net:
     driver: bridge
