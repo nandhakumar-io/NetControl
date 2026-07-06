@@ -192,6 +192,7 @@ app.use('/api/alerts',    require('./routes/alerts').router);
 app.use('/api/discovery', require('./routes/discovery'));
 app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/process-policies', require('./routes/processPolicies'));
+app.use('/api/backup',   require('./routes/backup'));
 
 // BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
 // by the terminal page (/api/terminal/open/:id, the SSE output stream, and

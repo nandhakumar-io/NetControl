@@ -349,6 +349,7 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   applySnapshot(device.id, snapshot);
   sseBroadcastLocal(device.id, snapshot);
   bus.publish('metrics', { deviceId: device.id, snapshot });
+  recordHistoryBucket(device.id, snapshot);
 
   // Fire alert evaluation asynchronously
   setImmediate(() => evaluateAlerts(device.id, snapshot));
@@ -429,7 +430,298 @@ router.post('/violation', agentIngestLimiter, agentAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── GET /api/metrics ───────────────────────────────────────────────────────────
+// ── Persistent history (metrics_history table) ────────────────────────────────
+// The in-memory `store` above is a ~25-min ring buffer that resets on every
+// restart — fine for the live Monitoring page, useless for "compare this
+// week vs last week". This upserts one row per device per 60s bucket using
+// sum/max/n so the write is a single atomic UPSERT no matter how many
+// samples (agent posts ~every 5s) land in that minute — no read before
+// write, no extra round trip on the ingest hot path. See
+// db/migrate-metrics-history.js for the table + the averaging rationale.
+function recordHistoryBucket(deviceId, snapshot) {
+  const bucketTs = Math.floor(snapshot.ts / 60) * 60;
+  const ramPct   = snapshot.ram ? (snapshot.ram.used / snapshot.ram.total) * 100 : null;
+  const diskPct  = Array.isArray(snapshot.disk) && snapshot.disk[0] ? snapshot.disk[0].use : null;
+  const rx       = snapshot.network?.rxSec ?? null;
+  const tx       = snapshot.network?.txSec ?? null;
+
+  run(
+    `INSERT INTO metrics_history
+       (device_id, bucket_ts, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+        disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       cpu_sum      = cpu_sum      + VALUES(cpu_sum),
+       cpu_max      = GREATEST(cpu_max, VALUES(cpu_max)),
+       cpu_n        = cpu_n        + VALUES(cpu_n),
+       ram_pct_sum  = ram_pct_sum  + VALUES(ram_pct_sum),
+       ram_pct_max  = GREATEST(ram_pct_max, VALUES(ram_pct_max)),
+       ram_n        = ram_n        + VALUES(ram_n),
+       disk_pct_sum = disk_pct_sum + VALUES(disk_pct_sum),
+       disk_pct_max = GREATEST(disk_pct_max, VALUES(disk_pct_max)),
+       disk_n       = disk_n       + VALUES(disk_n),
+       net_rx_sum   = net_rx_sum   + VALUES(net_rx_sum),
+       net_tx_sum   = net_tx_sum   + VALUES(net_tx_sum),
+       net_n        = net_n        + VALUES(net_n)`,
+    [
+      deviceId, bucketTs,
+      snapshot.cpu ?? 0, snapshot.cpu ?? 0, snapshot.cpu != null ? 1 : 0,
+      ramPct ?? 0, ramPct ?? 0, ramPct != null ? 1 : 0,
+      diskPct ?? 0, diskPct ?? 0, diskPct != null ? 1 : 0,
+      rx ?? 0, tx ?? 0, (rx != null || tx != null) ? 1 : 0,
+    ]
+  ).catch(e => console.error('[metrics] history bucket write failed:', e.message));
+}
+
+function csvEscape(val) {
+  const s = val === null || val === undefined ? '' : String(val);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// range -> [lookback seconds, bucket-grouping seconds]
+// '90d' and '1y' only became cheap to offer once metrics_history_daily
+// existed (see services/metricsRollup.js) - a year at 1-day buckets is
+// ~365 rows/device instead of ~525k raw 1-min rows.
+const RANGE_PRESETS = {
+  '1h':  [3600,        60],     // 60 x 1-min points
+  '24h': [86400,       300],    // 288 x 5-min points
+  '7d':  [7 * 86400,   3600],   // 168 x 1-hr points
+  '30d': [30 * 86400,  21600],  // 120 x 6-hr points
+  '90d': [90 * 86400,  86400],  // 90 x 1-day points
+  '1y':  [365 * 86400, 86400],  // 365 x 1-day points
+};
+
+// Raw 60s buckets only live for this long before being compacted into
+// metrics_history_daily (see services/metricsRollup.js) - used here purely
+// to decide which table(s) a given [fromTs,toTs] window needs to read from.
+const { COMPRESS_AFTER_DAYS } = require('../services/metricsRollup');
+
+async function assertMetricsAccess(req, res) {
+  if (req.user.role === 'operator') {
+    const access = await queryOne(
+      'SELECT 1 FROM devices d ' +
+      'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
+      'WHERE d.id = ?',
+      [req.user.id, req.params.deviceId]
+    );
+    if (!access) { res.status(403).json({ error: 'Access denied' }); return false; }
+  }
+  return true;
+}
+
+// Resolves ?range=1h|24h|7d|30d or ?from=&to= (unix seconds) + optional
+// ?bucket= override (seconds) into a concrete [fromTs, toTs, bucketSeconds].
+function resolveRangeQuery(req) {
+  const now = Math.floor(Date.now() / 1000);
+  let fromTs, toTs, bucketSeconds;
+
+  if (req.query.from && req.query.to) {
+    fromTs = parseInt(req.query.from);
+    toTs   = parseInt(req.query.to);
+    const span = Math.max(1, toTs - fromTs);
+    // Auto-pick a sensible bucket width for custom ranges so a 6-month
+    // custom range doesn't try to return 250k raw 1-min rows. Mirrors the
+    // widths used by RANGE_PRESETS above (including the 90d/1y day-bucket
+    // tiers) so a custom range of, say, 400 days gets the same ~1 row/day
+    // shape a '1y' preset would, instead of getting stuck at the 6h bucket
+    // that used to be the widest option here.
+    bucketSeconds =
+      span <= 3600            ? 60 :
+      span <= 86400            ? 300 :
+      span <= 7 * 86400        ? 3600 :
+      span <= 30 * 86400       ? 21600 :
+      86400;
+  } else {
+    const preset = RANGE_PRESETS[req.query.range] || RANGE_PRESETS['24h'];
+    toTs = now;
+    fromTs = now - preset[0];
+    bucketSeconds = preset[1];
+  }
+  if (req.query.bucket) bucketSeconds = Math.max(60, parseInt(req.query.bucket) || bucketSeconds);
+  return { fromTs, toTs, bucketSeconds };
+}
+
+// Raw metrics_history only holds ~COMPRESS_AFTER_DAYS days — anything older
+// has already been folded into metrics_history_daily and deleted from the
+// raw table (see services/metricsRollup.js). A query window that reaches
+// further back than that (90d/1y presets, or any custom range spanning
+// more than a month) therefore needs to pull from BOTH tables and merge
+// them, or the older portion of the range would silently come back empty
+// even though the data is still retained — just at daily granularity.
+// day_ts/bucket_ts share the same "seconds since epoch, floored" shape so
+// UNION ALL-ing them before the outer GROUP BY is safe and keeps the
+// sum/max/n weighted-average math identical either way.
+async function fetchHistoryRows(deviceId, fromTs, toTs, bucketSeconds) {
+  return query(
+    `SELECT
+       FLOOR(ts / ?) * ? AS ts,
+       SUM(cpu_n) AS cpu_n,        CASE WHEN SUM(cpu_n)  > 0 THEN SUM(cpu_sum)      / SUM(cpu_n)  END AS cpu_avg,
+       MAX(cpu_max)  AS cpu_max,
+       SUM(ram_n) AS ram_n,        CASE WHEN SUM(ram_n)  > 0 THEN SUM(ram_pct_sum)  / SUM(ram_n)  END AS ram_avg,
+       MAX(ram_pct_max)  AS ram_max,
+       SUM(disk_n) AS disk_n,      CASE WHEN SUM(disk_n) > 0 THEN SUM(disk_pct_sum) / SUM(disk_n) END AS disk_avg,
+       MAX(disk_pct_max) AS disk_max,
+       SUM(net_n) AS net_n,        CASE WHEN SUM(net_n)  > 0 THEN SUM(net_rx_sum)   / SUM(net_n)  END AS net_rx_avg,
+       CASE WHEN SUM(net_n)  > 0 THEN SUM(net_tx_sum)   / SUM(net_n)  END AS net_tx_avg
+     FROM (
+       SELECT bucket_ts AS ts, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+              disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n
+       FROM metrics_history
+       WHERE device_id = ? AND bucket_ts BETWEEN ? AND ?
+       UNION ALL
+       SELECT day_ts AS ts, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+              disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n
+       FROM metrics_history_daily
+       WHERE device_id = ? AND day_ts BETWEEN ? AND ?
+     ) combined
+     GROUP BY ts
+     ORDER BY ts ASC`,
+    [bucketSeconds, bucketSeconds, deviceId, fromTs, toTs, deviceId, fromTs, toTs]
+  );
+}
+
+
+// ── Group-wise metrics history ────────────────────────────────────────────────
+// Same durable metrics_history/metrics_history_daily tables as the per-device
+// history endpoint below, but aggregated across every device in a group so a
+// group can be viewed as a single trend line ("how is the whole 'Lab 3' group
+// trending") instead of clicking through devices one at a time. Combined
+// series sums sum/n across all member devices per bucket before dividing, so
+// it's a true device-weighted average, not an average-of-averages. A
+// per-device breakdown (avg/max over the whole window) rides along in the
+// same response so the frontend can render a legend/table without a second
+// round trip per device.
+async function assertGroupAccess(req, res) {
+  if (req.user.role === 'operator') {
+    const access = await queryOne(
+      'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+      [req.user.id, req.params.groupId]
+    );
+    if (!access) { res.status(403).json({ error: 'Access denied to this group' }); return false; }
+  }
+  return true;
+}
+
+async function fetchGroupCombinedRows(deviceIds, fromTs, toTs, bucketSeconds) {
+  if (!deviceIds.length) return [];
+  const placeholders = deviceIds.map(() => '?').join(',');
+  return query(
+    `SELECT
+       FLOOR(ts / ?) * ? AS ts,
+       SUM(cpu_n) AS cpu_n,   CASE WHEN SUM(cpu_n)  > 0 THEN SUM(cpu_sum)      / SUM(cpu_n)  END AS cpu_avg,
+       MAX(cpu_max)  AS cpu_max,
+       SUM(ram_n) AS ram_n,   CASE WHEN SUM(ram_n)  > 0 THEN SUM(ram_pct_sum)  / SUM(ram_n)  END AS ram_avg,
+       MAX(ram_pct_max)  AS ram_max,
+       SUM(disk_n) AS disk_n, CASE WHEN SUM(disk_n) > 0 THEN SUM(disk_pct_sum) / SUM(disk_n) END AS disk_avg,
+       MAX(disk_pct_max) AS disk_max,
+       SUM(net_n) AS net_n,   CASE WHEN SUM(net_n)  > 0 THEN SUM(net_rx_sum)   / SUM(net_n)  END AS net_rx_avg,
+       CASE WHEN SUM(net_n)  > 0 THEN SUM(net_tx_sum)   / SUM(net_n)  END AS net_tx_avg
+     FROM (
+       SELECT bucket_ts AS ts, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+              disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n
+       FROM metrics_history
+       WHERE device_id IN (${placeholders}) AND bucket_ts BETWEEN ? AND ?
+       UNION ALL
+       SELECT day_ts AS ts, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+              disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n
+       FROM metrics_history_daily
+       WHERE device_id IN (${placeholders}) AND day_ts BETWEEN ? AND ?
+     ) combined
+     GROUP BY ts
+     ORDER BY ts ASC`,
+    [bucketSeconds, bucketSeconds, ...deviceIds, fromTs, toTs, ...deviceIds, fromTs, toTs]
+  );
+}
+
+async function fetchPerDeviceSummary(deviceIds, fromTs, toTs) {
+  if (!deviceIds.length) return [];
+  const placeholders = deviceIds.map(() => '?').join(',');
+  return query(
+    `SELECT device_id,
+       CASE WHEN SUM(cpu_n)  > 0 THEN SUM(cpu_sum)      / SUM(cpu_n)  END AS cpu_avg,  MAX(cpu_max)      AS cpu_max,
+       CASE WHEN SUM(ram_n)  > 0 THEN SUM(ram_pct_sum)  / SUM(ram_n)  END AS ram_avg,  MAX(ram_pct_max)  AS ram_max,
+       CASE WHEN SUM(disk_n) > 0 THEN SUM(disk_pct_sum) / SUM(disk_n) END AS disk_avg, MAX(disk_pct_max) AS disk_max,
+       CASE WHEN SUM(net_n)  > 0 THEN SUM(net_rx_sum)   / SUM(net_n)  END AS net_rx_avg,
+       CASE WHEN SUM(net_n)  > 0 THEN SUM(net_tx_sum)   / SUM(net_n)  END AS net_tx_avg
+     FROM (
+       SELECT device_id, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+              disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n
+       FROM metrics_history WHERE device_id IN (${placeholders}) AND bucket_ts BETWEEN ? AND ?
+       UNION ALL
+       SELECT device_id, cpu_sum, cpu_max, cpu_n, ram_pct_sum, ram_pct_max, ram_n,
+              disk_pct_sum, disk_pct_max, disk_n, net_rx_sum, net_tx_sum, net_n
+       FROM metrics_history_daily WHERE device_id IN (${placeholders}) AND day_ts BETWEEN ? AND ?
+     ) combined
+     GROUP BY device_id`,
+    [...deviceIds, fromTs, toTs, ...deviceIds, fromTs, toTs]
+  );
+}
+
+// GET /api/metrics/group/:groupId/history?range=1h|24h|7d|30d|90d|1y&from=&to=&bucket=
+router.get('/group/:groupId/history', requireAuth, async (req, res) => {
+  try {
+    if (!(await assertGroupAccess(req, res))) return;
+    const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ?', [req.params.groupId]);
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+
+    const devices = await query('SELECT id, name, status FROM devices WHERE group_id = ? ORDER BY name', [req.params.groupId]);
+    const deviceIds = devices.map(d => d.id);
+
+    const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
+    const [points, perDevice] = await Promise.all([
+      fetchGroupCombinedRows(deviceIds, fromTs, toTs, bucketSeconds),
+      fetchPerDeviceSummary(deviceIds, fromTs, toTs),
+    ]);
+
+    const summaryById = new Map(perDevice.map(r => [r.device_id, r]));
+    const devicesSummary = devices.map(d => ({
+      device_id: d.id, name: d.name, status: d.status,
+      ...(summaryById.get(d.id) || { cpu_avg: null, cpu_max: null, ram_avg: null, ram_max: null,
+        disk_avg: null, disk_max: null, net_rx_avg: null, net_tx_avg: null }),
+    }));
+
+    res.json({
+      group: { id: group.id, name: group.name },
+      from: fromTs, to: toTs, bucketSeconds,
+      device_count: devices.length,
+      points, devices: devicesSummary,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/metrics/group/:groupId/history/export?range=&from=&to= — CSV of the
+// combined group series, same shape/columns as the per-device CSV export.
+router.get('/group/:groupId/history/export', requireAuth, async (req, res) => {
+  try {
+    if (!(await assertGroupAccess(req, res))) return;
+    const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ?', [req.params.groupId]);
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+
+    const deviceIds = (await query('SELECT id FROM devices WHERE group_id = ?', [req.params.groupId])).map(r => r.id);
+    const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
+    const rows = await fetchGroupCombinedRows(deviceIds, fromTs, toTs, bucketSeconds);
+
+    const cols = ['timestamp', 'cpu_avg_pct', 'cpu_max_pct', 'ram_avg_pct', 'ram_max_pct',
+                  'disk_avg_pct', 'disk_max_pct', 'net_rx_avg_bps', 'net_tx_avg_bps'];
+    const header = cols.join(',');
+    const round2 = v => v == null ? '' : Math.round(v * 100) / 100;
+    const lines = rows.map(r => [
+      new Date(r.ts * 1000).toISOString(),
+      round2(r.cpu_avg), round2(r.cpu_max),
+      round2(r.ram_avg), round2(r.ram_max),
+      round2(r.disk_avg), round2(r.disk_max),
+      round2(r.net_rx_avg), round2(r.net_tx_avg),
+    ].map(csvEscape).join(','));
+    const body = [header, ...lines].join('\n');
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safeName = group.name.replace(/[^a-z0-9-_]+/gi, '_');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="netcontrol-metrics-group-${safeName}-${stamp}.csv"`);
+    res.send(body);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/', requireAuth, async (req, res) => {
   try {
     const result = {};
@@ -467,6 +759,53 @@ router.get('/:deviceId', requireAuth, async (req, res) => {
     const entry = store.get(req.params.deviceId);
     if (!entry) return res.json({ latest: null, history: [] });
     res.json(entry);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/metrics/:deviceId/history?range=1h|24h|7d|30d&from=&to=&bucket= ──
+// Long-term, pre-aggregated history for the Monitoring History/comparison
+// page. Unlike GET /:deviceId (in-memory, ~25 min), this reads from the
+// durable metrics_history table and can go back as far as retention allows.
+router.get('/:deviceId/history', requireAuth, async (req, res) => {
+  try {
+    if (!(await assertMetricsAccess(req, res))) return;
+    const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
+    const rows = await fetchHistoryRows(req.params.deviceId, fromTs, toTs, bucketSeconds);
+    res.json({ from: fromTs, to: toTs, bucketSeconds, points: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/metrics/:deviceId/history/export?range=&from=&to=&format=csv ────
+// CSV is the format used everywhere else this app exports tabular data (see
+// routes/audit.js) and the one every spreadsheet/BI tool (Excel, Sheets,
+// Grafana CSV panels, etc.) reads natively — so it's what's offered here too.
+router.get('/:deviceId/history/export', requireAuth, async (req, res) => {
+  try {
+    if (!(await assertMetricsAccess(req, res))) return;
+    const device = await queryOne('SELECT name FROM devices WHERE id = ?', [req.params.deviceId]);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
+    const rows = await fetchHistoryRows(req.params.deviceId, fromTs, toTs, bucketSeconds);
+
+    const cols = ['timestamp', 'cpu_avg_pct', 'cpu_max_pct', 'ram_avg_pct', 'ram_max_pct',
+                  'disk_avg_pct', 'disk_max_pct', 'net_rx_avg_bps', 'net_tx_avg_bps'];
+    const header = cols.join(',');
+    const round2 = v => v == null ? '' : Math.round(v * 100) / 100;
+    const lines = rows.map(r => [
+      new Date(r.ts * 1000).toISOString(),
+      round2(r.cpu_avg), round2(r.cpu_max),
+      round2(r.ram_avg), round2(r.ram_max),
+      round2(r.disk_avg), round2(r.disk_max),
+      round2(r.net_rx_avg), round2(r.net_tx_avg),
+    ].map(csvEscape).join(','));
+    const body = [header, ...lines].join('\n');
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safeName = device.name.replace(/[^a-z0-9-_]+/gi, '_');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="netcontrol-metrics-${safeName}-${stamp}.csv"`);
+    res.send(body);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

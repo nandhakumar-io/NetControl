@@ -33,6 +33,20 @@ services:
       - .env.local
     networks:
       - netcontrol-net
+    volumes:
+      # ── Backup feature (routes/backup.js + services/backupService.js) ──────
+      # Without these, backups only exist inside the container's writable
+      # layer: a redeploy/rebuild silently wipes every archive, and
+      # BACKUP_ROOT has nothing real to browse since the container has no
+      # access to the host filesystem by default.
+      #   - netcontrol_backups_data_local  → BACKUP_STORE_DIR, persists finished
+      #     archives across restarts/rebuilds.
+      #   - ./backup-source                → BACKUP_ROOT, the host directory
+      #     an admin can pick files/folders from to archive. Point this at
+      #     whatever you actually want backed up (configs, uploads, etc.);
+      #     create the folder first (`mkdir backup-source`).
+      - netcontrol_backups_data_local:/app/backups
+      - ./backup-source:/app/backup-source:ro
 
   # ── Poller: status polling + cron schedules + compliance checks ─────────────
   # Runs as ONE instance — do not scale this.
@@ -101,6 +115,7 @@ services:
 volumes:
   netcontrol_db_data_local:
   netcontrol_redis_data_local:
+  netcontrol_backups_data_local:
 
 networks:
   netcontrol-net:

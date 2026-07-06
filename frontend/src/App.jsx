@@ -17,11 +17,13 @@ import RemoteAccessPage from './pages/RemoteAccessPage'
 import FilePushPage    from './pages/FilePushPage'
 import UsersPage       from './pages/UsersPage'
 import MonitoringPage  from './pages/MonitoringPage'
+import MonitoringHistoryPage from './pages/MonitoringHistoryPage'
 import SecurityPage    from './pages/SecurityPage'
 import AlertsPage      from './pages/AlertsPage'
 import DiscoveryPage   from './pages/DiscoveryPage'
 import CompliancePage  from './pages/CompliancePage'
 import ProcessPoliciesPage from './pages/ProcessPoliciesPage'
+import BackupsPage    from './pages/BackupsPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -104,10 +106,12 @@ export default function App() {
           <Route path="schedules"     element={<RequirePermission bit={32}><SchedulesPage /></RequirePermission>} />
           <Route path="audit"         element={<RequirePermission bit={128}><AuditPage /></RequirePermission>} />
           <Route path="monitoring"     element={<RequirePermission bit={1}><MonitoringPage /></RequirePermission>} />
+          <Route path="monitoring/history" element={<RequirePermission bit={1}><MonitoringHistoryPage /></RequirePermission>} />
           <Route path="alerts"          element={<RequirePermission bit={1}><AlertsPage /></RequirePermission>} />
           <Route path="discovery"       element={<RequirePermission bit={1024}><DiscoveryPage /></RequirePermission>} />
           <Route path="compliance"      element={<RequirePermission bit={2048}><CompliancePage /></RequirePermission>} />
           <Route path="process-policies" element={<RequirePermission bit={4096}><ProcessPoliciesPage /></RequirePermission>} />
+          <Route path="backups"          element={<RequirePermission bit={8192}><BackupsPage /></RequirePermission>} />
 
           {/* Admin-only routes */}
           <Route

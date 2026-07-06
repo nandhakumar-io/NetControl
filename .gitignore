@@ -1,4 +1,5 @@
 *.zip
+*zip.*
 .env
 .env.local
 .env.*

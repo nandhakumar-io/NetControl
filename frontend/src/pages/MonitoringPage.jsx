@@ -1,10 +1,11 @@
 // pages/MonitoringPage.jsx
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Activity, Cpu, HardDrive, Wifi, Clock, RefreshCw, AlertTriangle,
   CheckCircle2, Monitor, Search, Server, ArrowDown, ArrowUp,
   ChevronDown, ChevronUp, MemoryStick, Filter, TrendingUp,
-  TrendingDown, Thermometer, Radio, Eye, Zap, Network,
+  TrendingDown, Thermometer, Radio, Eye, Zap, Network, History,
 } from 'lucide-react'
 import {
   AreaChart, Area, LineChart, Line, BarChart, Bar as RBar,
@@ -432,6 +433,7 @@ function DeviceDetail({ device, m, hist }) {
 
 // ─── Device row ───────────────────────────────────────────────────────────────
 const DeviceRow = React.memo(function DeviceRow({ device, metrics, expanded, onToggle }) {
+  const navigate = useNavigate()
   const m    = metrics?.latest
   const hist = metrics?.history || []
   const stale = !m || isStale(m.ts)
@@ -541,6 +543,15 @@ const DeviceRow = React.memo(function DeviceRow({ device, metrics, expanded, onT
           </span>
         )}
 
+        {/* History — jump to the long-term trends/compare/export page for this device */}
+        <button
+          onClick={(e)=>{ e.stopPropagation(); navigate(`/monitoring/history?device=${device.id}`) }}
+          title="View metrics history"
+          className="ml-1 p-1.5 rounded-lg shrink-0 hover:bg-white/5 transition-colors"
+          style={{color:'var(--text-muted)'}}>
+          <History size={12}/>
+        </button>
+
         <div className="ml-1 p-1 rounded-lg shrink-0 group-hover:bg-white/5 transition-colors" style={{color:'var(--text-muted)'}}>
           {expanded?<ChevronUp size={12}/>:<ChevronDown size={12}/>}
         </div>
@@ -579,6 +590,7 @@ function VirtualList({ items, metrics, expanded, onToggle }) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function MonitoringPage() {
+  const navigate = useNavigate()
   const [devices,      setDevices]      = useState([])
   const [groups,       setGroups]       = useState([])
   const [metrics,      setMetrics]      = useState({})
@@ -773,6 +785,10 @@ export default function MonitoringPage() {
           <button onClick={()=>setShowOverview(v=>!v)}
             className={`text-xs px-3 py-1.5 rounded-lg font-body transition-all ${showOverview?'bg-brand-500/15 text-brand-400 border border-brand-500/25':'btn-ghost'}`}>
             Fleet Overview
+          </button>
+          <button onClick={()=>navigate('/monitoring/history')}
+            className="text-xs px-3 py-1.5 rounded-lg font-body transition-all btn-ghost flex items-center gap-1.5">
+            <History size={12}/> Metrics History
           </button>
           <button onClick={()=>load(true)} disabled={refreshing} className="icon-btn">
             <RefreshCw size={13} className={refreshing?'animate-spin':''}/>

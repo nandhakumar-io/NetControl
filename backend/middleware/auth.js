@@ -93,6 +93,11 @@ function requireRole(...roles) {
  *                                actions on agents — admin only by
  *                                convention; this can terminate arbitrary
  *                                processes on end-user machines)
+ *   8192 - manage_backups      (browse BACKUP_ROOT, create/download/delete
+ *                                archives — admin only by convention, same
+ *                                reasoning as discover_network/compliance:
+ *                                this reads arbitrary files under the
+ *                                sanctioned tree and writes to disk)
  *
  * Admins always pass; operators pass bits 1|4|8|32; viewers pass 1|8|32|128.
  */

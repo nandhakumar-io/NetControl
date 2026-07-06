@@ -32,6 +32,7 @@ process.on('unhandledRejection', (err) => {
 const { loadAllSchedules } = require('./services/scheduler');
 const statusPoller         = require('./services/statusPoller');
 const complianceService    = require('./services/complianceService');
+const metricsRollup        = require('./services/metricsRollup');
 
 console.log(`\n🛰️  NetControl poller process starting (pid ${process.pid})`);
 console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
@@ -39,6 +40,15 @@ console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
 loadAllSchedules();
 statusPoller.start();
 complianceService.start();
+
+// ── metrics_history compaction + retention ────────────────────────────────────
+// Raw 60s buckets are kept for METRICS_COMPRESS_AFTER_DAYS (default 35 —
+// "at least a month"), then folded into one row/device/day in
+// metrics_history_daily and deleted, where they're kept for
+// METRICS_DAILY_RETENTION_DAYS (default 730) before finally being pruned.
+// See services/metricsRollup.js for the full rationale.
+metricsRollup.start();
+console.log(`   Metrics retention: ${metricsRollup.COMPRESS_AFTER_DAYS}d raw -> compressed to daily -> kept ${metricsRollup.DAILY_RETENTION_DAYS}d total\n`);
 
 // Keep the process alive; all the real work happens on setInterval timers
 // inside the services above.

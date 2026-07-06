@@ -531,6 +531,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  compliance_tables:', e.message);
     }
+    try {
+      const { migrateMetricsHistoryTables } = require('./migrate-metrics-history');
+      await migrateMetricsHistoryTables();
+      console.log('  ✓ metrics_history (long-term metrics for the Monitoring History page)');
+    } catch (e) {
+      console.warn('  ⚠  metrics_history:', e.message);
+    }
+    try {
+      const { migrateBackupsTables } = require('./migrate-backup');
+      await migrateBackupsTables();
+      console.log('  ✓ backups (file/folder backup archive index)');
+    } catch (e) {
+      console.warn('  ⚠  backups:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node
