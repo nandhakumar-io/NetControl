@@ -263,6 +263,17 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
     finally { setSettingBaseline(false) }
   }
 
+  const clearSnapshots = async () => {
+    if (!snapshots.length) return
+    if (!confirm(`Clear all compliance check history for ${d.device_name}? This cannot be undone.`)) return
+    try {
+      await api.delete(`/compliance/${d.device_id}/snapshots`)
+      toast.success('Compliance checks cleared')
+      setSnapshots([])
+      onChanged()
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to clear compliance checks') }
+  }
+
   return (
     <div className="glass rounded-2xl overflow-hidden">
       <div className="flex items-center gap-3 px-5 py-4 cursor-pointer" onClick={onToggleExpand}>
@@ -303,6 +314,13 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
             <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>
               {snapshots.length} snapshot{snapshots.length !== 1 ? 's' : ''} recorded
             </p>
+          </div>
+          <div className="flex justify-end px-5 pt-2" style={{ background: 'var(--bg-input)' }}>
+            <button onClick={clearSnapshots} disabled={!snapshots.length}
+              className="text-[11px] font-mono px-2 py-1 rounded-md flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-red-500/10 mb-2"
+              style={{ color: '#f87171', border: '1px solid rgba(248,113,113,0.25)' }}>
+              <Trash2 size={11} /> Clear compliance checks
+            </button>
           </div>
 
           {status === 'drift' && d.latest_diff && (

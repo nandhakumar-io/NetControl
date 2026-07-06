@@ -133,6 +133,22 @@ router.get('/:deviceId/snapshots', requirePermission(MANAGE_COMPLIANCE), param('
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── DELETE /api/compliance/:deviceId/snapshots — clear check history ─────────
+router.delete('/:deviceId/snapshots', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
+  if (validate(req, res)) return;
+  const device = await assertDevice(req.params.deviceId, res);
+  if (!device) return;
+  try {
+    await execute('DELETE FROM compliance_snapshots WHERE device_id = ?', [req.params.deviceId]);
+    await audit.log({
+      userId: req.user.id, username: req.user.username, ipSource: req.realIp,
+      action: 'compliance_snapshots_cleared', targetType: 'device', targetId: req.params.deviceId,
+      targetName: device.name, result: 'success',
+    });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/compliance/:deviceId/snapshots/:id — full snapshot (raw lists) ──
 router.get('/:deviceId/snapshots/:id',
   requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), param('id').isUUID(),

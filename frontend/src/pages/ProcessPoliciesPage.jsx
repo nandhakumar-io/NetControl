@@ -204,6 +204,16 @@ export default function ProcessPoliciesPage() {
     } catch (e) { toast.error(e.response?.data?.error || 'Failed to remove') }
   }
 
+  const clearViolations = async () => {
+    if (!violations.length) return
+    if (!confirm('Clear all recent detections? This cannot be undone.')) return
+    try {
+      await api.delete('/process-policies/violations')
+      toast.success('Recent detections cleared')
+      setViolations([])
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to clear detections') }
+  }
+
   const killCount = useMemo(() => violations.filter(v => v.action_taken === 'kill').length, [violations])
 
   if (loading) return (
@@ -272,6 +282,11 @@ export default function ProcessPoliciesPage() {
           <span className="ml-auto text-[10px] font-mono" style={{ color: 'var(--text-faint)' }}>
             {violations.length} total · {killCount} blocked
           </span>
+          <button onClick={clearViolations} disabled={!violations.length}
+            className="text-[10px] font-mono px-2 py-1 rounded-md flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-red-500/10"
+            style={{ color: '#f87171', border: '1px solid rgba(248,113,113,0.25)' }}>
+            <Trash2 size={11} /> Clear
+          </button>
         </div>
 
         {violations.length === 0 ? (
