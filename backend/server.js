@@ -103,7 +103,21 @@ app.use(cors({
 // ── Body parsing ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '200kb' }));
 app.use(cookieParser());
-app.set('trust proxy', 1);
+// trust proxy = 2: there are TWO reverse-proxy hops between the real client
+// and this process — Traefik, then nginx (frontend) — and nginx's
+// `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` appends its
+// own connecting peer (Traefik's container IP) onto the chain. With this
+// set to 1, Express only walked back one hop and resolved req.ip to that
+// constant internal container IP for EVERY client, instead of each client's
+// real public IP. Since express-rate-limit's default keyGenerator (and
+// authLimiter specifically, which has no per-agent skip/bypass) buckets by
+// req.ip, that collapsed EVERY browser and EVERY agent onto one shared rate
+// limit bucket — heavy agent/API traffic could exhaust it and lock out
+// real admin logins with 429s that had nothing to do with their own
+// request volume. If you add/remove a reverse-proxy layer in front of this
+// app, this number must be updated to match, or rate limiting silently
+// breaks the same way again.
+app.set('trust proxy', 2);
 
 // ── Real IP ───────────────────────────────────────────────────────────────────
 // SECURITY FIX: x-forwarded-for can be spoofed by clients.
