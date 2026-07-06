@@ -23,7 +23,7 @@ import AlertsPage      from './pages/AlertsPage'
 import DiscoveryPage   from './pages/DiscoveryPage'
 import CompliancePage  from './pages/CompliancePage'
 import ProcessPoliciesPage from './pages/ProcessPoliciesPage'
-import BackupsPage    from './pages/BackupsPage'
+import BackupsPage    from './pages/BackupPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 

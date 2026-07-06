@@ -173,22 +173,49 @@ export default function Layout() {
     navigate('/login')
   }
 
-  // ── Nav items — Alerts is now a proper NavLink to /alerts ─────────────────
-  const NAV = [
-    { to: '/dashboard',     icon: LayoutDashboard, label: 'Dashboard',     show: true },
-    { to: '/devices',       icon: Monitor,         label: 'Devices',       show: can(1) },
-    { to: '/groups',        icon: Layers,          label: 'Labs & Groups', show: can(8) },
-    { to: '/remote-access', icon: Share2,           label: 'Remote Access', show: can(1) },
-    { to: '/file-push',     icon: FolderOpen,      label: 'File Push',     show: can(1) },
-    { to: '/schedules',     icon: Clock,           label: 'Schedules',     show: can(32) },
-    { to: '/audit',         icon: ScrollText,      label: 'Audit Log',     show: can(128) },
-    { to: '/monitoring',    icon: Activity,        label: 'Monitoring',    show: can(1) },
-    { to: '/alerts',        icon: Bell,            label: 'Alerts',        show: can(1) },
-    { to: '/discovery',     icon: Radar,           label: 'Discovery',     show: can(1024) },
-    { to: '/compliance',    icon: ShieldCheck,     label: 'Compliance',    show: can(2048) },
-    { to: '/process-policies', icon: ShieldBan,    label: 'Process Rules', show: can(4096) },
-    { to: '/backups',       icon: Archive,         label: 'Backups',       show: can(8192) },
-  ].filter(n => n.show)
+  // ── Nav items — grouped into logical sections instead of one long flat list ──
+  const NAV_SECTIONS = [
+    {
+      label: null, // ungrouped, always-visible top item
+      items: [
+        { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', show: true },
+      ],
+    },
+    {
+      label: 'Devices',
+      items: [
+        { to: '/devices',       icon: Monitor,   label: 'Devices',       show: can(1) },
+        { to: '/groups',        icon: Layers,    label: 'Labs & Groups', show: can(8) },
+        { to: '/remote-access', icon: Share2,    label: 'Remote Access', show: can(1) },
+        { to: '/file-push',     icon: FolderOpen,label: 'File Push',     show: can(1) },
+      ],
+    },
+    {
+      label: 'Monitoring',
+      items: [
+        { to: '/monitoring', icon: Activity, label: 'Monitoring', show: can(1) },
+        { to: '/alerts',     icon: Bell,     label: 'Alerts',     show: can(1) },
+        { to: '/discovery',  icon: Radar,    label: 'Discovery',  show: can(1024) },
+      ],
+    },
+    {
+      label: 'Automation',
+      items: [
+        { to: '/schedules',        icon: Clock,     label: 'Schedules',     show: can(32) },
+        { to: '/process-policies', icon: ShieldBan, label: 'Process Rules', show: can(4096) },
+        { to: '/backups',          icon: Archive,   label: 'Backups',       show: can(8192) },
+      ],
+    },
+    {
+      label: 'Compliance',
+      items: [
+        { to: '/compliance', icon: ShieldCheck, label: 'Compliance', show: can(2048) },
+        { to: '/audit',      icon: ScrollText,  label: 'Audit Log',  show: can(128) },
+      ],
+    },
+  ]
+    .map(section => ({ ...section, items: section.items.filter(n => n.show) }))
+    .filter(section => section.items.length > 0)
 
   const ADMIN_NAV = [
     { to: '/users',     icon: Users,       label: 'Users',    show: isAdmin },
@@ -272,7 +299,25 @@ export default function Layout() {
 
         {/* Main Nav */}
         <nav className="flex-1 py-4 px-2 flex flex-col gap-1.5 overflow-y-auto">
-          {NAV.map(item => <NavItem key={item.to} {...item} />)}
+          {NAV_SECTIONS.map((section, idx) => (
+            <div key={section.label ?? `section-${idx}`}>
+              {section.label && (
+                <>
+                  {!collapsed && (
+                    <div className="mt-3 mb-1 px-3">
+                      <p className={`text-[11px] font-body font-semibold uppercase tracking-widest ${isLight ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {section.label}
+                      </p>
+                    </div>
+                  )}
+                  {collapsed && idx > 0 && <div className={`my-2 mx-3 h-px ${isLight ? 'bg-black/[0.06]' : 'bg-white/6'}`} />}
+                </>
+              )}
+              <div className="flex flex-col gap-1.5">
+                {section.items.map(item => <NavItem key={item.to} {...item} />)}
+              </div>
+            </div>
+          ))}
 
           {/* Admin section */}
           {ADMIN_NAV.length > 0 && (
