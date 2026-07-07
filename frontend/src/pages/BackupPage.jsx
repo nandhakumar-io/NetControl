@@ -16,6 +16,7 @@ import {
   Archive, Folder, FileText, ChevronRight, ChevronDown, Home, Shield, Loader2,
   Download, Trash2, RefreshCw, CheckCircle2, XCircle, Clock, HardDrive,
   Server, Plus, Cloud, FolderInput, HardDriveDownload, X, Settings2, Pencil,
+  CalendarClock, Play, PauseCircle, PlayCircle,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -23,6 +24,7 @@ import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import BackupDestinationModal from '../components/modals/BackupDestinationModal'
+import ScheduleBackupModal from '../components/modals/ScheduleBackupModal'
 import { usePermissions } from '../hooks/usePermissions'
 
 const LOCAL_FORMATS = [
@@ -38,6 +40,16 @@ function formatBytes(n) {
   let v = n / 1024, i = 0
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
   return `${v.toFixed(1)} ${units[i]}`
+}
+
+const CRON_LABELS = {
+  '0 2 * * *':   'Daily at 2:00 AM',
+  '0 2 * * 0':   'Weekly, Sunday 2:00 AM',
+  '0 2 1 * *':   'Monthly, 1st at 2:00 AM',
+  '0 */6 * * *': 'Every 6 hours',
+}
+function describeCron(expr) {
+  return CRON_LABELS[expr] || expr
 }
 
 function formatDate(secOrIso) {
@@ -173,6 +185,15 @@ export default function BackupsPage() {
   const [pin, setPin]             = useState('')
   const [deleteTarget, setDeleteTarget] = useState(null)
 
+  // ── Scheduled backups tab ──────────────────────────────────────────────────
+  const [tab, setTab] = useState('run') // 'run' | 'scheduled'
+  const [schedules, setSchedules] = useState([])
+  const [schedulesLoading, setSchedulesLoading] = useState(true)
+  const [showScheduleModal, setShowScheduleModal] = useState(false)
+  const [editingSchedule, setEditingSchedule] = useState(null)
+  const [deleteScheduleTarget, setDeleteScheduleTarget] = useState(null)
+  const [runningId, setRunningId] = useState(null)
+
   const isRemoteSource = deviceId !== 'local'
 
   // ── Fetchers ────────────────────────────────────────────────────────────
@@ -225,7 +246,16 @@ export default function BackupsPage() {
     } finally { setDisksLoading(false) }
   }, [])
 
-  useEffect(() => { fetchBackups(); fetchDevices(); fetchDestinations() }, [fetchBackups, fetchDevices, fetchDestinations])
+  const fetchSchedules = useCallback(async () => {
+    setSchedulesLoading(true)
+    try {
+      const { data } = await api.get('/backup-schedules')
+      setSchedules(data)
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed to load schedules') }
+    finally { setSchedulesLoading(false) }
+  }, [])
+
+  useEffect(() => { fetchBackups(); fetchDevices(); fetchDestinations(); fetchSchedules() }, [fetchBackups, fetchDevices, fetchDestinations, fetchSchedules])
 
   // When the source device changes, reload its disks, then browse the first
   // disk's root. Local server keeps working exactly as before (mount is
@@ -314,6 +344,31 @@ export default function BackupsPage() {
     } catch (err) { toast.error(err.response?.data?.error || 'Failed to remove destination') }
   }
 
+  const handleToggleSchedule = async (schedule) => {
+    try {
+      await api.patch(`/backup-schedules/${schedule.id}/toggle`)
+      toast.success(schedule.enabled ? `"${schedule.name}" paused` : `"${schedule.name}" resumed`)
+      fetchSchedules()
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed to update schedule') }
+  }
+
+  const handleRunSchedule = async (schedule) => {
+    setRunningId(schedule.id)
+    try {
+      await api.post(`/backup-schedules/${schedule.id}/run`)
+      toast.success(`"${schedule.name}" started — check Archive History shortly`)
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed to start backup') }
+    finally { setTimeout(() => setRunningId(null), 1500) }
+  }
+
+  const handleDeleteScheduleConfirm = async (pin) => {
+    try {
+      await api.delete(`/backup-schedules/${deleteScheduleTarget.id}`, { data: { actionPin: pin } })
+      toast.success('Schedule deleted')
+      fetchSchedules()
+    } catch (err) { throw err }
+  }
+
   const completed = backups.filter(b => b.status === 'completed')
   const totalBytes = completed.filter(b => (b.destination_type || 'local') === 'local').reduce((sum, b) => sum + (b.size_bytes || 0), 0)
   const failed = backups.filter(b => b.status === 'failed').length
@@ -345,6 +400,27 @@ export default function BackupsPage() {
           iconColor="text-accent-purple" iconBg="bg-accent-purple/10 border-accent-purple/20" />
       </div>
 
+      <div className="flex items-center gap-1 p-1 rounded-xl w-fit border" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-input)' }}>
+        <button
+          onClick={() => setTab('run')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-body font-medium transition-colors ${tab === 'run' ? 'bg-brand-500/15 text-brand-400' : ''}`}
+          style={tab !== 'run' ? { color: 'var(--text-muted)' } : {}}
+        >
+          <Archive size={14} /> One-off Backup
+        </button>
+        <button
+          onClick={() => setTab('scheduled')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-body font-medium transition-colors ${tab === 'scheduled' ? 'bg-brand-500/15 text-brand-400' : ''}`}
+          style={tab !== 'scheduled' ? { color: 'var(--text-muted)' } : {}}
+        >
+          <CalendarClock size={14} /> Scheduled Backups
+          {schedules.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>{schedules.length}</span>
+          )}
+        </button>
+      </div>
+
+      {tab === 'run' && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* LEFT: Source + Destination + create */}
         <div className="lg:col-span-1 space-y-5">
@@ -568,6 +644,89 @@ export default function BackupsPage() {
           )}
         </div>
       </div>
+      )}
+
+      {tab === 'scheduled' && (
+        <div className="card space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-xs font-body font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Scheduled Backups</h2>
+              <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>Runs on its own, tracked in Archive History alongside on-demand backups</p>
+            </div>
+            <button onClick={() => { setEditingSchedule(null); setShowScheduleModal(true) }} className="btn-primary flex items-center gap-2">
+              <Plus size={14} /> New Schedule
+            </button>
+          </div>
+
+          {schedulesLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="h-16 rounded-lg animate-pulse" style={{ background: 'var(--bg-input)' }} />
+              ))}
+            </div>
+          ) : schedules.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-2" style={{ color: 'var(--text-muted)' }}>
+              <CalendarClock size={28} className="opacity-30" />
+              <p className="text-sm font-body">No scheduled backups yet</p>
+              <button onClick={() => { setEditingSchedule(null); setShowScheduleModal(true) }} className="text-xs font-body text-brand-400 hover:text-brand-300 transition-colors mt-1">
+                Create your first schedule
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {schedules.map(s => {
+                const destMeta = DEST_TYPE_META[s.destination_id ? (destinations.find(d => d.id === s.destination_id)?.type || 'local') : 'local']
+                const DestIcon = destMeta.icon
+                return (
+                  <div key={s.id} className="flex items-center gap-3 px-3 py-3 rounded-lg border" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-input)', opacity: s.enabled ? 1 : 0.55 }}>
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 bg-brand-500/10 border border-brand-500/20">
+                      <CalendarClock size={16} className="text-brand-400" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-body font-medium truncate flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+                        {s.name}
+                        {!s.enabled && (
+                          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wide" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>paused</span>
+                        )}
+                      </p>
+                      <p className="text-xs font-mono truncate flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
+                        <Clock size={10} /> {describeCron(s.cron_expr)} · {s.format}
+                      </p>
+                      <p className="text-xs font-mono truncate flex items-center gap-1.5 mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                        <Server size={10} /> {s.source_device_name || 'This server'}:{s.source_path}
+                        <span className="opacity-40">→</span>
+                        <DestIcon size={10} /> {s.destination_name || 'Local backup store'}
+                      </p>
+                      {s.last_run ? (
+                        <p className={`text-xs font-mono truncate mt-0.5 ${s.last_status === 'failure' ? 'text-accent-red' : ''}`} style={s.last_status === 'failure' ? {} : { color: 'var(--text-muted)' }}>
+                          Last run {formatDate(s.last_run)} — {s.last_status === 'failure' ? (s.last_error || 'failed') : 'success'}
+                        </p>
+                      ) : (
+                        <p className="text-xs font-mono truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>Never run yet</p>
+                      )}
+                    </div>
+                    <button onClick={() => handleRunSchedule(s)} disabled={runningId === s.id}
+                      className="p-1.5 rounded-lg transition-colors hover:text-accent-green disabled:opacity-40" style={{ color: 'var(--text-muted)' }} title="Run now">
+                      {runningId === s.id ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                    </button>
+                    <button onClick={() => handleToggleSchedule(s)} className="p-1.5 rounded-lg transition-colors hover:text-accent-yellow" style={{ color: 'var(--text-muted)' }} title={s.enabled ? 'Pause' : 'Resume'}>
+                      {s.enabled ? <PauseCircle size={14} /> : <PlayCircle size={14} />}
+                    </button>
+                    <button onClick={() => { setEditingSchedule(s); setShowScheduleModal(true) }} className="p-1.5 rounded-lg transition-colors hover:text-brand-400" style={{ color: 'var(--text-muted)' }} title="Edit">
+                      <Pencil size={14} />
+                    </button>
+                    {isAdmin && (
+                      <button onClick={() => setDeleteScheduleTarget(s)} className="p-1.5 rounded-lg transition-colors hover:text-accent-red" style={{ color: 'var(--text-muted)' }} title="Delete">
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <ActionConfirmModal
         open={!!deleteTarget}
@@ -584,6 +743,24 @@ export default function BackupsPage() {
         onClose={() => { setShowDestModal(false); setEditingDestination(null) }}
         onCreated={() => fetchDestinations()}
         devices={devices}
+      />
+
+      <ScheduleBackupModal
+        open={showScheduleModal}
+        editing={editingSchedule}
+        onClose={() => { setShowScheduleModal(false); setEditingSchedule(null) }}
+        onSaved={() => fetchSchedules()}
+        devices={devices}
+        destinations={destinations}
+      />
+
+      <ActionConfirmModal
+        open={!!deleteScheduleTarget}
+        onClose={() => setDeleteScheduleTarget(null)}
+        onConfirm={handleDeleteScheduleConfirm}
+        title="Delete Schedule"
+        description={`This will stop "${deleteScheduleTarget?.name}" from running again. Backups it already created are unaffected.`}
+        danger
       />
     </div>
   )

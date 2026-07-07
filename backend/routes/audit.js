@@ -99,6 +99,58 @@ router.get('/', requirePermission(128), async (req, res) => {
   }
 });
 
+// Shared row->body renderer used by both the interactive export route and
+// the unattended scheduled-export job (services/scheduledJobs.js).
+function renderAuditRows(rows, format) {
+  const cols = ['timestamp', 'username', 'action', 'target_name', 'target_type', 'ip_source', 'result', 'details'];
+  if (format === 'csv') {
+    const header = cols.join(',');
+    const lines = rows.map(r => cols.map(c => csvEscape(c === 'timestamp' ? new Date((r[c] || 0) * 1000).toISOString() : r[c])).join(','));
+    return [header, ...lines].join('\n');
+  }
+  return rows.map(r =>
+    `[${new Date((r.timestamp || 0) * 1000).toISOString()}] ${r.username || 'system'} — ${r.action}` +
+    (r.target_name ? ` — ${r.target_name}` : '') +
+    ` — ${r.result}` +
+    (r.ip_source ? ` — from ${r.ip_source}` : '') +
+    (r.details ? ` — ${r.details}` : '')
+  ).join('\n');
+}
+
+// Filters-object version of buildAuditQuery, for callers without a real
+// Express `req` (i.e. a cron-triggered scheduled export).
+function buildAuditQueryFromFilters(filters = {}) {
+  const where  = [];
+  const params = [];
+  if (filters.action) { where.push('action = ?'); params.push(filters.action); }
+  if (filters.result) { where.push('result = ?'); params.push(filters.result); }
+  if (filters.search) {
+    where.push('(username LIKE ? OR target_name LIKE ?)');
+    params.push(`%${filters.search}%`, `%${filters.search}%`);
+  }
+  if (filters.from) { where.push('timestamp >= ?'); params.push(parseInt(filters.from)); }
+  if (filters.to)   { where.push('timestamp <= ?'); params.push(parseInt(filters.to)); }
+  return { whereClause: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+}
+
+// Runs a full export (query + render) from a plain filters object. Used
+// directly by the scheduled log-export job.
+async function generateAuditExport(filters, format) {
+  const { whereClause, params } = buildAuditQueryFromFilters(filters);
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    `SELECT * FROM audit_log ${whereClause} ORDER BY timestamp DESC LIMIT 10000`,
+    params
+  );
+  const stamp = new Date().toISOString().slice(0, 10);
+  return {
+    body: renderAuditRows(rows, format),
+    contentType: format === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8',
+    filename: `netcontrol-audit-log-${stamp}.${format}`,
+    rowCount: rows.length,
+  };
+}
+
 // GET /api/audit/export?format=csv|txt — honors the same filters as the list view
 router.get('/export', requirePermission(128), async (req, res) => {
   try {
@@ -113,26 +165,9 @@ router.get('/export', requirePermission(128), async (req, res) => {
 
     const stamp = new Date().toISOString().slice(0, 10);
     const filename = `netcontrol-audit-log-${stamp}.${format}`;
-    const cols = ['timestamp', 'username', 'action', 'target_name', 'target_type', 'ip_source', 'result', 'details'];
+    const body = renderAuditRows(rows, format);
 
-    let body;
-    if (format === 'csv') {
-      const header = cols.join(',');
-      const lines = rows.map(r => cols.map(c => csvEscape(c === 'timestamp' ? new Date((r[c] || 0) * 1000).toISOString() : r[c])).join(','));
-      body = [header, ...lines].join('\n');
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    } else {
-      const lines = rows.map(r =>
-        `[${new Date((r.timestamp || 0) * 1000).toISOString()}] ${r.username || 'system'} — ${r.action}` +
-        (r.target_name ? ` — ${r.target_name}` : '') +
-        ` — ${r.result}` +
-        (r.ip_source ? ` — from ${r.ip_source}` : '') +
-        (r.details ? ` — ${r.details}` : '')
-      );
-      body = lines.join('\n');
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    }
-
+    res.setHeader('Content-Type', format === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(body);
   } catch (e) {
@@ -280,4 +315,8 @@ router.post('/snmp/test', requireRole('admin'), async (req, res) => {
   }
 });
 
+// Router stays the default export (server.js does `require('./routes/audit')`
+// directly), with the export-generation helper attached as a property —
+// Router is a function object, so this is safe and needs no caller changes.
 module.exports = router;
+module.exports.generateAuditExport = generateAuditExport;

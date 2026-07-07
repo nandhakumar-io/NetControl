@@ -43,9 +43,28 @@ const { apiLimiter, bulkImportLimiter } = require('./middleware/rateLimiter');
 const { loadAllSchedules }      = require('./services/scheduler');
 const statusPoller              = require('./services/statusPoller');
 const complianceService          = require('./services/complianceService');
+const scheduledJobs             = require('./services/scheduledJobs');
 const { attachSSHProxy }        = require('./services/sshProxy');
 
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs', { recursive: true });
+
+// ── Required env validation ───────────────────────────────────────────────────
+// PRODUCTION FIX: previously a missing JWT_SECRET / DB_PASSWORD / encryption
+// key was only discovered the first time a route touched it — sometimes
+// minutes into uptime, behind a 500 that gave no hint why. Real deployments
+// (Docker/Proxmox/Traefik, not localhost) are exactly where a `.env` typo or
+// an unset secret in the compose file goes unnoticed until it bites. Failing
+// immediately at boot with a clear message beats a mysterious runtime crash.
+const REQUIRED_ENV = ['JWT_SECRET', 'DB_PASSWORD', 'CREDENTIAL_ENCRYPTION_KEY'];
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingEnv.length) {
+  console.error(`\n❌ Missing required environment variable(s): ${missingEnv.join(', ')}`);
+  console.error('   Set these in backend/.env (or the container/compose env) before starting.\n');
+  process.exit(1);
+}
+if (process.env.NODE_ENV === 'production' && (process.env.CORS_ORIGIN || '').includes('localhost')) {
+  console.warn('⚠  CORS_ORIGIN still points at localhost while NODE_ENV=production — the browser will be blocked. Set it to your real domain(s).');
+}
 
 // Safety net: an unguarded rejected promise anywhere at boot (or later)
 // otherwise crashes the whole Node process by default since Node 15+.
@@ -93,8 +112,23 @@ app.use(helmet({
 }));
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
+// PRODUCTION FIX: a real deployment usually has more than one origin that
+// needs to talk to the API (e.g. https://netcontrol.example.com AND
+// https://www.example.com, or a staging subdomain) — CORS_ORIGIN used to be
+// a single string, so only the first ever worked. Comma-separate multiple
+// origins in the env var; a single origin still works exactly as before.
+const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin:         process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    // No Origin header (curl, server-to-server, same-origin) — allow.
+    if (!origin) return callback(null, true);
+    if (corsOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials:    true,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key', 'X-Metrics-Key'],
@@ -193,6 +227,9 @@ app.use('/api/discovery', require('./routes/discovery'));
 app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/process-policies', require('./routes/processPolicies'));
 app.use('/api/backup',   require('./routes/backup'));
+const { backupSchedulesRouter, logExportSchedulesRouter } = require('./routes/scheduledJobs');
+app.use('/api/backup-schedules',     backupSchedulesRouter);
+app.use('/api/log-export-schedules', logExportSchedulesRouter);
 
 // BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
 // by the terminal page (/api/terminal/open/:id, the SSE output stream, and
@@ -282,6 +319,7 @@ async function boot() {
       loadAllSchedules();
       statusPoller.start();
       complianceService.start();
+      scheduledJobs.start();
     }
   });
 }

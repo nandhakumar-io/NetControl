@@ -545,6 +545,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  backups:', e.message);
     }
+    try {
+      const { migrateBackupDestinations } = require('./migrate-backup-destinations');
+      await migrateBackupDestinations();
+      console.log('  ✓ backup_destinations (S3 / remote-folder targets)');
+    } catch (e) {
+      console.warn('  ⚠  backup_destinations:', e.message);
+    }
+    try {
+      const { migrateScheduledJobs } = require('./migrate-scheduled-jobs');
+      await migrateScheduledJobs();
+      console.log('  ✓ scheduled_jobs (backup_schedules, log_export_schedules)');
+    } catch (e) {
+      console.warn('  ⚠  scheduled_jobs:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

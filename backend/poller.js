@@ -33,6 +33,7 @@ const { loadAllSchedules } = require('./services/scheduler');
 const statusPoller         = require('./services/statusPoller');
 const complianceService    = require('./services/complianceService');
 const metricsRollup        = require('./services/metricsRollup');
+const scheduledJobs        = require('./services/scheduledJobs');
 
 console.log(`\n🛰️  NetControl poller process starting (pid ${process.pid})`);
 console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
@@ -40,6 +41,7 @@ console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
 loadAllSchedules();
 statusPoller.start();
 complianceService.start();
+scheduledJobs.start();
 
 // ── metrics_history compaction + retention ────────────────────────────────────
 // Raw 60s buckets are kept for METRICS_COMPRESS_AFTER_DAYS (default 35 —
@@ -55,5 +57,6 @@ console.log(`   Metrics retention: ${metricsRollup.COMPRESS_AFTER_DAYS}d raw -> 
 process.on('SIGTERM', () => {
   console.log('[Poller] SIGTERM received, shutting down');
   statusPoller.stop();
+  scheduledJobs.stop();
   process.exit(0);
 });
