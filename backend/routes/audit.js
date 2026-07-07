@@ -2,7 +2,7 @@
 const express = require('express');
 const { getPool } = require('../db');
 const { requireAuth, requireRole, requirePermission } = require('../middleware/auth');
-const snmpForwarder = require('../services/snmpForwarder');
+const syslogForwarder = require('../services/syslogForwarder');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -69,16 +69,16 @@ router.get('/', requirePermission(128), async (req, res) => {
     const [failureRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} result = 'failure'`, params);
     const [partialRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} result = 'partial'`, params);
 
-    // snmp_synced is added by a separate migration (db/migrate-snmp.js) that
-    // may not have been run yet on every environment — don't let a missing
-    // column take down the whole audit log page, just report 0 synced.
+    // syslog_synced is added by a separate migration (db/migrate-syslog.js)
+    // that may not have been run yet on every environment — don't let a
+    // missing column take down the whole audit log page, just report 0 synced.
     let synced = 0;
     try {
-      const [syncedRow] = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} snmp_synced = 1`, params);
+      const [syncedRow] = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} syslog_synced = 1`, params);
       synced = syncedRow[0]?.c || 0;
     } catch (e) {
       if (e.code === 'ER_BAD_FIELD_ERROR') {
-        console.warn('[audit] snmp_synced column missing — run `npm run migrate` in backend/. Skipping sync tally.');
+        console.warn('[audit] syslog_synced column missing — run `npm run migrate` in backend/. Skipping sync tally.');
       } else {
         throw e;
       }
@@ -277,46 +277,60 @@ router.get('/device-compare', requirePermission(128), async (req, res) => {
   }
 });
 
-// ── SNMP forwarding settings (admin-only to view/edit; status is readable
+// ── Syslog forwarding settings (admin-only to view/edit; status is readable
 //    by anyone so the badge can render for non-admins) ──────────────────────
-router.get('/snmp/status', async (req, res) => {
+router.get('/syslog/status', async (req, res) => {
   try {
-    const cfg = await snmpForwarder.getConfig();
-    res.json({ enabled: cfg.enabled, host: cfg.host, runtime: snmpForwarder.getStats() });
+    const cfg = await syslogForwarder.getConfig();
+    res.json({ enabled: cfg.enabled, host: cfg.host, protocol: cfg.protocol, runtime: syslogForwarder.getStats() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.get('/snmp/config', requireRole('admin'), async (req, res) => {
+router.get('/syslog/config', requireRole('admin'), async (req, res) => {
   try {
-    const cfg = await snmpForwarder.getConfig(true);
-    res.json({ ...cfg, communitySet: !!cfg.community, community: undefined });
+    const cfg = await syslogForwarder.getConfig(true);
+    res.json(cfg);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.put('/snmp/config', requireRole('admin'), async (req, res) => {
+router.put('/syslog/config', requireRole('admin'), async (req, res) => {
   try {
-    const cfg = await snmpForwarder.setConfig(req.body || {}, req.user.id);
-    res.json({ ...cfg, community: cfg.community ? '••••••••' : '' });
+    const cfg = await syslogForwarder.setConfig(req.body || {}, req.user.id);
+    res.json(cfg);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
 });
 
-router.post('/snmp/test', requireRole('admin'), async (req, res) => {
+router.post('/syslog/test', requireRole('admin'), async (req, res) => {
   try {
-    const result = await snmpForwarder.testConnection();
+    const result = await syslogForwarder.testConnection();
     res.json(result);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
+// Raw-rows version of generateAuditExport, for the scheduled log-export job
+// when its target is "syslog" instead of a file — no rendering, just the
+// rows so each one can become its own syslog message.
+async function queryAuditRows(filters) {
+  const { whereClause, params } = buildAuditQueryFromFilters(filters);
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    `SELECT * FROM audit_log ${whereClause} ORDER BY timestamp DESC LIMIT 10000`,
+    params
+  );
+  return rows;
+}
+
 // Router stays the default export (server.js does `require('./routes/audit')`
-// directly), with the export-generation helper attached as a property —
+// directly), with the export-generation helpers attached as properties —
 // Router is a function object, so this is safe and needs no caller changes.
 module.exports = router;
 module.exports.generateAuditExport = generateAuditExport;
+module.exports.queryAuditRows = queryAuditRows;

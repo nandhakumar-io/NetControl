@@ -244,10 +244,19 @@ logExportSchedulesRouter.get('/', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+const EXPORT_TARGETS = ['file', 'syslog'];
+
 const logExportScheduleValidation = [
   body('name').trim().notEmpty().isLength({ max: 100 }),
   cronValidator,
-  body('format').isIn(LOG_FORMATS).withMessage(`format must be one of: ${LOG_FORMATS.join(', ')}`),
+  body('exportTarget').optional().isIn(EXPORT_TARGETS).withMessage(`exportTarget must be one of: ${EXPORT_TARGETS.join(', ')}`),
+  // format is meaningless for a syslog target (no file is produced), so it's
+  // only required when exportTarget is 'file' (the default).
+  body('format').custom((value, { req }) => {
+    if ((req.body.exportTarget || 'file') === 'syslog') return true;
+    if (!LOG_FORMATS.includes(value)) throw new Error(`format must be one of: ${LOG_FORMATS.join(', ')}`);
+    return true;
+  }),
   body('filters').optional({ nullable: true }).isObject(),
   body('destinationId').optional({ nullable: true }).isUUID(),
   body('enabled').optional().isBoolean(),
@@ -260,19 +269,29 @@ logExportSchedulesRouter.post(
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const { name, cronExpr, format, filters = {}, destinationId, enabled = true } = req.body;
+    const { name, cronExpr, filters = {}, destinationId, enabled = true } = req.body;
+    const exportTarget = req.body.exportTarget || 'file';
+    const format = exportTarget === 'syslog' ? 'csv' : req.body.format; // unused for syslog, kept non-null to satisfy the column
     try {
-      if (destinationId) {
+      if (exportTarget === 'file' && destinationId) {
         const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ?', [destinationId]);
         if (!dest) return res.status(400).json({ error: 'Destination not found' });
+      }
+      if (exportTarget === 'syslog') {
+        const syslogForwarder = require('../services/syslogForwarder');
+        const cfg = await syslogForwarder.getConfig();
+        if (!cfg.enabled || !cfg.host) {
+          return res.status(400).json({ error: 'Syslog forwarding is not configured — set it up under Audit Log → Syslog Settings first' });
+        }
       }
 
       const id = uuidv4();
       await execute(
         `INSERT INTO log_export_schedules
-           (id, name, cron_expr, enabled, format, filters, destination_id, created_by, created_by_name, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, name, cronExpr, enabled ? 1 : 0, format, JSON.stringify(filters), destinationId || null,
+           (id, name, cron_expr, enabled, format, export_target, filters, destination_id, created_by, created_by_name, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, name, cronExpr, enabled ? 1 : 0, format, exportTarget, JSON.stringify(filters),
+         exportTarget === 'file' ? (destinationId || null) : null,
          req.user.id, req.user.username, Math.floor(Date.now() / 1000)]
       );
 
@@ -282,7 +301,7 @@ logExportSchedulesRouter.post(
       await audit.log({
         userId: req.user.id, username: req.user.username,
         action: 'log_export_schedule_create', targetType: 'log_export_schedule', targetId: id, targetName: name,
-        ipSource: req.ip, result: 'success', details: `cron=${cronExpr} format=${format}`,
+        ipSource: req.ip, result: 'success', details: `cron=${cronExpr} target=${exportTarget}`,
       });
 
       res.status(201).json(schedule);
@@ -300,17 +319,28 @@ logExportSchedulesRouter.put(
       const existing = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
       if (!existing) return res.status(404).json({ error: 'Schedule not found' });
 
-      const { name, cronExpr, format, filters = {}, destinationId, enabled = true } = req.body;
-      if (destinationId) {
+      const { name, cronExpr, filters = {}, destinationId, enabled = true } = req.body;
+      const exportTarget = req.body.exportTarget || 'file';
+      const format = exportTarget === 'syslog' ? 'csv' : req.body.format;
+
+      if (exportTarget === 'file' && destinationId) {
         const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ?', [destinationId]);
         if (!dest) return res.status(400).json({ error: 'Destination not found' });
+      }
+      if (exportTarget === 'syslog') {
+        const syslogForwarder = require('../services/syslogForwarder');
+        const cfg = await syslogForwarder.getConfig();
+        if (!cfg.enabled || !cfg.host) {
+          return res.status(400).json({ error: 'Syslog forwarding is not configured — set it up under Audit Log → Syslog Settings first' });
+        }
       }
 
       await execute(
         `UPDATE log_export_schedules
-         SET name = ?, cron_expr = ?, enabled = ?, format = ?, filters = ?, destination_id = ?
+         SET name = ?, cron_expr = ?, enabled = ?, format = ?, export_target = ?, filters = ?, destination_id = ?
          WHERE id = ?`,
-        [name, cronExpr, enabled ? 1 : 0, format, JSON.stringify(filters), destinationId || null, req.params.id]
+        [name, cronExpr, enabled ? 1 : 0, format, exportTarget, JSON.stringify(filters),
+         exportTarget === 'file' ? (destinationId || null) : null, req.params.id]
       );
 
       const schedule = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
@@ -319,7 +349,7 @@ logExportSchedulesRouter.put(
       await audit.log({
         userId: req.user.id, username: req.user.username,
         action: 'log_export_schedule_update', targetType: 'log_export_schedule', targetId: req.params.id, targetName: name,
-        ipSource: req.ip, result: 'success', details: `cron=${cronExpr} format=${format}`,
+        ipSource: req.ip, result: 'success', details: `cron=${cronExpr} target=${exportTarget}`,
       });
 
       res.json(schedule);

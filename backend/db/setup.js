@@ -91,12 +91,12 @@ async function setup() {
       ip_source   VARCHAR(45),
       result      ENUM('success','failure','partial') NOT NULL,
       details     TEXT,
-      snmp_synced    TINYINT(1) DEFAULT NULL,
-      snmp_synced_at INT UNSIGNED DEFAULT NULL,
-      INDEX idx_audit_timestamp   (timestamp),
-      INDEX idx_audit_action      (action),
-      INDEX idx_audit_user        (username),
-      INDEX idx_audit_snmp_synced (snmp_synced)
+      syslog_synced    TINYINT(1) DEFAULT NULL,
+      syslog_synced_at INT UNSIGNED DEFAULT NULL,
+      INDEX idx_audit_timestamp     (timestamp),
+      INDEX idx_audit_action        (action),
+      INDEX idx_audit_user          (username),
+      INDEX idx_audit_syslog_synced (syslog_synced)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
     -- Device online/offline transition history — powers the "Device Changes"
@@ -116,7 +116,7 @@ async function setup() {
         REFERENCES devices(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-    -- Generic admin-editable settings (SNMP forwarder config today)
+    -- Generic admin-editable settings (syslog forwarder config today)
     CREATE TABLE IF NOT EXISTS system_settings (
       \`key\`      VARCHAR(100) NOT NULL PRIMARY KEY,
       value        TEXT         DEFAULT NULL,

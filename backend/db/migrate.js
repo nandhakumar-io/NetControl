@@ -512,11 +512,11 @@ run()
       console.warn('  ⚠  bruteforce_tables:', e.message);
     }
     try {
-      const { migrateSnmpTables } = require('./migrate-snmp');
-      await migrateSnmpTables();
-      console.log('  ✓ snmp_tables (system_settings, audit_log.snmp_synced)');
+      const { migrateSyslogTables } = require('./migrate-syslog');
+      await migrateSyslogTables();
+      console.log('  ✓ syslog_tables (system_settings, audit_log.syslog_synced)');
     } catch (e) {
-      console.warn('  ⚠  snmp_tables:', e.message);
+      console.warn('  ⚠  syslog_tables:', e.message);
     }
     try {
       const { migrateDeviceHistoryTables } = require('./migrate-device-history');
@@ -558,6 +558,13 @@ run()
       console.log('  ✓ scheduled_jobs (backup_schedules, log_export_schedules)');
     } catch (e) {
       console.warn('  ⚠  scheduled_jobs:', e.message);
+    }
+    try {
+      const { migrateLogExportTarget } = require('./migrate-log-export-target');
+      await migrateLogExportTarget();
+      console.log('  ✓ log_export_schedules.export_target (file/syslog)');
+    } catch (e) {
+      console.warn('  ⚠  log_export_schedules.export_target:', e.message);
     }
     console.log('\n✅ All done.\n');
   })

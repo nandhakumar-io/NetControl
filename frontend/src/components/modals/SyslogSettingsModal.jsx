@@ -1,24 +1,20 @@
 import React, { useState, useEffect } from 'react'
-import { X, Radio, Loader2, Eye, EyeOff, Zap, CheckCircle2, XCircle } from 'lucide-react'
+import { X, Radio, Loader2, Zap, CheckCircle2, XCircle } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
-
-const MASKED = '••••••••'
 
 const EMPTY = {
   enabled: false,
   host: '',
-  port: 162,
-  community: '',
-  version: '2c',
+  port: 514,
+  protocol: 'udp',
 }
 
-export default function SnmpSettingsModal({ open, onClose, onSaved }) {
+export default function SyslogSettingsModal({ open, onClose, onSaved }) {
   const [form, setForm]         = useState(EMPTY)
   const [loading, setLoading]   = useState(false)
   const [saving, setSaving]     = useState(false)
   const [testing, setTesting]   = useState(false)
-  const [showCommunity, setShowCommunity] = useState(false)
   const [testResult, setTestResult] = useState(null) // { ok, error } | null
   const [runtime, setRuntime]   = useState(null)
 
@@ -28,19 +24,18 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
     setLoading(true)
     try {
       const [{ data: cfg }, { data: status }] = await Promise.all([
-        api.get('/audit/snmp/config'),
-        api.get('/audit/snmp/status'),
+        api.get('/audit/syslog/config'),
+        api.get('/audit/syslog/status'),
       ])
       setForm({
         enabled: !!cfg.enabled,
         host: cfg.host || '',
-        port: cfg.port || 162,
-        community: cfg.communitySet ? MASKED : '',
-        version: cfg.version === '1' ? '1' : '2c',
+        port: cfg.port || 514,
+        protocol: cfg.protocol === 'tcp' ? 'tcp' : 'udp',
       })
       setRuntime(status.runtime || null)
     } catch {
-      toast.error('Failed to load SNMP configuration')
+      toast.error('Failed to load syslog configuration')
     } finally {
       setLoading(false)
     }
@@ -49,23 +44,25 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
   useEffect(() => {
     if (open) {
       setTestResult(null)
-      setShowCommunity(false)
       load()
     }
   }, [open])
 
   const handleSave = async () => {
     if (form.enabled && !form.host.trim()) {
-      toast.error('A host is required to enable SNMP forwarding')
+      toast.error('A host is required to enable syslog forwarding')
       return
     }
     setSaving(true)
     try {
-      const body = { ...form }
-      if (body.community === MASKED) delete body.community // keep existing stored value
-      const { data } = await api.put('/audit/snmp/config', body)
-      setForm(f => ({ ...f, community: data.community ? MASKED : '' }))
-      toast.success('SNMP settings saved')
+      const { data } = await api.put('/audit/syslog/config', form)
+      setForm({
+        enabled: !!data.enabled,
+        host: data.host || '',
+        port: data.port || 514,
+        protocol: data.protocol === 'tcp' ? 'tcp' : 'udp',
+      })
+      toast.success('Syslog settings saved')
       onSaved?.()
     } catch (err) {
       toast.error(err.response?.data?.error || 'Save failed')
@@ -78,10 +75,10 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
     setTesting(true)
     setTestResult(null)
     try {
-      const { data } = await api.post('/audit/snmp/test')
+      const { data } = await api.post('/audit/syslog/test')
       setTestResult(data)
-      if (data.ok) toast.success('Test trap sent successfully')
-      else toast.error(data.error || 'Test trap failed')
+      if (data.ok) toast.success('Test message sent successfully')
+      else toast.error(data.error || 'Test message failed')
     } catch (err) {
       const data = err.response?.data
       setTestResult({ ok: false, error: data?.error || 'Test failed' })
@@ -106,8 +103,8 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
                 <Radio size={16} className="text-accent-cyan" />
               </div>
               <div>
-                <h3 className="font-display" style={{ color: 'var(--text-primary)' }}>SNMP Forwarding</h3>
-                <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>Sync the audit log to your NMS as SNMP traps</p>
+                <h3 className="font-display" style={{ color: 'var(--text-primary)' }}>Syslog Forwarding</h3>
+                <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>Sync the audit log to your syslog server (RFC 5424)</p>
               </div>
             </div>
             <button onClick={onClose} className="icon-btn p-1"><X size={16} /></button>
@@ -123,8 +120,8 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
               {/* Enable toggle */}
               <div className="flex items-center justify-between px-3 py-2.5 rounded-lg glass-sm">
                 <div>
-                  <p className="text-sm font-body" style={{ color: 'var(--text-primary)' }}>Enable SNMP forwarding</p>
-                  <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>Every audit event is sent as a trap in real time</p>
+                  <p className="text-sm font-body" style={{ color: 'var(--text-primary)' }}>Enable syslog forwarding</p>
+                  <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>Every audit event is sent as a message in real time</p>
                 </div>
                 <button
                   onClick={() => set('enabled', !form.enabled)}
@@ -137,46 +134,23 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
-                  <label className="label">SNMP Server Host</label>
-                  <input className="input-field" placeholder="e.g. 10.0.0.5 or nms.local"
+                  <label className="label">Syslog Server Host</label>
+                  <input className="input-field" placeholder="e.g. 10.0.0.5 or syslog.local"
                     value={form.host} onChange={e => set('host', e.target.value)} />
                 </div>
                 <div>
                   <label className="label">Port</label>
-                  <input type="number" className="input-field" placeholder="162"
+                  <input type="number" className="input-field" placeholder="514"
                     value={form.port} onChange={e => set('port', e.target.value)} />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">Community String</label>
-                  <div className="relative">
-                    <input
-                      type={showCommunity ? 'text' : 'password'}
-                      className="input-field pr-9"
-                      placeholder="public"
-                      value={form.community}
-                      onFocus={() => { if (form.community === MASKED) set('community', '') }}
-                      onChange={e => set('community', e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowCommunity(v => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 transition-colors"
-                      style={{ color: 'var(--text-muted)' }}
-                    >
-                      {showCommunity ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <label className="label">SNMP Version</label>
-                  <select className="input-field" value={form.version} onChange={e => set('version', e.target.value)}>
-                    <option value="2c">v2c</option>
-                    <option value="1">v1</option>
-                  </select>
-                </div>
+              <div>
+                <label className="label">Transport Protocol</label>
+                <select className="input-field" value={form.protocol} onChange={e => set('protocol', e.target.value)}>
+                  <option value="udp">UDP (simple, fire-and-forget)</option>
+                  <option value="tcp">TCP (reliable, octet-counted framing)</option>
+                </select>
               </div>
 
               {/* Runtime stats */}
@@ -196,7 +170,7 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
                     : 'bg-accent-red/10 border-accent-red/25 text-accent-red'
                 }`}>
                   {testResult.ok ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
-                  {testResult.ok ? 'Test trap sent successfully' : (testResult.error || 'Test trap failed')}
+                  {testResult.ok ? 'Test message sent successfully' : (testResult.error || 'Test message failed')}
                 </div>
               )}
 
@@ -206,7 +180,7 @@ export default function SnmpSettingsModal({ open, onClose, onSaved }) {
                 className="btn-ghost justify-center disabled:opacity-40"
               >
                 {testing ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
-                Send Test Trap
+                Send Test Message
               </button>
             </div>
           )}

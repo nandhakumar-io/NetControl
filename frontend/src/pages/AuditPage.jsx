@@ -5,12 +5,14 @@ import {
   Plus, Pencil, Trash2, Clock, CheckCircle2, XCircle, AlertCircle,
   Radio, Download, FileSpreadsheet, FileText, ChevronDown, Settings2, MinusCircle,
   Calendar, X as XIcon, ArrowUpCircle, ArrowDownCircle, GitCompare, History,
-  Server, Minus, ArrowRight
+  Server, Minus, ArrowRight, Loader2
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
-import SnmpSettingsModal from '../components/modals/SnmpSettingsModal'
+import SyslogSettingsModal from '../components/modals/SyslogSettingsModal'
+import ScheduleLogExportModal from '../components/modals/ScheduleLogExportModal'
+import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import { usePermissions } from '../hooks/usePermissions'
 import { format } from 'date-fns'
 
@@ -216,8 +218,8 @@ function ExportMenu({ onExport, exporting }) {
   )
 }
 
-// ── SNMP sync badge ──────────────────────────────────────────────────────────
-function SnmpBadge({ status, isAdmin, onOpenSettings }) {
+// ── Syslog sync badge ────────────────────────────────────────────────────────
+function SyslogBadge({ status, isAdmin, onOpenSettings }) {
   if (!status) return null
   const enabled = status.enabled
 
@@ -225,7 +227,7 @@ function SnmpBadge({ status, isAdmin, onOpenSettings }) {
     <button
       onClick={onOpenSettings}
       disabled={!isAdmin}
-      title={isAdmin ? 'Configure SNMP forwarding' : (enabled ? `Forwarding to ${status.host}` : 'SNMP forwarding disabled')}
+      title={isAdmin ? 'Configure syslog forwarding' : (enabled ? `Forwarding to ${status.host}` : 'Syslog forwarding disabled')}
       className={`flex items-center gap-1.5 px-3 h-9 rounded-lg border text-sm font-body transition-colors ${
         enabled
           ? 'bg-accent-cyan/10 border-accent-cyan/25 text-accent-cyan hover:bg-accent-cyan/15'
@@ -233,7 +235,7 @@ function SnmpBadge({ status, isAdmin, onOpenSettings }) {
       } ${isAdmin ? 'cursor-pointer' : 'cursor-default'}`}
     >
       {enabled ? <Radio size={16} /> : <MinusCircle size={16} className="text-brand-400" />}
-      <span className="hidden sm:inline">{enabled ? 'SNMP Sync On' : 'SNMP Sync Off'}</span>
+      <span className="hidden sm:inline">{enabled ? 'Syslog Sync On' : 'Syslog Sync Off'}</span>
       {isAdmin && <Settings2 size={14} className="ml-0.5" style={{ color: 'var(--text-muted)' }} />}
     </button>
   )
@@ -552,6 +554,100 @@ function DeviceChangesPanel() {
   )
 }
 
+// ── Scheduled Log Exports panel ─────────────────────────────────────────────
+function ScheduleRow({ schedule, destinations, isAdmin, running, onEdit, onDelete, onToggle, onRun }) {
+  const isSyslog = schedule.export_target === 'syslog'
+  const dest = schedule.destination_id ? destinations.find(d => d.id === schedule.destination_id) : null
+  const destLabel = isSyslog ? 'Syslog server' : (dest?.name || 'Local storage')
+
+  const statusMeta = schedule.last_status === 'success'
+    ? { icon: CheckCircle2, cls: 'text-accent-green' }
+    : schedule.last_status === 'failure'
+    ? { icon: XCircle, cls: 'text-accent-red' }
+    : { icon: MinusCircle, cls: 'text-brand-400' }
+  const StatusIcon = statusMeta.icon
+
+  return (
+    <div className="flex items-center gap-4 px-4 py-3.5 rounded-xl glass border border-white/8">
+      <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${isSyslog ? 'bg-accent-cyan/10 border border-accent-cyan/20' : 'bg-brand-500/10 border border-brand-500/20'}`}>
+        {isSyslog ? <Radio size={16} className="text-accent-cyan" /> : <FileSpreadsheet size={16} className="text-brand-400" />}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-body font-medium truncate" style={{ color: 'var(--text-primary)' }}>{schedule.name}</p>
+        <p className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>{schedule.cron_expr} · {destLabel}</p>
+      </div>
+
+      <div className="hidden sm:flex items-center gap-1.5 text-xs font-body shrink-0" style={{ color: 'var(--text-muted)' }} title={schedule.last_error || undefined}>
+        <StatusIcon size={13} className={statusMeta.cls} />
+        {schedule.last_run ? relativeTime(schedule.last_run) : 'Never run'}
+      </div>
+
+      <button
+        onClick={() => onToggle(schedule)}
+        title={schedule.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+        className={`w-10 h-5 rounded-full transition-all duration-200 relative shrink-0 ${schedule.enabled ? 'bg-accent-green' : ''}`}
+        style={!schedule.enabled ? { background: 'var(--bg-surface-4)' } : {}}
+      >
+        <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ${schedule.enabled ? 'left-5' : 'left-0.5'}`} />
+      </button>
+
+      <button onClick={() => onRun(schedule)} disabled={running} title="Run now" className="icon-btn shrink-0">
+        {running ? <Loader2 size={15} className="animate-spin" /> : <Zap size={15} className="text-accent-yellow" />}
+      </button>
+
+      <button onClick={() => onEdit(schedule)} title="Edit" className="icon-btn shrink-0"><Pencil size={15} /></button>
+
+      {isAdmin && (
+        <button onClick={() => onDelete(schedule)} title="Delete" className="icon-btn shrink-0 hover:text-accent-red"><Trash2 size={15} /></button>
+      )}
+    </div>
+  )
+}
+
+function ScheduledExportsPanel({ schedules, loading, destinations, syslogConfigured, isAdmin, runningScheduleId, onCreate, onEdit, onDelete, onToggle, onRun }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
+          Recurring audit log exports — to a file destination or straight to your syslog server.
+        </p>
+        <button onClick={onCreate} className="btn-primary flex items-center gap-2">
+          <Plus size={15} /> New Schedule
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 size={20} className="animate-spin" style={{ color: 'var(--text-muted)' }} />
+        </div>
+      ) : schedules.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 gap-3 glass rounded-xl border border-white/8">
+          <Clock size={28} style={{ color: 'var(--text-faint)' }} />
+          <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>No scheduled exports yet</p>
+          <button onClick={onCreate} className="btn-ghost">Create your first schedule</button>
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {schedules.map(s => (
+            <ScheduleRow
+              key={s.id}
+              schedule={s}
+              destinations={destinations}
+              isAdmin={isAdmin}
+              running={runningScheduleId === s.id}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onToggle={onToggle}
+              onRun={onRun}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 export default function AuditPage() {
   const [logs, setLogs]               = useState([])
@@ -565,11 +661,20 @@ export default function AuditPage() {
   const [fromDate, setFromDate]       = useState('') // yyyy-mm-dd, inclusive
   const [toDate, setToDate]           = useState('') // yyyy-mm-dd, inclusive
   const [exportFormat, setExportFormat] = useState(null) // 'csv' | 'txt' | null while exporting
-  const [snmpStatus, setSnmpStatus]   = useState(null)
-  const [snmpModalOpen, setSnmpModalOpen] = useState(false)
+  const [syslogStatus, setSyslogStatus]   = useState(null)
+  const [syslogModalOpen, setSyslogModalOpen] = useState(false)
   const { isAdmin } = usePermissions()
-  const [tab, setTab] = useState('events') // 'events' | 'changes'
+  const [tab, setTab] = useState('events') // 'events' | 'changes' | 'schedules'
   const LIMIT = 25
+
+  // ── Scheduled log exports ──────────────────────────────────────────────
+  const [schedules, setSchedules]         = useState([])
+  const [schedulesLoading, setSchedulesLoading] = useState(false)
+  const [destinations, setDestinations]   = useState([])
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
+  const [editingSchedule, setEditingSchedule] = useState(null)
+  const [deleteScheduleTarget, setDeleteScheduleTarget] = useState(null)
+  const [runningScheduleId, setRunningScheduleId] = useState(null)
 
   // Local yyyy-mm-dd -> epoch seconds. `from` = start of that day, `to` = end
   // of that day (23:59:59) so a single-day range is inclusive of everything
@@ -611,22 +716,42 @@ export default function AuditPage() {
     }
   }, [page, buildParams])
 
-  const fetchSnmpStatus = useCallback(async () => {
+  const fetchSyslogStatus = useCallback(async () => {
     try {
-      const { data } = await api.get('/audit/snmp/status')
-      setSnmpStatus(data)
+      const { data } = await api.get('/audit/syslog/status')
+      setSyslogStatus(data)
     } catch { /* non-critical — badge just stays hidden */ }
   }, [])
 
+  const fetchSchedules = useCallback(async () => {
+    setSchedulesLoading(true)
+    try {
+      const { data } = await api.get('/log-export-schedules')
+      setSchedules(data)
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to load scheduled exports')
+    } finally {
+      setSchedulesLoading(false)
+    }
+  }, [])
+
+  const fetchDestinations = useCallback(async () => {
+    try {
+      const { data } = await api.get('/backup/destinations')
+      setDestinations(data)
+    } catch { /* destination picker just falls back to local-only */ }
+  }, [])
+
   useEffect(() => { fetchLogs() }, [fetchLogs])
-  useEffect(() => { fetchSnmpStatus() }, [fetchSnmpStatus])
+  useEffect(() => { fetchSyslogStatus() }, [fetchSyslogStatus])
+  useEffect(() => { if (tab === 'schedules') { fetchSchedules(); fetchDestinations() } }, [tab, fetchSchedules, fetchDestinations])
   useEffect(() => { setPage(1) }, [search, actionFilter, resultFilter, fromDate, toDate])
 
   const totalPages = Math.max(1, Math.ceil(total / LIMIT))
 
-  // The Sync column only earns its place once SNMP forwarding is (or has
+  // The Sync column only earns its place once syslog forwarding is (or has
   // ever been) relevant — otherwise it's a column of dashes wasting space.
-  const showSync = !!(snmpStatus?.enabled || tallies.synced > 0)
+  const showSync = !!(syslogStatus?.enabled || tallies.synced > 0)
   const gridCols = showSync
     ? '190px 160px 150px 1fr 150px 110px 76px'
     : '200px 175px 160px 1fr 160px 110px'
@@ -668,9 +793,9 @@ export default function AuditPage() {
         iconBg="bg-accent-orange/15 border-accent-orange/25"
         actions={
           <>
-            <SnmpBadge status={snmpStatus} isAdmin={isAdmin} onOpenSettings={() => setSnmpModalOpen(true)} />
+            <SyslogBadge status={syslogStatus} isAdmin={isAdmin} onOpenSettings={() => setSyslogModalOpen(true)} />
             <ExportMenu onExport={handleExport} exporting={!!exportFormat} />
-            <button onClick={() => { fetchLogs(); fetchSnmpStatus() }} className="btn-ghost" disabled={loading}>
+            <button onClick={() => { fetchLogs(); fetchSyslogStatus() }} className="btn-ghost" disabled={loading}>
               <RefreshCw size={16} className={`text-brand-400 ${loading ? 'animate-spin' : ''}`} />
               Refresh
             </button>
@@ -678,10 +803,10 @@ export default function AuditPage() {
         }
       />
 
-      <SnmpSettingsModal
-        open={snmpModalOpen}
-        onClose={() => setSnmpModalOpen(false)}
-        onSaved={fetchSnmpStatus}
+      <SyslogSettingsModal
+        open={syslogModalOpen}
+        onClose={() => setSyslogModalOpen(false)}
+        onSaved={fetchSyslogStatus}
       />
 
       {/* ── Security notice ─────────────────────────────────────────────── */}
@@ -717,10 +842,48 @@ export default function AuditPage() {
         >
           <GitCompare size={16} /> Device Changes
         </button>
+        <button
+          onClick={() => setTab('schedules')}
+          className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
+            tab === 'schedules'
+              ? 'bg-brand-500/15 border-brand-500/30 text-brand-400'
+              : 'border-white/8 hover:bg-surface-3'
+          }`}
+          style={tab === 'schedules' ? {} : { color: 'var(--text-secondary)' }}
+        >
+          <Clock size={16} /> Scheduled Exports
+        </button>
       </div>
 
       {tab === 'changes' ? (
         <DeviceChangesPanel />
+      ) : tab === 'schedules' ? (
+        <ScheduledExportsPanel
+          schedules={schedules}
+          loading={schedulesLoading}
+          destinations={destinations}
+          syslogConfigured={!!syslogStatus?.enabled}
+          isAdmin={isAdmin}
+          runningScheduleId={runningScheduleId}
+          onCreate={() => { setEditingSchedule(null); setScheduleModalOpen(true) }}
+          onEdit={(s) => { setEditingSchedule(s); setScheduleModalOpen(true) }}
+          onDelete={(s) => setDeleteScheduleTarget(s)}
+          onToggle={async (s) => {
+            try {
+              await api.patch(`/log-export-schedules/${s.id}/toggle`)
+              fetchSchedules()
+            } catch (err) { toast.error(err.response?.data?.error || 'Failed to toggle schedule') }
+          }}
+          onRun={async (s) => {
+            setRunningScheduleId(s.id)
+            try {
+              await api.post(`/log-export-schedules/${s.id}/run`)
+              toast.success(`"${s.name}" started`)
+              fetchSchedules()
+            } catch (err) { toast.error(err.response?.data?.error || 'Failed to run schedule') }
+            finally { setRunningScheduleId(null) }
+          }}
+        />
       ) : (
       <>
       {/* ── Filters ─────────────────────────────────────────────────────── */}
@@ -785,7 +948,7 @@ export default function AuditPage() {
               <span className="flex items-center gap-1.5 text-sm text-accent-red font-body">
                 <XCircle size={14} /> {tallies.failure} failed
               </span>
-              {snmpStatus?.enabled && (
+              {syslogStatus?.enabled && (
                 <span className="flex items-center gap-1.5 text-sm text-accent-cyan font-body">
                   <Radio size={14} /> {tallies.synced} synced
                 </span>
@@ -916,18 +1079,18 @@ export default function AuditPage() {
                     </span>
                   )}
 
-                  {/* Sync — SNMP trap forwarding status for this event */}
+                  {/* Sync — syslog forwarding status for this event */}
                   {showSync && (
-                    log.snmp_synced === 1 || log.snmp_synced === true ? (
-                      <span title="Forwarded to SNMP server" className="inline-flex items-center gap-1 text-accent-cyan">
+                    log.syslog_synced === 1 || log.syslog_synced === true ? (
+                      <span title="Forwarded to syslog server" className="inline-flex items-center gap-1 text-accent-cyan">
                         <Radio size={16} />
                       </span>
-                    ) : log.snmp_synced === 0 || log.snmp_synced === false ? (
-                      <span title="SNMP forward failed" className="inline-flex items-center gap-1 text-accent-red">
+                    ) : log.syslog_synced === 0 || log.syslog_synced === false ? (
+                      <span title="Syslog forward failed" className="inline-flex items-center gap-1 text-accent-red">
                         <XCircle size={16} />
                       </span>
                     ) : (
-                      <span title="Not forwarded (SNMP disabled or not yet attempted)" className="inline-flex items-center gap-1 text-brand-400/70">
+                      <span title="Not forwarded (syslog disabled or not yet attempted)" className="inline-flex items-center gap-1 text-brand-400/70">
                         <MinusCircle size={16} />
                       </span>
                     )
@@ -985,6 +1148,29 @@ export default function AuditPage() {
       )}
       </>
       )}
+
+      <ScheduleLogExportModal
+        open={scheduleModalOpen}
+        onClose={() => setScheduleModalOpen(false)}
+        onSaved={fetchSchedules}
+        destinations={destinations}
+        syslogConfigured={!!syslogStatus?.enabled}
+        editing={editingSchedule}
+      />
+
+      <ActionConfirmModal
+        open={!!deleteScheduleTarget}
+        onClose={() => setDeleteScheduleTarget(null)}
+        title="Delete Scheduled Export"
+        description={`This will permanently delete "${deleteScheduleTarget?.name}". This action cannot be undone.`}
+        danger
+        onConfirm={async (pin) => {
+          await api.delete(`/log-export-schedules/${deleteScheduleTarget.id}`, { data: { actionPin: pin } })
+          toast.success('Schedule deleted')
+          fetchSchedules()
+          setDeleteScheduleTarget(null)
+        }}
+      />
     </div>
   )
 }

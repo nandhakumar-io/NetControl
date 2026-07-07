@@ -207,9 +207,39 @@ function unregisterBackupSchedule(id) {
 // filters — then hands the bytes to a destination (or the local backup
 // store) exactly like a backup archive would be.
 async function runLogExportSchedule(schedule) {
-  const { generateAuditExport } = require('../routes/audit');
+  const { generateAuditExport, queryAuditRows } = require('../routes/audit');
   try {
     const filters = typeof schedule.filters === 'string' ? JSON.parse(schedule.filters || '{}') : (schedule.filters || {});
+    const exportTarget = schedule.export_target || 'file';
+
+    // ── Syslog target: no file at all, just stream each matching audit
+    //    row to the configured syslog server as its own message. ───────────
+    if (exportTarget === 'syslog') {
+      const syslogForwarder = require('./syslogForwarder');
+      const rows = await queryAuditRows(filters);
+      const { sent, failed, total } = await syslogForwarder.exportEntries(rows);
+
+      await execute(
+        `UPDATE log_export_schedules SET last_run = ?, last_status = 'success', last_error = NULL WHERE id = ?`,
+        [Math.floor(Date.now() / 1000), schedule.id]
+      );
+
+      await audit.log({
+        username: 'scheduler',
+        action: 'log_export_schedule_run',
+        targetType: 'log_export_schedule',
+        targetId: schedule.id,
+        targetName: schedule.name,
+        ipSource: 'scheduler',
+        result: failed > 0 ? 'partial' : 'success',
+        details: `${sent}/${total} rows sent to syslog server${failed ? `, ${failed} failed` : ''}`,
+      });
+      return;
+    }
+
+    // ── File target (existing behavior): render + write to a
+    //    backup_destinations row, or the local store when destination_id
+    //    is NULL. ─────────────────────────────────────────────────────────
     const format = schedule.format || 'csv';
     const { body, filename } = await generateAuditExport(filters, format);
 
