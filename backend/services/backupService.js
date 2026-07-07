@@ -92,6 +92,37 @@ async function browse(relPath) {
   };
 }
 
+// ── Archive creation (streaming, destination-agnostic) ──────────────────────────
+// Used by routes/backup.js together with services/backupDestinations.js so a
+// local source can be sent to ANY destination (local / S3 / remote folder),
+// not just BACKUP_STORE_DIR. createArchive() below (local source → local
+// disk only) is kept as-is for anything still calling it directly.
+function buildLocalArchiveStream({ sourcePath, format }) {
+  const { PassThrough } = require('stream');
+  const { abs: sourceAbs, rel: sourceRel } = resolveSafePath(sourcePath);
+  if (!Object.prototype.hasOwnProperty.call(FORMAT_CONFIG, format)) {
+    throw new BackupPathError(`Unsupported format: ${format}`);
+  }
+  const stat = fs.statSync(sourceAbs, { throwIfNoEntry: false });
+  if (!stat) throw new BackupPathError('Source path does not exist');
+  if (stat.isDirectory() && EXCLUDED_DIR_NAMES.has(path.basename(sourceAbs))) {
+    throw new BackupPathError('This folder cannot be backed up');
+  }
+
+  const cfg = FORMAT_CONFIG[format];
+  const archiver = require('archiver');
+  const archive = archiver(cfg.archiverFormat, cfg.archiverOpts);
+  const out = new PassThrough();
+  archive.on('warning', (err) => { if (err.code !== 'ENOENT') out.destroy(err); });
+  archive.on('error', (err) => out.destroy(err));
+  archive.pipe(out);
+  if (stat.isDirectory()) archive.directory(sourceAbs, path.basename(sourceAbs));
+  else archive.file(sourceAbs, { name: path.basename(sourceAbs) });
+  archive.finalize();
+
+  return { stream: out, sourceRel, sourceType: stat.isDirectory() ? 'folder' : 'file' };
+}
+
 // ── Archive creation ───────────────────────────────────────────────────────────
 const FORMAT_CONFIG = {
   zip:     { ext: 'zip',     archiverFormat: 'zip', archiverOpts: { zlib: { level: 9 } } },
@@ -175,8 +206,34 @@ function archiveFilePath(archiveName) {
   return path.join(BACKUP_STORE_DIR, archiveName);
 }
 
+// ── Local disk info — parity with remoteBrowse.listDisks() for remote devices ──
+// Reports usage for whatever filesystem BACKUP_ROOT lives on, using the same
+// `df -PB1` parsing approach as services/remoteBrowse.js (byte-exact, one
+// line per mount, no locale/column-width surprises).
+function getLocalDiskInfo() {
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync(`df -PB1 "${BACKUP_ROOT}" 2>/dev/null`).toString();
+    const line = out.trim().split('\n')[1]; // header, then the one line we asked for
+    if (!line) return null;
+    const parts = line.trim().split(/\s+/);
+    const [filesystem, sizeStr, usedStr, availStr, pctStr, ...mountParts] = parts;
+    return {
+      filesystem,
+      mount: mountParts.join(' ') || '/',
+      sizeBytes: parseInt(sizeStr, 10) || 0,
+      usedBytes: parseInt(usedStr, 10) || 0,
+      availBytes: parseInt(availStr, 10) || 0,
+      usedPct: parseInt(pctStr, 10) || 0,
+    };
+  } catch {
+    return null; // e.g. Windows host — just hide disk-usage stats, browsing still works
+  }
+}
+
 module.exports = {
   BACKUP_ROOT, BACKUP_STORE_DIR, RETENTION_COUNT,
   BackupPathError,
-  browse, createArchive, pruneOldArchives, archiveFilePath,
+  browse, createArchive, buildLocalArchiveStream, pruneOldArchives, archiveFilePath,
+  FORMAT_CONFIG, getLocalDiskInfo,
 };

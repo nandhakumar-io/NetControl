@@ -1,24 +1,31 @@
 // pages/BackupsPage.jsx — File/folder backup: browse source, create archive, list/download/delete
 //
 // Talks to routes/backup.js (already mounted at /api/backup in server.js):
-//   GET    /api/backup/browse?path=   — browse BACKUP_ROOT to pick a source
-//   GET    /api/backup                — list backup rows, newest first
-//   POST   /api/backup                — create archive (requires actionPin)
-//   GET    /api/backup/:id/download   — download a completed archive
-//   DELETE /api/backup/:id            — admin-only delete
+//   GET    /api/backup/devices                       — sources: local server + registered devices
+//   GET    /api/backup/devices/:id/disks              — disks/mounts on a source
+//   GET    /api/backup/devices/:id/browse?mount&path  — browse a directory on a source
+//   GET    /api/backup/destinations                   — saved destinations (local always first)
+//   POST   /api/backup/destinations                   — add S3/remote-folder destination (admin)
+//   DELETE /api/backup/destinations/:id                — remove a destination (admin)
+//   GET    /api/backup                                — list backup rows, newest first
+//   POST   /api/backup                                — create archive (requires actionPin)
+//   GET    /api/backup/:id/download                    — download a completed (local) archive
+//   DELETE /api/backup/:id                              — admin-only delete
 import React, { useState, useEffect, useCallback } from 'react'
 import {
-  Archive, Folder, FileText, ChevronRight, Home, Shield, Loader2,
+  Archive, Folder, FileText, ChevronRight, ChevronDown, Home, Shield, Loader2,
   Download, Trash2, RefreshCw, CheckCircle2, XCircle, Clock, HardDrive,
+  Server, Plus, Cloud, FolderInput, HardDriveDownload, X, Settings2, Pencil,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
+import BackupDestinationModal from '../components/modals/BackupDestinationModal'
 import { usePermissions } from '../hooks/usePermissions'
 
-const FORMATS = [
+const LOCAL_FORMATS = [
   ['zip', 'ZIP'],
   ['tar', 'TAR'],
   ['tar.gz', 'TAR.GZ'],
@@ -43,6 +50,12 @@ const STATUS_META = {
   completed: { icon: CheckCircle2, color: 'text-accent-green', bg: 'bg-accent-green/10 border-accent-green/20' },
   pending:   { icon: Loader2,      color: 'text-accent-yellow', bg: 'bg-accent-yellow/10 border-accent-yellow/20' },
   failed:    { icon: XCircle,      color: 'text-accent-red',    bg: 'bg-accent-red/10 border-accent-red/20' },
+}
+
+const DEST_TYPE_META = {
+  local:         { icon: HardDriveDownload, label: 'Local' },
+  s3:            { icon: Cloud,             label: 'S3' },
+  remote_folder: { icon: FolderInput,       label: 'Remote folder' },
 }
 
 function StatusBadge({ status }) {
@@ -102,6 +115,34 @@ function BrowseRow({ item, selected, onSelect, onOpen }) {
   )
 }
 
+function formatDiskLabel(disk) {
+  if (!disk) return ''
+  const used = disk.sizeBytes ? Math.round((disk.usedBytes / disk.sizeBytes) * 100) : 0
+  return `${disk.mount} — ${formatBytes(disk.usedBytes)} / ${formatBytes(disk.sizeBytes)} (${used}%)`
+}
+
+function Collapsible({ title, icon: Icon, badge, defaultOpen = true, children }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className="rounded-lg border" style={{ borderColor: 'var(--border-subtle)' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-body font-semibold uppercase tracking-wide transition-colors"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        <span className="flex items-center gap-1.5">
+          {Icon && <Icon size={12} />} {title}
+          {badge != null && (
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] normal-case font-mono" style={{ background: 'var(--bg-input)', color: 'var(--text-muted)' }}>{badge}</span>
+          )}
+        </span>
+        <ChevronDown size={13} className={`transition-transform duration-150 ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && <div className="px-3 pb-3 space-y-2">{children}</div>}
+    </div>
+  )
+}
+
 export default function BackupsPage() {
   const { isAdmin } = usePermissions()
 
@@ -109,16 +150,32 @@ export default function BackupsPage() {
   const [loading, setLoading]     = useState(true)
   const [creating, setCreating]   = useState(false)
 
-  const [browsePath, setBrowsePath] = useState('')
+  // ── Source: device + disk + browse ──────────────────────────────────────
+  const [devices, setDevices]         = useState([])
+  const [deviceId, setDeviceId]       = useState('local')
+  const [disks, setDisks]             = useState([])
+  const [disksLoading, setDisksLoading] = useState(false)
+  const [mount, setMount]             = useState(null)
+
+  const [browsePath, setBrowsePath]   = useState('')
   const [browseItems, setBrowseItems] = useState([])
   const [browseLoading, setBrowseLoading] = useState(true)
-  const [selected, setSelected]   = useState(null)
+  const [selected, setSelected]       = useState(null)
+
+  // ── Destination ───────────────────────────────────────────────────────────
+  const [destinations, setDestinations] = useState([])
+  const [destinationId, setDestinationId] = useState(null) // null = local
+  const [showDestModal, setShowDestModal] = useState(false)
+  const [editingDestination, setEditingDestination] = useState(null)
 
   const [format, setFormat]       = useState('zip')
   const [label, setLabel]         = useState('')
   const [pin, setPin]             = useState('')
   const [deleteTarget, setDeleteTarget] = useState(null)
 
+  const isRemoteSource = deviceId !== 'local'
+
+  // ── Fetchers ────────────────────────────────────────────────────────────
   const fetchBackups = useCallback(async () => {
     try {
       const { data } = await api.get('/backup')
@@ -127,21 +184,79 @@ export default function BackupsPage() {
     finally { setLoading(false) }
   }, [])
 
-  const fetchBrowse = useCallback(async (p) => {
+  const fetchDevices = useCallback(async () => {
+    try {
+      const { data } = await api.get('/backup/devices')
+      setDevices(data)
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed to load devices') }
+  }, [])
+
+  const fetchDestinations = useCallback(async () => {
+    try {
+      const { data } = await api.get('/backup/destinations')
+      setDestinations(data)
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed to load destinations') }
+  }, [])
+
+  const fetchBrowse = useCallback(async (devId, mnt, p) => {
     setBrowseLoading(true)
     try {
-      const { data } = await api.get('/backup/browse', { params: { path: p } })
+      const { data } = await api.get(`/backup/devices/${devId}/browse`, { params: { mount: mnt || undefined, path: p } })
       setBrowseItems(data.items)
       setBrowsePath(data.path || '')
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to browse')
+      setBrowseItems([])
     } finally { setBrowseLoading(false) }
   }, [])
 
-  useEffect(() => { fetchBackups() }, [fetchBackups])
-  useEffect(() => { fetchBrowse('') }, [fetchBrowse])
+  const fetchDisks = useCallback(async (devId) => {
+    setDisksLoading(true)
+    try {
+      const { data } = await api.get(`/backup/devices/${devId}/disks`)
+      setDisks(data)
+      const firstMount = data[0]?.mount ?? null
+      setMount(firstMount)
+      return firstMount
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to read disks')
+      setDisks([])
+      return null
+    } finally { setDisksLoading(false) }
+  }, [])
 
-  const canSubmit = !!selected && pin.trim().length > 0 && !creating
+  useEffect(() => { fetchBackups(); fetchDevices(); fetchDestinations() }, [fetchBackups, fetchDevices, fetchDestinations])
+
+  // When the source device changes, reload its disks, then browse the first
+  // disk's root. Local server keeps working exactly as before (mount is
+  // irrelevant to its browse endpoint). Devices without SSH configured
+  // (most Windows/agent-managed fleets) can't be browsed yet — skip the
+  // doomed network calls and show an explanatory message instead.
+  useEffect(() => {
+    setSelected(null)
+    const dev = devices.find(d => d.id === deviceId)
+    if (dev && !dev.sshCapable) {
+      setDisks([]); setMount(null); setBrowseItems([]); setBrowsePath(''); setBrowseLoading(false)
+      return
+    }
+    (async () => {
+      const firstMount = await fetchDisks(deviceId)
+      fetchBrowse(deviceId, firstMount, '')
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, devices])
+
+  const handleMountChange = (m) => {
+    setMount(m); setSelected(null)
+    fetchBrowse(deviceId, m, '')
+  }
+
+  const handleNavigate = (p) => {
+    setSelected(null)
+    fetchBrowse(deviceId, mount, p)
+  }
+
+  const canSubmit = !!selected && pin.trim().length > 0 && !creating && (!isRemoteSource || mount)
 
   const handleCreate = async () => {
     if (!canSubmit) return
@@ -149,8 +264,11 @@ export default function BackupsPage() {
     try {
       const { data } = await api.post('/backup', {
         sourcePath: selected.path,
+        deviceId: isRemoteSource ? deviceId : undefined,
+        mount: isRemoteSource ? mount : undefined,
         format,
         label: label.trim() || undefined,
+        destinationId: destinationId || undefined,
         actionPin: pin,
       })
       toast.success(`Backup created — ${data.archiveName}`)
@@ -162,7 +280,10 @@ export default function BackupsPage() {
   }
 
   const handleDownload = (row) => {
-    // Auth header is required, so route through axios (blob) rather than a bare <a href>.
+    if (row.destination_type && row.destination_type !== 'local') {
+      toast.error(`This backup was written to ${row.destination_type === 's3' ? 'S3' : 'a remote folder'} — download it from there.`)
+      return
+    }
     api.get(`/backup/${row.id}/download`, { responseType: 'blob' })
       .then(({ data }) => {
         const url = window.URL.createObjectURL(data)
@@ -183,18 +304,31 @@ export default function BackupsPage() {
     } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
   }
 
+  const handleDeleteDestination = async (dest) => {
+    if (!window.confirm(`Remove destination "${dest.name}"? Existing backups already written there are unaffected.`)) return
+    try {
+      await api.delete(`/backup/destinations/${dest.id}`)
+      toast.success('Destination removed')
+      if (destinationId === dest.id) setDestinationId(null)
+      fetchDestinations()
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed to remove destination') }
+  }
+
   const completed = backups.filter(b => b.status === 'completed')
-  const totalBytes = completed.reduce((sum, b) => sum + (b.size_bytes || 0), 0)
+  const totalBytes = completed.filter(b => (b.destination_type || 'local') === 'local').reduce((sum, b) => sum + (b.size_bytes || 0), 0)
   const failed = backups.filter(b => b.status === 'failed').length
+
+  const currentDisk = disks.find(d => d.mount === mount)
+  const selectedDestination = destinations.find(d => d.id === destinationId) || destinations.find(d => d.id === null)
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <PageHeader
         icon={Archive}
         title="Backups"
-        description="Archive files or folders from the sanctioned backup root and manage retention"
+        description="Archive files or folders from any device, to local storage, S3, or another device"
         actions={
-          <button onClick={() => { fetchBackups(); fetchBrowse(browsePath) }} className="btn-ghost flex items-center gap-2">
+          <button onClick={() => { fetchBackups(); fetchDevices(); fetchDestinations(); fetchBrowse(deviceId, mount, browsePath) }} className="btn-ghost flex items-center gap-2">
             <RefreshCw size={14} /> Refresh
           </button>
         }
@@ -207,39 +341,90 @@ export default function BackupsPage() {
           iconColor="text-accent-green" iconBg="bg-accent-green/10 border-accent-green/20" accent="text-accent-green" />
         <StatCard icon={XCircle} label="Failed" value={failed}
           iconColor="text-accent-red" iconBg="bg-accent-red/10 border-accent-red/20" accent={failed ? 'text-accent-red' : ''} />
-        <StatCard icon={HardDrive} label="Stored" value={formatBytes(totalBytes)}
+        <StatCard icon={HardDrive} label="Stored locally" value={formatBytes(totalBytes)}
           iconColor="text-accent-purple" iconBg="bg-accent-purple/10 border-accent-purple/20" />
-
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* LEFT: Browser + create */}
+        {/* LEFT: Source + Destination + create */}
         <div className="lg:col-span-1 space-y-5">
           <div className="card space-y-3">
-            <h2 className="text-xs font-body font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Source</h2>
-            <Breadcrumbs path={browsePath} onNavigate={(p) => { fetchBrowse(p); setSelected(null) }} />
-            <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-              {browseLoading ? (
-                Array.from({ length: 5 }).map((_, i) => (
-                  <div key={i} className="h-9 rounded-lg animate-pulse" style={{ background: 'var(--bg-input)' }} />
-                ))
-              ) : browseItems.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-8 gap-2" style={{ color: 'var(--text-muted)' }}>
-                  <Folder size={22} className="opacity-30" />
-                  <p className="text-xs font-body">Empty directory</p>
-                </div>
-              ) : (
-                browseItems.map(item => (
-                  <BrowseRow
-                    key={item.path}
-                    item={item}
-                    selected={selected}
-                    onSelect={setSelected}
-                    onOpen={(p) => { fetchBrowse(p); setSelected(null) }}
-                  />
-                ))
-              )}
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-body font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Source</h2>
             </div>
+
+            <div className="space-y-1.5">
+              <label className="label flex items-center gap-1.5"><Server size={11} /> Device</label>
+              <select className="input-field" value={deviceId} onChange={e => setDeviceId(e.target.value)}>
+                {devices.map(d => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}{d.ip_address ? ` (${d.ip_address})` : ''}{!d.sshCapable ? ' — no SSH access' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {(() => {
+              const dev = devices.find(d => d.id === deviceId)
+              if (dev && !dev.sshCapable) {
+                return (
+                  <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-input)' }}>
+                    <Server size={14} className="text-accent-yellow shrink-0 mt-0.5" />
+                    <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
+                      <span style={{ color: 'var(--text-primary)' }}>{dev.name}</span> doesn't have SSH credentials configured, so it can't be browsed as a backup source yet.
+                      {dev.os_type === 'windows'
+                        ? ' Windows devices are managed over WinRM/agent here — SSH-based backup sources currently support Linux devices only.'
+                        : ' Add SSH credentials for it under Devices to use it here.'}
+                    </p>
+                  </div>
+                )
+              }
+              return null
+            })()}
+
+            {(() => {
+              const dev = devices.find(d => d.id === deviceId)
+              if (dev && !dev.sshCapable) return null
+              return (
+                <Collapsible title="Browse source" icon={Folder} defaultOpen badge={selected ? '1 selected' : null}>
+                  {(disksLoading || disks.length > 0) && (
+                    <div className="space-y-1.5">
+                      <label className="label flex items-center gap-1.5"><HardDrive size={11} /> Disk</label>
+                      {disksLoading ? (
+                        <div className="h-9 rounded-lg animate-pulse" style={{ background: 'var(--bg-input)' }} />
+                      ) : (
+                        <select className="input-field font-mono text-xs" value={mount || ''} onChange={e => handleMountChange(e.target.value)}>
+                          {disks.map(d => <option key={d.mount} value={d.mount}>{formatDiskLabel(d)}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  )}
+                  <Breadcrumbs path={browsePath} onNavigate={handleNavigate} />
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                    {browseLoading ? (
+                      Array.from({ length: 5 }).map((_, i) => (
+                        <div key={i} className="h-9 rounded-lg animate-pulse" style={{ background: 'var(--bg-input)' }} />
+                      ))
+                    ) : browseItems.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-8 gap-2" style={{ color: 'var(--text-muted)' }}>
+                        <Folder size={22} className="opacity-30" />
+                        <p className="text-xs font-body">Empty directory</p>
+                      </div>
+                    ) : (
+                      browseItems.map(item => (
+                        <BrowseRow
+                          key={item.path}
+                          item={item}
+                          selected={selected}
+                          onSelect={setSelected}
+                          onOpen={handleNavigate}
+                        />
+                      ))
+                    )}
+                  </div>
+                </Collapsible>
+              )
+            })()}
           </div>
 
           <div className="card space-y-4">
@@ -255,11 +440,48 @@ export default function BackupsPage() {
             <div className="space-y-1.5">
               <label className="label">Format</label>
               <div className="flex gap-1.5 flex-wrap">
-                {FORMATS.map(([val, lbl]) => (
+                {LOCAL_FORMATS.map(([val, lbl]) => (
                   <button key={val} onClick={() => setFormat(val)}
                     className={`chip ${format === val ? 'chip-selected' : ''}`}>{lbl}</button>
                 ))}
               </div>
+              {isRemoteSource && format === 'zip' && (
+                <p className="text-xs font-body px-1" style={{ color: 'var(--text-muted)' }}>
+                  Needs the <span className="font-mono">zip</span> package installed on the source device. If it's missing, the backup will fail with a clear error — pick TAR or TAR.GZ instead.
+                </p>
+              )}
+            </div>
+
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="label mb-0">Destination</label>
+                {isAdmin && (
+                  <button onClick={() => setShowDestModal(true)} className="text-xs font-body flex items-center gap-1 text-brand-400 hover:text-brand-300 transition-colors">
+                    <Plus size={11} /> Add
+                  </button>
+                )}
+              </div>
+              <select className="input-field" value={destinationId || ''} onChange={e => setDestinationId(e.target.value || null)}>
+                {destinations.map(d => <option key={d.id ?? 'local'} value={d.id ?? ''}>{d.name}</option>)}
+              </select>
+              {isAdmin && destinations.filter(d => d.id).length > 0 && (
+                <Collapsible title="Manage saved destinations" icon={Settings2} defaultOpen={false} badge={destinations.filter(d => d.id).length}>
+                  <div className="flex flex-wrap gap-1.5">
+                    {destinations.filter(d => d.id).map(d => {
+                      const meta = DEST_TYPE_META[d.type] || DEST_TYPE_META.local
+                      const Icon = meta.icon
+                      return (
+                        <span key={d.id} className="inline-flex items-center gap-1 pl-2 pr-1 py-1 rounded-lg text-xs font-mono border" style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}>
+                          <Icon size={10} /> {d.name}
+                          <button onClick={() => setEditingDestination(d)} className="p-0.5 rounded hover:text-brand-400 transition-colors" title="Edit"><Pencil size={10} /></button>
+                          <button onClick={() => handleDeleteDestination(d)} className="p-0.5 rounded hover:text-accent-red transition-colors" title="Delete"><X size={10} /></button>
+                        </span>
+                      )
+                    })}
+                  </div>
+                </Collapsible>
+              )}
             </div>
 
             <div className="space-y-1.5">
@@ -304,35 +526,44 @@ export default function BackupsPage() {
             </div>
           ) : (
             <div className="space-y-2 max-h-[36rem] overflow-y-auto pr-1">
-              {backups.map(b => (
-                <div key={b.id} className="flex items-center gap-3 px-3 py-2.5 rounded-lg border" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-input)' }}>
-                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-brand-500/10 border border-brand-500/20">
-                    {b.source_type === 'folder' ? <Folder size={14} className="text-brand-400" /> : <FileText size={14} className="text-brand-400" />}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-body font-medium truncate" style={{ color: 'var(--text-primary)' }}>
-                      {b.archive_name || b.source_path}
-                    </p>
-                    <p className="text-xs font-mono truncate flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
-                      <Clock size={10} /> {formatDate(b.created_at)} · {b.format} · {formatBytes(b.size_bytes)} · by {b.created_by_name || 'unknown'}
-                    </p>
-                    {b.status === 'failed' && b.error_message && (
-                      <p className="text-xs font-mono truncate text-accent-red mt-0.5">{b.error_message}</p>
+              {backups.map(b => {
+                const destMeta = DEST_TYPE_META[b.destination_type || 'local']
+                const DestIcon = destMeta.icon
+                return (
+                  <div key={b.id} className="flex items-center gap-3 px-3 py-2.5 rounded-lg border" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-input)' }}>
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-brand-500/10 border border-brand-500/20">
+                      {b.source_type === 'folder' ? <Folder size={14} className="text-brand-400" /> : <FileText size={14} className="text-brand-400" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-body font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+                        {b.archive_name || b.source_path}
+                      </p>
+                      <p className="text-xs font-mono truncate flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
+                        <Clock size={10} /> {formatDate(b.created_at)} · {b.format} · {formatBytes(b.size_bytes)} · by {b.created_by_name || 'unknown'}
+                      </p>
+                      <p className="text-xs font-mono truncate flex items-center gap-1.5 mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                        <Server size={10} /> {b.device_name || 'This server'}
+                        <span className="opacity-40">→</span>
+                        <DestIcon size={10} /> {b.destination_name || destMeta.label}
+                      </p>
+                      {b.status === 'failed' && b.error_message && (
+                        <p className="text-xs font-mono truncate text-accent-red mt-0.5">{b.error_message}</p>
+                      )}
+                    </div>
+                    <StatusBadge status={b.status} />
+                    {b.status === 'completed' && (b.destination_type || 'local') === 'local' && (
+                      <button onClick={() => handleDownload(b)} className="p-1.5 rounded-lg transition-colors hover:text-accent-green" style={{ color: 'var(--text-muted)' }} title="Download">
+                        <Download size={14} />
+                      </button>
+                    )}
+                    {isAdmin && (
+                      <button onClick={() => setDeleteTarget(b)} className="p-1.5 rounded-lg transition-colors hover:text-accent-red" style={{ color: 'var(--text-muted)' }} title="Delete">
+                        <Trash2 size={14} />
+                      </button>
                     )}
                   </div>
-                  <StatusBadge status={b.status} />
-                  {b.status === 'completed' && (
-                    <button onClick={() => handleDownload(b)} className="p-1.5 rounded-lg transition-colors hover:text-accent-green" style={{ color: 'var(--text-muted)' }} title="Download">
-                      <Download size={14} />
-                    </button>
-                  )}
-                  {isAdmin && (
-                    <button onClick={() => setDeleteTarget(b)} className="p-1.5 rounded-lg transition-colors hover:text-accent-red" style={{ color: 'var(--text-muted)' }} title="Delete">
-                      <Trash2 size={14} />
-                    </button>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -343,8 +574,16 @@ export default function BackupsPage() {
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDelete}
         title="Delete Backup"
-        description={`This will permanently remove "${deleteTarget?.archive_name}" from disk.`}
+        description={`This will permanently remove "${deleteTarget?.archive_name}" ${(deleteTarget?.destination_type || 'local') === 'local' ? 'from disk' : 'from NetControl\u2019s records (the file itself stays at its destination)'}.`}
         danger
+      />
+
+      <BackupDestinationModal
+        open={showDestModal || !!editingDestination}
+        editing={editingDestination}
+        onClose={() => { setShowDestModal(false); setEditingDestination(null) }}
+        onCreated={() => fetchDestinations()}
+        devices={devices}
       />
     </div>
   )
