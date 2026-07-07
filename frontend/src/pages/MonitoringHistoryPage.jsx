@@ -17,7 +17,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
   ArrowLeft, Download, RefreshCw, Cpu, MemoryStick, HardDrive, Network,
-  ArrowDown, ArrowUp, ChevronDown, GitCompare, X, Calendar, Server,
+  ArrowDown, ArrowUp, ChevronDown, GitCompare, X, Calendar, Server, Users,
 } from 'lucide-react'
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip,
@@ -175,6 +175,16 @@ export default function MonitoringHistoryPage() {
   const [deviceId, setDeviceId] = useState(searchParams.get('device') || '')
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false)
 
+  // 'device' = single-device history (original view), 'group' = combined
+  // trend across every device in a group, using the group history endpoints
+  // that were already built into the backend (see routes/metrics.js) but
+  // not yet surfaced anywhere in the UI.
+  const [viewMode, setViewMode] = useState(searchParams.get('mode') === 'group' ? 'group' : 'device')
+  const [groups, setGroups] = useState([])
+  const [groupId, setGroupId] = useState(searchParams.get('group') || '')
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false)
+  const [groupDevicesSummary, setGroupDevicesSummary] = useState([])
+
   const [range, setRange] = useState('24h') // '1h'|'24h'|'7d'|'30d'|'custom'
   const [customFrom, setCustomFrom] = useState(toLocalInput(nowSec() - 86400))
   const [customTo, setCustomTo] = useState(toLocalInput(nowSec()))
@@ -199,10 +209,15 @@ export default function MonitoringHistoryPage() {
         setSearchParams(prev => { prev.set('device', data[0].id); return prev }, { replace: true })
       }
     }).catch(() => toast.error('Failed to load devices'))
+    api.get('/groups').then(({ data }) => {
+      setGroups(data || [])
+      if (!groupId && data?.length) setGroupId(data[0].id)
+    }).catch(() => toast.error('Failed to load groups'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const selectedDevice = useMemo(() => devices.find(d => d.id === deviceId) || null, [devices, deviceId])
+  const selectedGroup = useMemo(() => groups.find(g => g.id === groupId) || null, [groups, groupId])
 
   const rangeAB = useMemo(() => {
     let fromA, toA
@@ -233,31 +248,53 @@ export default function MonitoringHistoryPage() {
     return data?.points || []
   }, [])
 
+  const fetchGroupHistory = useCallback(async (id, from, to) => {
+    const { data } = await api.get(`/metrics/group/${id}/history`, { params: { from, to } })
+    return data
+  }, [])
+
   const load = useCallback(async () => {
-    if (!deviceId) return
+    const activeId = viewMode === 'group' ? groupId : deviceId
+    if (!activeId) return
     setLoading(true)
     try {
       const { fromA, toA, fromB, toB } = rangeAB
-      const [a, b] = await Promise.all([
-        fetchHistory(deviceId, fromA, toA),
-        compareOn && fromB != null ? fetchHistory(deviceId, fromB, toB) : Promise.resolve([]),
-      ])
-      setRowsA(a)
-      setRowsB(b)
+      if (viewMode === 'group') {
+        const [a, b] = await Promise.all([
+          fetchGroupHistory(groupId, fromA, toA),
+          compareOn && fromB != null ? fetchGroupHistory(groupId, fromB, toB) : Promise.resolve(null),
+        ])
+        setRowsA(a?.points || [])
+        setRowsB(b?.points || [])
+        setGroupDevicesSummary(a?.devices || [])
+      } else {
+        const [a, b] = await Promise.all([
+          fetchHistory(deviceId, fromA, toA),
+          compareOn && fromB != null ? fetchHistory(deviceId, fromB, toB) : Promise.resolve([]),
+        ])
+        setRowsA(a)
+        setRowsB(b)
+        setGroupDevicesSummary([])
+      }
     } catch (e) {
-      toast.error('Failed to load metrics history')
+      toast.error(`Failed to load ${viewMode === 'group' ? 'group' : 'metrics'} history`)
     } finally {
       setLoading(false)
     }
-  }, [deviceId, rangeAB, compareOn, fetchHistory])
+  }, [viewMode, deviceId, groupId, rangeAB, compareOn, fetchHistory, fetchGroupHistory])
 
   useEffect(() => { load() }, [load])
 
-  // Keep ?device= in the URL in sync so the link is shareable / refreshable
+  // Keep ?mode=/?device=/?group= in the URL in sync so the link is shareable / refreshable
   useEffect(() => {
-    if (deviceId) setSearchParams(prev => { prev.set('device', deviceId); return prev }, { replace: true })
+    setSearchParams(prev => {
+      prev.set('mode', viewMode)
+      if (viewMode === 'group') { if (groupId) prev.set('group', groupId) }
+      else { if (deviceId) prev.set('device', deviceId) }
+      return prev
+    }, { replace: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceId])
+  }, [viewMode, deviceId, groupId])
 
   // Merge series A/B by index (both queries cover equal-length spans so
   // bucket counts line up) into one chart-friendly array per metric.
@@ -302,17 +339,17 @@ export default function MonitoringHistoryPage() {
   }, [rowsA, rowsB])
 
   const doExport = async (which) => {
-    if (!deviceId) return
+    const activeId = viewMode === 'group' ? groupId : deviceId
+    if (!activeId) return
     setExporting(which)
     try {
       const from = which === 'A' ? rangeAB.fromA : rangeAB.fromB
       const to   = which === 'A' ? rangeAB.toA   : rangeAB.toB
-      const res = await api.get(`/metrics/${deviceId}/history/export`, {
-        params: { from, to }, responseType: 'blob',
-      })
+      const path = viewMode === 'group' ? `/metrics/group/${groupId}/history/export` : `/metrics/${deviceId}/history/export`
+      const res = await api.get(path, { params: { from, to }, responseType: 'blob' })
       const disposition = res.headers['content-disposition'] || ''
       const match = disposition.match(/filename="?([^"]+)"?/)
-      const filename = match?.[1] || `netcontrol-metrics-${deviceId}.csv`
+      const filename = match?.[1] || `netcontrol-metrics-${activeId}.csv`
       const url = URL.createObjectURL(res.data)
       const a = document.createElement('a')
       a.href = url; a.download = filename
@@ -347,7 +384,48 @@ export default function MonitoringHistoryPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Device selector */}
+          {/* Device / Group view toggle */}
+          <div className="flex items-center rounded-lg border p-0.5" style={{ borderColor: 'var(--border-subtle)' }}>
+            <button onClick={() => setViewMode('device')}
+              className={`text-xs px-2.5 py-1 rounded-md font-body flex items-center gap-1.5 transition-colors ${viewMode === 'device' ? 'bg-brand-500/15 text-brand-400' : ''}`}
+              style={viewMode !== 'device' ? { color: 'var(--text-muted)' } : undefined}>
+              <Server size={11} /> Device
+            </button>
+            <button onClick={() => setViewMode('group')}
+              className={`text-xs px-2.5 py-1 rounded-md font-body flex items-center gap-1.5 transition-colors ${viewMode === 'group' ? 'bg-brand-500/15 text-brand-400' : ''}`}
+              style={viewMode !== 'group' ? { color: 'var(--text-muted)' } : undefined}>
+              <Users size={11} /> Group
+            </button>
+          </div>
+
+          {viewMode === 'group' ? (
+            <div className="relative">
+              <button onClick={() => setGroupMenuOpen(v => !v)}
+                className="btn-ghost text-xs py-1.5 px-3 h-8 flex items-center gap-1.5">
+                <Users size={12} />
+                {selectedGroup ? `${selectedGroup.name} (${selectedGroup.device_count})` : 'Select group'}
+                <ChevronDown size={12} className={`transition-transform ${groupMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {groupMenuOpen && (
+                <div className="absolute right-0 mt-2 w-56 max-h-72 overflow-y-auto z-20 glass rounded-xl overflow-hidden animate-fade-in">
+                  {groups.length === 0 && (
+                    <p className="px-3.5 py-2 text-xs font-body" style={{ color: 'var(--text-muted)' }}>No groups yet</p>
+                  )}
+                  {groups.map(g => (
+                    <button key={g.id}
+                      onClick={() => { setGroupId(g.id); setGroupMenuOpen(false) }}
+                      className="w-full flex items-center justify-between gap-2 px-3.5 py-2 text-xs font-body text-left transition-colors"
+                      style={{ color: g.id === groupId ? 'var(--text-primary)' : 'var(--text-secondary)', background: g.id === groupId ? 'var(--bg-hover)' : 'transparent' }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+                      onMouseLeave={e => e.currentTarget.style.background = g.id === groupId ? 'var(--bg-hover)' : 'transparent'}>
+                      <span className="truncate">{g.name}</span>
+                      <span className="text-[10px] font-mono opacity-60">{g.device_count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
           <div className="relative">
             <button onClick={() => setDeviceMenuOpen(v => !v)}
               className="btn-ghost text-xs py-1.5 px-3 h-8 flex items-center gap-1.5">
@@ -371,12 +449,13 @@ export default function MonitoringHistoryPage() {
               </div>
             )}
           </div>
+          )}
 
           <button onClick={() => load()} disabled={loading} className="icon-btn">
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
 
-          <button onClick={() => doExport('A')} disabled={exporting !== null || !deviceId}
+          <button onClick={() => doExport('A')} disabled={exporting !== null || (viewMode === 'group' ? !groupId : !deviceId)}
             className="btn-ghost text-xs py-1.5 px-3 h-8 flex items-center gap-1.5 disabled:opacity-50">
             {exporting === 'A' ? <RefreshCw size={13} className="animate-spin" /> : <Download size={13} />}
             Export CSV
@@ -460,10 +539,10 @@ export default function MonitoringHistoryPage() {
         <div className="flex items-center justify-center py-24">
           <RefreshCw size={20} className="animate-spin" style={{ color: '#a78bfa' }} />
         </div>
-      ) : !deviceId ? (
+      ) : (viewMode === 'group' ? !groupId : !deviceId) ? (
         <div className="glass rounded-2xl p-12 flex flex-col items-center gap-2 opacity-50">
-          <Server size={22} style={{ color: 'var(--text-muted)' }} />
-          <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>No device selected</p>
+          {viewMode === 'group' ? <Users size={22} style={{ color: 'var(--text-muted)' }} /> : <Server size={22} style={{ color: 'var(--text-muted)' }} />}
+          <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>No {viewMode} selected</p>
         </div>
       ) : rowsA.length === 0 ? (
         <div className="glass rounded-2xl p-12 flex flex-col items-center gap-2 opacity-50">
@@ -524,8 +603,46 @@ export default function MonitoringHistoryPage() {
             </div>
           </div>
 
+          {viewMode === 'group' && groupDevicesSummary.length > 0 && (
+            <div className="glass rounded-2xl p-4 overflow-x-auto">
+              <div className="flex items-center gap-2 mb-3">
+                <Users size={13} style={{ color: '#a78bfa' }} />
+                <span className="text-xs font-body font-semibold" style={{ color: 'var(--text-primary)' }}>Per-device breakdown</span>
+                <span className="text-[10px] font-mono opacity-50">avg / peak over this window</span>
+              </div>
+              <table className="w-full text-xs font-mono" style={{ minWidth: 560 }}>
+                <thead>
+                  <tr style={{ color: 'var(--text-faint)' }} className="text-[10px] uppercase tracking-wide">
+                    <th className="text-left font-normal pb-2">Device</th>
+                    <th className="text-right font-normal pb-2">CPU</th>
+                    <th className="text-right font-normal pb-2">RAM</th>
+                    <th className="text-right font-normal pb-2">Disk</th>
+                    <th className="text-right font-normal pb-2">Net RX</th>
+                    <th className="text-right font-normal pb-2">Net TX</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupDevicesSummary.map(d => (
+                    <tr key={d.device_id} className="border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                      <td className="py-2 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: d.status === 'online' ? '#22c55e' : '#ef4444' }} />
+                        <span style={{ color: 'var(--text-secondary)' }}>{d.name}</span>
+                      </td>
+                      <td className="text-right" style={{ color: COLOR_A.cpu }}>{d.cpu_avg == null ? '—' : `${round1(d.cpu_avg)}%`} <span className="opacity-50">/ {d.cpu_max == null ? '—' : `${round1(d.cpu_max)}%`}</span></td>
+                      <td className="text-right" style={{ color: COLOR_A.ram }}>{d.ram_avg == null ? '—' : `${round1(d.ram_avg)}%`} <span className="opacity-50">/ {d.ram_max == null ? '—' : `${round1(d.ram_max)}%`}</span></td>
+                      <td className="text-right" style={{ color: COLOR_A.disk }}>{d.disk_avg == null ? '—' : `${round1(d.disk_avg)}%`} <span className="opacity-50">/ {d.disk_max == null ? '—' : `${round1(d.disk_max)}%`}</span></td>
+                      <td className="text-right" style={{ color: COLOR_A.rx }}>{fmtBps(d.net_rx_avg)}</td>
+                      <td className="text-right" style={{ color: COLOR_A.tx }}>{fmtBps(d.net_tx_avg)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           <p className="text-center text-[10px] font-mono" style={{ color: 'var(--text-faint)' }}>
             {rowsA.length} data point{rowsA.length === 1 ? '' : 's'} · sourced from durable metrics history (not the live 5s stream)
+            {viewMode === 'group' && selectedGroup ? ` · combined across ${selectedGroup.device_count} device${selectedGroup.device_count === 1 ? '' : 's'} in "${selectedGroup.name}"` : ''}
           </p>
         </>
       )}
