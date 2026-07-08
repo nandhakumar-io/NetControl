@@ -102,4 +102,4 @@ if (require.main === module) {
   migrateBackupDestinations()
     .then(() => { console.log('✅ backup_destinations table + backups source/destination columns ready'); process.exit(0); })
     .catch(e => { console.error('❌', e.message); process.exit(1); });
-}1
+}
