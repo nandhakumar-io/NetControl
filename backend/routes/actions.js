@@ -62,7 +62,7 @@ function actionRoute(action) {
       if (deviceId) {
         const d = await loadDevice(deviceId);
         if (!d) return res.status(404).json({ error: 'Device not found' });
-        if (req.user.role === 'operator') {
+        if (req.user.role !== 'admin') {
           const access = await queryOne(
             'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
             [req.user.id, d.group_id]
@@ -73,7 +73,7 @@ function actionRoute(action) {
       } else {
         const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
         if (!group) return res.status(404).json({ error: 'Group not found' });
-        if (req.user.role === 'operator') {
+        if (req.user.role !== 'admin') {
           const access = await queryOne(
             'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
             [req.user.id, groupId]
@@ -140,7 +140,7 @@ router.post('/exec',
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
     // SECURITY FIX: Operators can only exec on their accessible devices
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       const access = await queryOne(
         'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
         [req.user.id, device.group_id]

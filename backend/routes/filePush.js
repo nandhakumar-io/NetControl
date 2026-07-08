@@ -84,7 +84,7 @@ router.post(
     try {
       if (rawDeviceIds.length) {
         const placeholders = rawDeviceIds.map(() => '?').join(',');
-        if (req.user.role === 'operator') {
+        if (req.user.role !== 'admin') {
           // SECURITY FIX: Operators can only push to devices in their accessible groups (IDOR)
           devices = await query(
             `SELECT d.* FROM devices d
@@ -103,7 +103,7 @@ router.post(
       } else {
         const group = await queryOne('SELECT id FROM `groups` WHERE id = ?', [groupId]);
         if (!group) return res.status(404).json({ error: 'Group not found' });
-        if (req.user.role === 'operator') {
+        if (req.user.role !== 'admin') {
           // SECURITY FIX: Operators can only push to their accessible groups
           const access = await queryOne(
             'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',

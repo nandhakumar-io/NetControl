@@ -68,7 +68,7 @@ router.post('/open/:deviceId', requireAuth, async (req, res) => {
   if (!device) return res.status(404).json({ error: 'Device not found' });
 
   // SECURITY FIX: Operators can only open terminals to devices in their accessible groups
-  if (req.user.role === 'operator') {
+  if (req.user.role !== 'admin') {
     const access = await queryOne(
       'SELECT 1 FROM devices d ' +
       'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
@@ -281,4 +281,3 @@ router.get('/sessions', requireAuth, (req, res) => {
 });
 
 module.exports = { router };
-

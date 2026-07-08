@@ -19,7 +19,7 @@ const requireManageGroups = requirePermission(16);
 router.get('/', async (req, res) => {
   try {
     let groups;
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       // Operators only see groups they have been explicitly granted access to
       groups = await query(
         'SELECT g.*, COUNT(d.id) as device_count ' +
@@ -43,7 +43,7 @@ router.get('/:id/devices', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
     // Operators must have access to this group
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       const access = await queryOne(
         'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
         [req.user.id, req.params.id]

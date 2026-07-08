@@ -40,7 +40,7 @@ async function verifyUserAndAccess(token, deviceId) {
   if (!user || !user.enabled) throw new Error('Account disabled');
 
   // Operators must have group access to the target device
-  if (user.role === 'operator') {
+  if (user.role !== 'admin') {
     const access = await queryOne(
       'SELECT 1 FROM devices d ' +
       'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +

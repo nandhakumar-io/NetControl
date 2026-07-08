@@ -23,6 +23,9 @@ const EVENTS = {
   // Alert events
   'alert.triggered':         'Alert rule triggered',
   'alert.critical':          'Critical alert triggered',
+  'alert.resolved':          'Alert condition cleared',
+  'alert.flapping':          'Alert is flapping (repeatedly triggering/clearing)',
+  'alert.escalated':         'Unresolved alert escalated',
   // File push
   'file.push':               'File pushed to device(s)',
   // SSH / terminal
@@ -43,7 +46,8 @@ function buildPayload(provider, event, data) {
     'alert.critical': '🚨', 'alert.triggered': '⚠️', 'ssh.failure': '🔐',
     'auth.login_failed': '⛔', 'file.push': '📤', 'device.wake': '⚡',
     'device.shutdown': '🔴', 'device.restart': '🔄', 'system.agent_registered': '🤖',
-    'process.violation': '🚫',
+    'process.violation': '🚫', 'alert.resolved': '✅', 'alert.flapping': '🌀',
+    'alert.escalated': '📣',
   }[event] || 'ℹ️';
 
   const text  = `${emoji} *${EVENTS[event] || event}*\n${data.message || JSON.stringify(data)}`;
@@ -78,6 +82,19 @@ function buildPayload(provider, event, data) {
             .map(([k, v]) => ({ name: k.replace(/_/g,' '), value: String(v) })),
         }],
       };
+
+    case 'telegram': {
+      // Telegram's Markdown parse mode is picky about unescaped special
+      // characters, so this sticks to bold + plain lines rather than
+      // reusing the Slack-style attachment fields.
+      const fields = Object.entries(data)
+        .filter(([k]) => !['message', 'severity'].includes(k))
+        .slice(0, 6)
+        .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+        .join('\n');
+      const body = [`${emoji} *${title}*`, data.message || '', fields].filter(Boolean).join('\n\n');
+      return { text: body, parse_mode: 'Markdown' };
+    }
 
     default: // generic JSON
       return { event, title, timestamp: ts, data };
@@ -165,9 +182,20 @@ function doPost(urlStr, body, headers = {}, timeoutMs = 8000) {
 async function deliverOne(webhook, event, data) {
   const payload = buildPayload(webhook.provider, event, data);
 
-  // HMAC-SHA256 signature (optional, for verification on receiver side)
+  // Telegram isn't a generic "POST your payload to this URL" webhook the
+  // way Slack/Teams/generic are — the bot token lives in the URL path and
+  // the chat to post into has to be supplied on every call, so this needs
+  // its own send shape rather than reusing doPost(webhook.url, payload).
+  const isTelegram = webhook.provider === 'telegram';
+  const sendUrl  = isTelegram ? `${webhook.url.replace(/\/+$/, '')}/sendMessage` : webhook.url;
+  const sendBody = isTelegram ? { chat_id: webhook.chat_id, ...payload } : payload;
+
+  // HMAC-SHA256 signature (optional, for verification on receiver side) —
+  // meaningless for Telegram (the bot token in the URL already authenticates
+  // the request to Telegram; there's no receiver on our side to verify a
+  // signature), so this is skipped for that provider.
   const extraHeaders = {};
-  if (webhook.secret) {
+  if (webhook.secret && !isTelegram) {
     const sig = crypto.createHmac('sha256', webhook.secret)
       .update(JSON.stringify(payload))
       .digest('hex');
@@ -177,14 +205,27 @@ async function deliverOne(webhook, event, data) {
   let status = 0, durationMs = 0, error = null, responseBody = null;
 
   try {
-    const res = await doPost(webhook.url, payload, extraHeaders);
+    const res = await doPost(sendUrl, sendBody, extraHeaders);
     status       = res.status;
     durationMs   = res.ms;
     responseBody = (res.body || '').slice(0, 2000); // truncate — some receivers echo huge bodies
 
-    // 2xx = success; anything else = failure
+    // 2xx = success; anything else = failure. Telegram returns 200 with
+    // {"ok": false, ...} on some errors (e.g. bad chat_id) rather than a
+    // non-2xx status, so those are also checked for explicitly.
     if (status < 200 || status >= 300) {
       throw new Error(`HTTP ${status}${responseBody ? `: ${responseBody.slice(0, 200)}` : ''}`);
+    }
+    if (isTelegram) {
+      // Telegram returns HTTP 200 with {"ok": false, ...} on several error
+      // classes (bad chat_id, bot blocked by user, etc.), so a 2xx status
+      // alone doesn't mean the message actually went out — the body has to
+      // be checked too.
+      let parsed;
+      try { parsed = JSON.parse(responseBody); } catch { parsed = null; }
+      if (!parsed || parsed.ok === false) {
+        throw new Error(parsed?.description || `Unexpected Telegram response: ${responseBody.slice(0, 200)}`);
+      }
     }
   } catch (e) {
     error  = e.message;
@@ -258,13 +299,24 @@ function invalidateMaintenanceCache(deviceId) {
 }
 module.exports.invalidateMaintenanceCache = invalidateMaintenanceCache;
 
+// ── Severity gating ───────────────────────────────────────────────────────────
+// Lets a webhook opt into only the noisier tiers — e.g. Slack gets
+// everything, but a Telegram bot (which usually pages a phone) only gets
+// warning+ or critical-only, so it doesn't fire for routine info events.
+const SEVERITY_RANK = { info: 0, warning: 1, critical: 2 };
+function meetsSeverity(dataSeverity, minSeverity) {
+  const dataRank = SEVERITY_RANK[dataSeverity] ?? SEVERITY_RANK.info;
+  const minRank  = SEVERITY_RANK[minSeverity]  ?? SEVERITY_RANK.info;
+  return dataRank >= minRank;
+}
+
 /**
  * Fire webhooks for a given event.
  * Runs concurrently; errors are caught per-webhook so one failure doesn't block others.
  * Device-scoped events (data.device_id set) are suppressed while that device
  * is flagged as under maintenance.
  */
-async function fire(event, data = {}) {
+async function fire(event, data = {}, opts = {}) {
   if (data.device_id && await isDeviceUnderMaintenance(data.device_id)) {
     return []; // suppressed — device under maintenance
   }
@@ -274,7 +326,16 @@ async function fire(event, data = {}) {
     hooks = await getEnabledHooks();
   } catch { return []; }
 
+  // Escalation calls fire() with opts.webhookIds to target a specific,
+  // possibly-different, set of channels instead of the event's normal
+  // subscribers (e.g. page a Telegram bot that isn't subscribed to
+  // alert.triggered at all, only to alert.escalated).
+  const restrictTo = Array.isArray(opts.webhookIds) ? new Set(opts.webhookIds) : null;
+
   const applicable = hooks.filter(h => {
+    if (restrictTo && !restrictTo.has(h.id)) return false;
+    if (!meetsSeverity(data.severity, h.min_severity)) return false;
+    if (restrictTo) return true; // explicit targeting bypasses the events-list subscription check
     try {
       const events = JSON.parse(h.events || '[]');
       return events.includes(event) || events.includes('*');
@@ -298,24 +359,24 @@ module.exports.fire = fire;
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 async function listHooks() {
-  return query('SELECT id, name, url, provider, events, enabled, last_status, last_fired, fail_count, created_at FROM webhooks ORDER BY created_at DESC');
+  return query('SELECT id, name, url, provider, chat_id, min_severity, events, enabled, last_status, last_fired, fail_count, created_at FROM webhooks ORDER BY created_at DESC');
 }
 async function getHook(id) {
   return query('SELECT * FROM webhooks WHERE id = ?', [id]).then(r => r[0] || null);
 }
-async function createHook({ name, url, provider = 'generic', secret = null, events = [], enabled = true, createdBy = null }) {
+async function createHook({ name, url, provider = 'generic', secret = null, chatId = null, minSeverity = 'info', events = [], enabled = true, createdBy = null }) {
   const id  = uuidv4();
   const now = Math.floor(Date.now() / 1000);
   await execute(
-    `INSERT INTO webhooks (id, name, url, provider, secret, events, enabled, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, name, url, provider, secret || null, JSON.stringify(events), enabled ? 1 : 0, createdBy || null, now]
+    `INSERT INTO webhooks (id, name, url, provider, secret, chat_id, min_severity, events, enabled, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, name, url, provider, secret || null, chatId || null, minSeverity || 'info', JSON.stringify(events), enabled ? 1 : 0, createdBy || null, now]
   );
   invalidateHookCache();
   return id;
 }
 async function updateHook(id, patch) {
-  const allowed = ['name', 'url', 'provider', 'secret', 'events', 'enabled'];
+  const allowed = ['name', 'url', 'provider', 'secret', 'chat_id', 'min_severity', 'events', 'enabled'];
   const sets = [], vals = [];
   for (const [k, v] of Object.entries(patch)) {
     if (allowed.includes(k)) { sets.push(`${k} = ?`); vals.push(k === 'events' ? JSON.stringify(v) : v); }

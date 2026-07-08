@@ -92,7 +92,7 @@ function validateRow(row, index) {
 router.get('/', async (req, res) => {
   try {
     let devices;
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       devices = await query(
         'SELECT d.*, g.name as group_name FROM devices d ' +
         'INNER JOIN `groups` g ON g.id = d.group_id ' +
@@ -111,13 +111,17 @@ router.get('/', async (req, res) => {
 });
 
 // ── GET /api/devices/:id ─────────────────────────────────────────────────────
-// SECURITY FIX: Operators could previously fetch ANY device by ID (IDOR).
-// Now operators are restricted to devices in their accessible groups.
+// SECURITY FIX: Non-admins could previously fetch ANY device by ID (IDOR).
+// Now every non-admin role (operator, viewer, custom) is restricted to
+// devices in the groups they've been explicitly granted access to via
+// user_group_access — this is what makes per-device-group / per-client
+// scoping possible (e.g. a viewer role handed to a contractor only ever
+// sees the devices belonging to their assigned group(s)).
 router.get('/:id', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
     let device;
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       device = await queryOne(
         'SELECT d.*, g.name as group_name FROM devices d ' +
         'INNER JOIN `groups` g ON g.id = d.group_id ' +
@@ -431,7 +435,7 @@ router.post('/bulk-maintenance',
       const until   = enabled ? resolveMaintenanceUntil(req.body, now) : null;
 
       let skipped = 0;
-      if (req.user.role === 'operator') {
+      if (req.user.role !== 'admin') {
         const placeholders = deviceIds.map(() => '?').join(',');
         const accessible = await query(
           `SELECT d.id FROM devices d
@@ -503,7 +507,7 @@ router.post('/:id/maintenance',
 
       // SECURITY: operators are restricted to devices in their accessible
       // groups (same rule as GET /:id and actions/exec).
-      if (req.user.role === 'operator') {
+      if (req.user.role !== 'admin') {
         const access = await queryOne(
           'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
           [req.user.id, device.group_id]

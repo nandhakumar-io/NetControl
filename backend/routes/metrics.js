@@ -497,7 +497,7 @@ const RANGE_PRESETS = {
 const { COMPRESS_AFTER_DAYS } = require('../services/metricsRollup');
 
 async function assertMetricsAccess(req, res) {
-  if (req.user.role === 'operator') {
+  if (req.user.role !== 'admin') {
     const access = await queryOne(
       'SELECT 1 FROM devices d ' +
       'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
@@ -592,7 +592,7 @@ async function fetchHistoryRows(deviceId, fromTs, toTs, bucketSeconds) {
 // same response so the frontend can render a legend/table without a second
 // round trip per device.
 async function assertGroupAccess(req, res) {
-  if (req.user.role === 'operator') {
+  if (req.user.role !== 'admin') {
     const access = await queryOne(
       'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
       [req.user.id, req.params.groupId]
@@ -725,7 +725,7 @@ router.get('/group/:groupId/history/export', requireAuth, async (req, res) => {
 router.get('/', requireAuth, async (req, res) => {
   try {
     const result = {};
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       const allowed = await query(
         'SELECT d.id FROM devices d ' +
         'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?',
@@ -747,7 +747,7 @@ router.get('/', requireAuth, async (req, res) => {
 // ── GET /api/metrics/:deviceId ─────────────────────────────────────────────────
 router.get('/:deviceId', requireAuth, async (req, res) => {
   try {
-    if (req.user.role === 'operator') {
+    if (req.user.role !== 'admin') {
       const access = await queryOne(
         'SELECT 1 FROM devices d ' +
         'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +

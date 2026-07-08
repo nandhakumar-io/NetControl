@@ -108,15 +108,20 @@ router.get('/webhooks', async (req, res) => {
 router.post('/webhooks',
   body('name').notEmpty().isString().isLength({ max: 100 }),
   body('url').isURL({ protocols: ['http', 'https'], require_tld: false }),
-  body('provider').optional().isIn(['slack', 'teams', 'generic']),
+  body('provider').optional().isIn(['slack', 'teams', 'telegram', 'generic']),
   body('secret').optional({ nullable: true }).isString().isLength({ max: 200 }),
+  body('chatId').optional({ nullable: true }).isString().isLength({ max: 100 }),
+  body('minSeverity').optional().isIn(['info', 'warning', 'critical']),
   body('events').isArray({ min: 1 }),
   body('enabled').optional().isBoolean(),
   async (req, res) => {
     if (validate(req, res)) return;
     try {
-      const { name, url, provider = 'generic', secret, events, enabled = true } = req.body;
-      const id = await whSvc.createHook({ name, url, provider, secret: secret || null, events, enabled, createdBy: req.user.id });
+      const { name, url, provider = 'generic', secret, chatId, minSeverity = 'info', events, enabled = true } = req.body;
+      if (provider === 'telegram' && !chatId?.trim()) {
+        return res.status(400).json({ error: 'chatId is required for a Telegram webhook — see https://core.telegram.org/bots/api#getting-updates for how to find yours' });
+      }
+      const id = await whSvc.createHook({ name, url, provider, secret: secret || null, chatId: chatId || null, minSeverity, events, enabled, createdBy: req.user.id });
       await audit.log({ userId: req.user.id, username: req.user.username, action: 'create_webhook', targetType: 'webhook', targetId: id, targetName: name, ipSource: req.realIp, result: 'success' });
       res.status(201).json({ id });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -127,7 +132,10 @@ router.post('/webhooks',
 router.put('/webhooks/:id', param('id').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
   try {
-    await whSvc.updateHook(req.params.id, req.body);
+    const patch = { ...req.body };
+    if ('chatId' in patch) { patch.chat_id = patch.chatId; delete patch.chatId; }
+    if ('minSeverity' in patch) { patch.min_severity = patch.minSeverity; delete patch.minSeverity; }
+    await whSvc.updateHook(req.params.id, patch);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -150,11 +158,29 @@ router.post('/webhooks/:id/test', param('id').isUUID(), async (req, res) => {
     if (!hook) return res.status(404).json({ error: 'Webhook not found' });
     const events = JSON.parse(hook.events || '[]');
     const testEvent = events[0] || 'device.offline';
+    // BUG FIX: this used to call fire(testEvent, ...) with no `webhookIds`
+    // restriction, so clicking "test" on ONE webhook (e.g. a Telegram bot)
+    // actually fired a real test event to EVERY enabled webhook subscribed
+    // to that event — Slack/Teams channels got spammed by a Telegram test
+    // click and vice versa.
+    // BUG FIX: severity was hardcoded to 'info', so testing a webhook whose
+    // min_severity is 'warning'/'critical' (a common setup for a Telegram
+    // bot that pages a phone — see services/webhook.js) was always silently
+    // filtered out by fire()'s severity gate. fire() returned an empty
+    // results array, and the frontend read results[0] as undefined, which
+    // its `!r?.error` check treated as SUCCESS — so it showed "Test sent"
+    // even though nothing was ever delivered. Using the hook's own
+    // min_severity for the test event clears the gate every time.
     const results = await whSvc.fire(testEvent, {
       message: `Test delivery from NetControl — webhook "${hook.name}"`,
       device: 'Test Device', ip: '192.168.1.100',
-      severity: 'info', triggered_by: req.user.username,
-    });
+      severity: hook.min_severity || 'info', triggered_by: req.user.username,
+    }, { webhookIds: [hook.id] });
+
+    if (!results.length) {
+      // Guards any future gate (e.g. maintenance mode) from failing silently.
+      return res.json({ results: [{ webhookId: hook.id, webhookName: hook.name, error: 'Test event was suppressed before delivery was attempted' }] });
+    }
     res.json({ results });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

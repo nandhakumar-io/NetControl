@@ -435,6 +435,85 @@ const MIGRATIONS = [
     `,
   },
 
+  // FEATURE: Alert noise control + escalation + Telegram notifications.
+  //
+  // Why: the old cooldown logic lived entirely in an in-memory JS Map inside
+  // routes/alerts.js (see git history). That worked when everything ran in
+  // one process, but routes/metrics.js — which is what actually calls
+  // evaluateAlerts() for cpu/ram/disk breaches — runs inside the clustered
+  // web tier, not the single dedicated poller. Each clustered worker has its
+  // own copy of that Map, so the "same" rule+device breach got tracked
+  // separately per worker: an agent's metric POSTs land on whichever worker
+  // the load balancer picks, so cooldown_sec was only ever enforced within
+  // a single worker's slice of traffic — the real world-visible cooldown
+  // could be far shorter than configured, spiking notification volume
+  // instead of controlling it. Moving this state into the database (a
+  // couple of extra queries per rule check, negligible next to a poll
+  // interval measured in tens of seconds) makes it correct across every
+  // worker and across poller/server restarts.
+  //
+  // alert_state also tracks flapping (a rule that keeps flipping
+  // breached/resolved gets ONE "unstable" notice instead of one per flip)
+  // and enables escalation (an unresolved/unacknowledged breach open past
+  // escalate_after_sec gets re-notified, optionally at a higher severity
+  // and/or via a separate escalation channel — e.g. warn on Slack, escalate
+  // to Telegram if nobody's dealt with it in 15 minutes).
+  {
+    id: '012_alert_escalation_noise_control',
+    sql: `
+      CREATE TABLE IF NOT EXISTS alert_state (
+        rule_id            CHAR(36)     NOT NULL,
+        device_id          CHAR(36)     NOT NULL,
+        is_active          TINYINT(1)   NOT NULL DEFAULT 0,
+        first_breached_at  INT UNSIGNED DEFAULT NULL,
+        last_notified_at   INT UNSIGNED DEFAULT NULL,
+        notify_count       INT UNSIGNED NOT NULL DEFAULT 0,
+        last_log_id        CHAR(36)     DEFAULT NULL COMMENT 'most recent alert_triggered_log row, so ack status can be checked before escalating',
+        flap_count         INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'breached/resolved transitions seen within the current flap window',
+        flap_window_start  INT UNSIGNED DEFAULT NULL,
+        flapping           TINYINT(1)   NOT NULL DEFAULT 0,
+        last_transition_at INT UNSIGNED DEFAULT NULL,
+        PRIMARY KEY (rule_id, device_id),
+        INDEX idx_as_active (is_active)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+      SET @e1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_rules' AND COLUMN_NAME = 'escalate_after_sec');
+      SET @sqle1 = IF(@e1 = 0, 'ALTER TABLE alert_rules ADD COLUMN escalate_after_sec INT UNSIGNED DEFAULT NULL COMMENT ''seconds a breach can stay open/un-acked before escalating; NULL = never''', 'SELECT 1');
+      PREPARE stmte1 FROM @sqle1; EXECUTE stmte1; DEALLOCATE PREPARE stmte1;
+
+      SET @e2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_rules' AND COLUMN_NAME = 'escalate_severity');
+      SET @sqle2 = IF(@e2 = 0, 'ALTER TABLE alert_rules ADD COLUMN escalate_severity VARCHAR(20) NOT NULL DEFAULT ''critical''', 'SELECT 1');
+      PREPARE stmte2 FROM @sqle2; EXECUTE stmte2; DEALLOCATE PREPARE stmte2;
+
+      SET @e3 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_rules' AND COLUMN_NAME = 'escalate_webhook_ids');
+      SET @sqle3 = IF(@e3 = 0, 'ALTER TABLE alert_rules ADD COLUMN escalate_webhook_ids TEXT DEFAULT NULL COMMENT ''JSON array of webhook ids to notify on escalation; NULL = use the rule''''s normal webhook routing''', 'SELECT 1');
+      PREPARE stmte3 FROM @sqle3; EXECUTE stmte3; DEALLOCATE PREPARE stmte3;
+
+      SET @a1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_triggered_log' AND COLUMN_NAME = 'acknowledged_at');
+      SET @sqla1 = IF(@a1 = 0, 'ALTER TABLE alert_triggered_log ADD COLUMN acknowledged_at INT UNSIGNED DEFAULT NULL', 'SELECT 1');
+      PREPARE stmta1 FROM @sqla1; EXECUTE stmta1; DEALLOCATE PREPARE stmta1;
+
+      SET @a2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_triggered_log' AND COLUMN_NAME = 'acknowledged_by');
+      SET @sqla2 = IF(@a2 = 0, 'ALTER TABLE alert_triggered_log ADD COLUMN acknowledged_by CHAR(36) DEFAULT NULL', 'SELECT 1');
+      PREPARE stmta2 FROM @sqla2; EXECUTE stmta2; DEALLOCATE PREPARE stmta2;
+
+      SET @w1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhooks' AND COLUMN_NAME = 'chat_id');
+      SET @sqlw1 = IF(@w1 = 0, 'ALTER TABLE webhooks ADD COLUMN chat_id VARCHAR(100) DEFAULT NULL COMMENT ''Telegram chat/channel id — unused by other providers''', 'SELECT 1');
+      PREPARE stmtw1 FROM @sqlw1; EXECUTE stmtw1; DEALLOCATE PREPARE stmtw1;
+
+      SET @w2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhooks' AND COLUMN_NAME = 'min_severity');
+      SET @sqlw2 = IF(@w2 = 0, 'ALTER TABLE webhooks ADD COLUMN min_severity VARCHAR(20) NOT NULL DEFAULT ''info'' COMMENT ''only deliver events at or above this severity: info < warning < critical''', 'SELECT 1');
+      PREPARE stmtw2 FROM @sqlw2; EXECUTE stmtw2; DEALLOCATE PREPARE stmtw2;
+    `,
+  },
+
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────

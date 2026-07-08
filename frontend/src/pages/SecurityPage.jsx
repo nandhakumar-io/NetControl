@@ -26,9 +26,10 @@ function ago(ts) {
 }
 
 const PROVIDERS = [
-  { value: 'slack',   label: 'Slack',        color: '#4A154B', icon: '💬' },
-  { value: 'teams',   label: 'MS Teams',     color: '#5059C9', icon: '🟦' },
-  { value: 'generic', label: 'Generic JSON', color: '#64748b', icon: '🔗' },
+  { value: 'slack',    label: 'Slack',        color: '#4A154B', icon: '💬' },
+  { value: 'teams',    label: 'MS Teams',     color: '#5059C9', icon: '🟦' },
+  { value: 'telegram', label: 'Telegram',     color: '#26A5E4', icon: '✈️' },
+  { value: 'generic',  label: 'Generic JSON', color: '#64748b', icon: '🔗' },
 ]
 
 const ALL_EVENTS = {
@@ -42,6 +43,9 @@ const ALL_EVENTS = {
   'auth.ip_blocked':         { label: 'IP blocked',              color: '#f87171', cat: 'auth'   },
   'alert.triggered':         { label: 'Alert triggered',         color: '#facc15', cat: 'alert'  },
   'alert.critical':          { label: 'Critical alert',          color: '#f87171', cat: 'alert'  },
+  'alert.resolved':          { label: 'Alert resolved',          color: '#34d399', cat: 'alert'  },
+  'alert.flapping':          { label: 'Alert flapping',          color: '#fb923c', cat: 'alert'  },
+  'alert.escalated':         { label: 'Alert escalated',         color: '#f87171', cat: 'alert'  },
   'file.push':               { label: 'File pushed',             color: '#a78bfa', cat: 'system' },
   'ssh.failure':             { label: 'SSH failure',             color: '#f87171', cat: 'system' },
   'system.agent_registered': { label: 'Agent registered',        color: '#38bdf8', cat: 'system' },
@@ -172,11 +176,11 @@ function IPRuleModal({ rule, users, onSave, onClose }) {
 // WEBHOOK SECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-const EMPTY_WH = { name: '', url: '', provider: 'generic', secret: '', events: [], enabled: true }
+const EMPTY_WH = { name: '', url: '', provider: 'generic', secret: '', chatId: '', minSeverity: 'info', events: [], enabled: true }
 
 function WebhookModal({ hook, onSave, onClose }) {
   const [form, setForm] = useState(hook
-    ? { name: hook.name, url: hook.url, provider: hook.provider, secret: '', events: JSON.parse(hook.events || '[]'), enabled: !!hook.enabled }
+    ? { name: hook.name, url: hook.url, provider: hook.provider, secret: '', chatId: hook.chat_id || '', minSeverity: hook.min_severity || 'info', events: JSON.parse(hook.events || '[]'), enabled: !!hook.enabled }
     : EMPTY_WH)
   const [saving, setSaving] = useState(false)
   const [showSecret, setShowSecret] = useState(false)
@@ -207,6 +211,7 @@ function WebhookModal({ hook, onSave, onClose }) {
   const save = async () => {
     if (!form.name.trim()) { toast.error('Name required'); return }
     if (!form.url.trim())  { toast.error('URL required'); return }
+    if (form.provider === 'telegram' && !form.chatId.trim()) { toast.error('Chat ID required for Telegram'); return }
     if (!form.events.length) { toast.error('Select at least one event'); return }
     setSaving(true)
     try {
@@ -257,23 +262,41 @@ function WebhookModal({ hook, onSave, onClose }) {
 
           <F label="Webhook URL" hint={
             form.provider === 'slack' ? 'Slack: Settings → Integrations → Incoming Webhooks' :
-            form.provider === 'teams' ? 'Teams: Channel → Connectors → Incoming Webhook' : 'Any URL accepting a POST with JSON body'
+            form.provider === 'teams' ? 'Teams: Channel → Connectors → Incoming Webhook' :
+            form.provider === 'telegram' ? 'Message @BotFather on Telegram to create a bot and get its token, then use https://api.telegram.org/bot<TOKEN> here (no trailing /sendMessage)' :
+            'Any URL accepting a POST with JSON body'
           }>
-            <input className="input-field font-mono text-xs" placeholder="https://hooks.slack.com/services/…"
+            <input className="input-field font-mono text-xs" placeholder={form.provider === 'telegram' ? 'https://api.telegram.org/bot123456:ABC-token' : 'https://hooks.slack.com/services/…'}
               value={form.url} onChange={e => set('url', e.target.value)} />
           </F>
 
-          <F label="Signing secret (optional)" hint="If set, deliveries include X-NetControl-Signature: sha256=... header">
-            <div className="relative">
-              <input type={showSecret ? 'text' : 'password'} className="input-field pr-10"
-                placeholder="Optional HMAC secret" value={form.secret} onChange={e => set('secret', e.target.value)} />
-              <button onClick={() => setShowSecret(s => !s)}
-                className="absolute right-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }}>
-                {showSecret ? <EyeOff size={13} /> : <Eye size={13} />}
-              </button>
-            </div>
+          {form.provider === 'telegram' && (
+            <F label="Chat ID" hint="Message your bot once, then visit https://api.telegram.org/bot<TOKEN>/getUpdates to find the numeric chat id (group chats are negative numbers).">
+              <input className="input-field font-mono text-xs" placeholder="e.g. 123456789 or -1001234567890"
+                value={form.chatId} onChange={e => set('chatId', e.target.value)} />
+            </F>
+          )}
+
+          <F label="Minimum severity" hint="Events below this severity are skipped for this destination — e.g. send everything to Slack but only critical to Telegram.">
+            <select className="input-field" value={form.minSeverity} onChange={e => set('minSeverity', e.target.value)}>
+              <option value="info">Info and above (everything)</option>
+              <option value="warning">Warning and above</option>
+              <option value="critical">Critical only</option>
+            </select>
           </F>
 
+          {form.provider !== 'telegram' && (
+            <F label="Signing secret (optional)" hint="If set, deliveries include X-NetControl-Signature: sha256=... header">
+              <div className="relative">
+                <input type={showSecret ? 'text' : 'password'} className="input-field pr-10"
+                  placeholder="Optional HMAC secret" value={form.secret} onChange={e => set('secret', e.target.value)} />
+                <button onClick={() => setShowSecret(s => !s)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }}>
+                  {showSecret ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </F>
+          )}
           {/* Event selector */}
           <div>
             <label className="label">Events to subscribe to</label>
@@ -496,8 +519,11 @@ export default function SecurityPage() {
     try {
       const { data } = await api.post(`/security/webhooks/${hook.id}/test`)
       const r = data.results?.[0]
-      if (r?.error) toast.error(`Test failed: ${r.error}`)
-      else toast.success(`Test sent — HTTP ${r?.status || '?'}`)
+      // BUG FIX: `!r?.error` used to read as success even when `r` itself
+      // was undefined (empty results array), so a suppressed test silently
+      // showed "Test sent — HTTP ?" instead of a failure.
+      if (!r || r.error) toast.error(`Test failed: ${r?.error || 'No delivery attempted'}`)
+      else toast.success(`Test sent — HTTP ${r.status || '?'}`)
     } catch (e) { toast.error(e.response?.data?.error || 'Test failed') }
     finally { setTesting(null); loadWebhooks() }
   }
@@ -731,7 +757,7 @@ export default function SecurityPage() {
                 <button onClick={() => setWhModal('new')} className="btn-primary text-xs"><Plus size={12} /> New Webhook</button>
               </div>
             ) : hooks.map((hook, i) => {
-              const prov   = PROVIDERS.find(p => p.value === hook.provider) || PROVIDERS[2]
+              const prov   = PROVIDERS.find(p => p.value === hook.provider) || PROVIDERS.find(p => p.value === 'generic')
               const events = (() => { try { return JSON.parse(hook.events) } catch { return [] } })()
               return (
                 <div key={hook.id} className="flex items-center gap-4 px-5 py-4 group transition-colors"
@@ -820,4 +846,3 @@ export default function SecurityPage() {
     </div>
   )
 }
-
