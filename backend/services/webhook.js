@@ -5,7 +5,7 @@
 const https = require('https');
 const http  = require('http');
 const crypto = require('crypto');
-const { query, execute, queryOne } = require('../db');
+const { query, execute, queryOne, getPool } = require('../db');
 const { v4: uuidv4 } = require('uuid');
 
 // ── All supported event names ─────────────────────────────────────────────────
@@ -34,6 +34,21 @@ const EVENTS = {
   'process.violation':       'Restricted process detected/blocked',
   // System
   'system.agent_registered': 'New agent registered',
+  // Scheduled backups — fired by services/scheduledJobs.js. These already
+  // existed in code but were missing from this map (no display name/emoji)
+  // and from the frontend's event picker (so they couldn't be selected when
+  // configuring a webhook) — added as part of wiring up schedule/backup/
+  // log-export failure+success alerting.
+  'backup.created':            'Backup completed successfully',
+  'backup.failed':             'Backup failed',
+  // Scheduled audit-log exports — previously only wrote to the audit log
+  // and schedule row, never notified anything.
+  'log_export.succeeded':      'Scheduled log export completed',
+  'log_export.failed':         'Scheduled log export failed',
+  // Cron-driven device wake/shutdown/restart schedules (services/scheduler.js)
+  // — previously silent besides an audit-log entry.
+  'schedule.action_succeeded': 'Scheduled device action completed',
+  'schedule.action_failed':    'Scheduled device action failed',
 };
 
 module.exports.EVENTS = EVENTS;
@@ -47,7 +62,9 @@ function buildPayload(provider, event, data) {
     'auth.login_failed': '⛔', 'file.push': '📤', 'device.wake': '⚡',
     'device.shutdown': '🔴', 'device.restart': '🔄', 'system.agent_registered': '🤖',
     'process.violation': '🚫', 'alert.resolved': '✅', 'alert.flapping': '🌀',
-    'alert.escalated': '📣',
+    'alert.escalated': '📣', 'backup.created': '💾', 'backup.failed': '💥',
+    'log_export.succeeded': '🗂️', 'log_export.failed': '🗂️',
+    'schedule.action_succeeded': '⏱️', 'schedule.action_failed': '⏱️',
   }[event] || 'ℹ️';
 
   const text  = `${emoji} *${EVENTS[event] || event}*\n${data.message || JSON.stringify(data)}`;
@@ -131,12 +148,27 @@ async function ensureLogTable() {
         INDEX idx_whl_time  (fired_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
-    // Add response_body to older installs that already have the table but
-    // predate this column.
-    await execute(`
-      ALTER TABLE webhook_log
-      ADD COLUMN IF NOT EXISTS response_body TEXT DEFAULT NULL
-    `).catch(() => {});
+    // BUG FIX: this used to be a bare
+    //   ALTER TABLE webhook_log ADD COLUMN IF NOT EXISTS response_body ...
+    // "ADD COLUMN IF NOT EXISTS" isn't reliably supported across the
+    // MySQL/MariaDB versions this app targets (see the info_schema-gated
+    // ALTER pattern used everywhere in db/migrate.js — it exists precisely
+    // because this shorthand can't be relied on). On any install where
+    // webhook_log already existed without response_body, that ALTER threw
+    // a syntax/parse error every single time, was swallowed by
+    // `.catch(() => {})`, and the column was NEVER actually added.
+    // Every subsequent INSERT below (which always lists response_body)
+    // then failed with "Unknown column 'response_body'" — also silently
+    // caught — so webhook_log stayed permanently empty despite deliveries
+    // actually succeeding. This does the same existence check migrate.js
+    // uses elsewhere, which works everywhere.
+    const [colRows] = await getPool().query(
+      `SELECT COUNT(*) AS hasCol FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhook_log' AND COLUMN_NAME = 'response_body'`
+    );
+    if (Number(colRows[0].hasCol) === 0) {
+      await execute(`ALTER TABLE webhook_log ADD COLUMN response_body TEXT DEFAULT NULL`);
+    }
     _logTableReady = true;
   } catch (e) {
     console.error('[Webhook] Failed to ensure webhook_log table:', e.message);

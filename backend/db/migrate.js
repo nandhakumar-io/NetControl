@@ -514,6 +514,49 @@ const MIGRATIONS = [
     `,
   },
 
+  // ── 013: consecutive_failures counters for backup + log-export schedules ──
+  // Lets the new backup.failed / log_export.failed webhook events escalate
+  // their severity from 'warning' to 'critical' after N runs in a row have
+  // failed (same "don't page on a single blip, but do page on a pattern"
+  // idea as alert-rule escalation), instead of every single failed run
+  // looking identical regardless of whether it's the first hiccup or the
+  // fifth night in a row nothing has backed up.
+  {
+    id: '013_schedule_consecutive_failures',
+    sql: `
+      SET @cf1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_schedules' AND COLUMN_NAME = 'consecutive_failures');
+      SET @sqlcf1 = IF(@cf1 = 0, 'ALTER TABLE backup_schedules ADD COLUMN consecutive_failures SMALLINT UNSIGNED NOT NULL DEFAULT 0', 'SELECT 1');
+      PREPARE stmtcf1 FROM @sqlcf1; EXECUTE stmtcf1; DEALLOCATE PREPARE stmtcf1;
+
+      SET @cf2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_export_schedules' AND COLUMN_NAME = 'consecutive_failures');
+      SET @sqlcf2 = IF(@cf2 = 0, 'ALTER TABLE log_export_schedules ADD COLUMN consecutive_failures SMALLINT UNSIGNED NOT NULL DEFAULT 0', 'SELECT 1');
+      PREPARE stmtcf2 FROM @sqlcf2; EXECUTE stmtcf2; DEALLOCATE PREPARE stmtcf2;
+    `,
+  },
+
+  // ── 014: webhook_log.response_body backfill ────────────────────────────
+  // BUG FIX: services/webhook.js previously tried to backfill this column
+  // with a bare "ALTER TABLE ... ADD COLUMN IF NOT EXISTS", which isn't
+  // reliably supported across MySQL/MariaDB versions. On any install where
+  // webhook_log already existed without this column, that ALTER silently
+  // failed every time (caught by .catch(() => {})), so the column was
+  // never added — and every delivery-log INSERT (which always references
+  // response_body) then failed too, leaving the delivery log permanently
+  // empty even though deliveries themselves were succeeding. Formalized
+  // here using the same info_schema-gated pattern as every other ALTER in
+  // this file, which is known to work everywhere this app runs.
+  {
+    id: '014_webhook_log_response_body',
+    sql: `
+      SET @rb1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhook_log' AND COLUMN_NAME = 'response_body');
+      SET @sqlrb1 = IF(@rb1 = 0, 'ALTER TABLE webhook_log ADD COLUMN response_body TEXT DEFAULT NULL', 'SELECT 1');
+      PREPARE stmtrb1 FROM @sqlrb1; EXECUTE stmtrb1; DEALLOCATE PREPARE stmtrb1;
+    `,
+  },
+
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────

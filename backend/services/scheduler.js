@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const { query, execute } = require('../db');
 const { decrypt } = require('./crypto');
 const audit = require('./audit');
+const webhook = require('./webhook');
 
 const activeTasks = new Map();
 
@@ -57,6 +58,25 @@ async function executeScheduledAction(schedule) {
       result,
       details: details || `Schedule: ${schedule.name}`,
     });
+
+    // Previously this whole schedule engine was silent besides the audit
+    // log — no webhook fired, so there was no way to get, say, a Telegram
+    // ping when a nightly "restart the build agents" schedule failed on
+    // one machine. Fired per-device so a partial failure (5 of 6 devices
+    // restarted fine) doesn't get hidden in a single rolled-up message.
+    if (result === 'success') {
+      webhook.fire('schedule.action_succeeded', {
+        schedule: schedule.name, device_id: device.id, device_name: device.name,
+        action: schedule.action, severity: 'info',
+        message: `Schedule "${schedule.name}" ran ${schedule.action} on ${device.name}`,
+      }).catch(() => {});
+    } else {
+      webhook.fire('schedule.action_failed', {
+        schedule: schedule.name, device_id: device.id, device_name: device.name,
+        action: schedule.action, error: details, severity: 'warning',
+        message: `Schedule "${schedule.name}" failed to ${schedule.action} ${device.name}: ${details}`,
+      }).catch(() => {});
+    }
   }
 
   await execute('UPDATE schedules SET last_run = ? WHERE id = ?',

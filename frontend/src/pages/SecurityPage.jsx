@@ -49,6 +49,15 @@ const ALL_EVENTS = {
   'file.push':               { label: 'File pushed',             color: '#a78bfa', cat: 'system' },
   'ssh.failure':             { label: 'SSH failure',             color: '#f87171', cat: 'system' },
   'system.agent_registered': { label: 'Agent registered',        color: '#38bdf8', cat: 'system' },
+  'process.violation':       { label: 'Restricted process blocked', color: '#f87171', cat: 'system' },
+  // Previously fired by the backend but missing here, so they existed in
+  // code yet could never actually be selected when configuring a webhook.
+  'backup.created':            { label: 'Backup succeeded',        color: '#34d399', cat: 'schedule' },
+  'backup.failed':             { label: 'Backup failed',           color: '#f87171', cat: 'schedule' },
+  'log_export.succeeded':      { label: 'Log export succeeded',    color: '#34d399', cat: 'schedule' },
+  'log_export.failed':         { label: 'Log export failed',       color: '#f87171', cat: 'schedule' },
+  'schedule.action_succeeded': { label: 'Device schedule succeeded', color: '#34d399', cat: 'schedule' },
+  'schedule.action_failed':    { label: 'Device schedule failed',  color: '#f87171', cat: 'schedule' },
 }
 
 // ── Field wrapper ─────────────────────────────────────────────────────────────
@@ -208,6 +217,16 @@ function WebhookModal({ hook, onSave, onClose }) {
     }))
   }
 
+  // Quick preset — scheduled backups and log exports are the two things
+  // most likely to fail silently in the background with nobody watching
+  // (unlike a device going offline, which someone usually notices).
+  // One click gets you paged specifically for those without having to
+  // hunt through every category.
+  const CRITICAL_FAILURE_EVENTS = ['backup.failed', 'log_export.failed', 'schedule.action_failed']
+  const applyCriticalFailuresPreset = () => setForm(f => ({
+    ...f, events: [...new Set([...f.events, ...CRITICAL_FAILURE_EVENTS])], minSeverity: 'warning',
+  }))
+
   const save = async () => {
     if (!form.name.trim()) { toast.error('Name required'); return }
     if (!form.url.trim())  { toast.error('URL required'); return }
@@ -299,7 +318,15 @@ function WebhookModal({ hook, onSave, onClose }) {
           )}
           {/* Event selector */}
           <div>
-            <label className="label">Events to subscribe to</label>
+            <div className="flex items-center justify-between">
+              <label className="label">Events to subscribe to</label>
+              <button onClick={applyCriticalFailuresPreset} type="button"
+                className="text-[10px] font-body font-semibold px-2 py-1 rounded-md"
+                style={{ color: '#f87171', background: 'rgba(248,113,113,0.1)' }}
+                title="Add backup / log export / device schedule failures and set the severity threshold to warning">
+                + Critical failures only
+              </button>
+            </div>
             <div className="space-y-3">
               {cats.map(cat => {
                 const catEvents = Object.keys(ALL_EVENTS).filter(k => ALL_EVENTS[k].cat === cat)

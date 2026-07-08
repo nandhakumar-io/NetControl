@@ -174,3 +174,8 @@ router.post('/exec',
 );
 
 module.exports = router;
+// Exposed so other modules (alert-rule auto-actions in routes/alerts.js) can
+// reuse the exact same wake/shutdown/restart implementation instead of
+// duplicating it — see performAlertAction() in alerts.js.
+module.exports.loadDevice = loadDevice;
+module.exports.performAction = performAction;

@@ -9,7 +9,44 @@ const webhook = require('../services/webhook');
 const router = express.Router();
 router.use(requireAuth);
 
-// ── SSE notification bus ───────────────────────────────────────────────────────
+// ── Auto-actions: alert rules can list actions like ['notify','wake'] — until
+// now 'actions' was only ever stored/logged, never actually executed, so a
+// rule configured to "wake the device when it's offline" silently did
+// nothing but notify. This actually runs the meaningful action types and
+// folds the outcome into the webhook message, so a Telegram critical alert
+// says both "device X is down" AND "wake packet sent" / "wake failed: ..."
+// in the same message instead of just paging you with no next step.
+const AUTO_ACTIONS = ['wake', 'restart', 'shutdown'];
+async function performAlertActions(rule, deviceId, deviceName, actions) {
+  const toRun = (actions || []).filter(a => AUTO_ACTIONS.includes(a));
+  if (!toRun.length) return [];
+
+  const { loadDevice, performAction } = require('./actions');
+  const results = [];
+  for (const action of toRun) {
+    // 'restart'/'shutdown' only make sense against a device that's actually
+    // reachable — running them for an offline-triggered rule would just
+    // fail (or hang on a dead SSH/WinRM connection), so only 'wake' runs
+    // automatically for offline incidents.
+    if (action !== 'wake' && rule.metric === 'offline') continue;
+    let result = 'success', detail;
+    try {
+      const device = await loadDevice(deviceId);
+      if (!device) throw new Error('Device not found');
+      detail = await performAction(action, device);
+    } catch (e) {
+      result = 'failure'; detail = e.message;
+    }
+    results.push({ action, result, detail });
+    await audit.log({
+      username: 'system (alert rule)', action, targetType: 'device', targetId: deviceId,
+      targetName: deviceName, result, details: `Auto-triggered by alert rule "${rule.name}": ${detail}`,
+    }).catch(() => {});
+  }
+  return results;
+}
+
+
 const pendingNotifications = new Map();
 const sseClients = new Map();
 
@@ -426,11 +463,15 @@ async function evaluateAlerts(deviceId, snapshot) {
         if (rule.notify_admins) {
           await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now);
         }
+        const autoActions = await performAlertActions(rule, deviceId, device.name, actions).catch(() => []);
+        const actionSummary = autoActions.length
+          ? ' — ' + autoActions.map(a => `${a.action}: ${a.result === 'success' ? (a.detail || 'ok') : `failed (${a.detail})`}`).join(', ')
+          : '';
         const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
         webhook.fire(webhookEvent, {
           device_id: deviceId, device_name: device.name, rule_name: rule.name,
-          metric: rule.metric, severity: rule.severity, details,
-          message: `${rule.name}: ${details} on ${device.name}`,
+          metric: rule.metric, severity: rule.severity, details: details + actionSummary,
+          message: `${rule.name}: ${details} on ${device.name}${actionSummary}`,
         }).catch(() => {});
 
         console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name}: ${details}`);

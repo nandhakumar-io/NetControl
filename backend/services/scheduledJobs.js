@@ -131,7 +131,7 @@ async function runBackupSchedule(schedule) {
     }
 
     await execute(
-      `UPDATE backup_schedules SET last_run = ?, last_status = 'success', last_error = NULL WHERE id = ?`,
+      `UPDATE backup_schedules SET last_run = ?, last_status = 'success', last_error = NULL, consecutive_failures = 0 WHERE id = ?`,
       [Math.floor(Date.now() / 1000), schedule.id]
     );
 
@@ -155,9 +155,10 @@ async function runBackupSchedule(schedule) {
   } catch (e) {
     await execute(`UPDATE backups SET status = 'failed', error_message = ? WHERE id = ?`, [e.message, id]).catch(() => {});
     await execute(
-      `UPDATE backup_schedules SET last_run = ?, last_status = 'failure', last_error = ? WHERE id = ?`,
+      `UPDATE backup_schedules SET last_run = ?, last_status = 'failure', last_error = ?, consecutive_failures = consecutive_failures + 1 WHERE id = ?`,
       [Math.floor(Date.now() / 1000), e.message.slice(0, 1000), schedule.id]
     ).catch(() => {});
+    const streak = await queryOne('SELECT consecutive_failures FROM backup_schedules WHERE id = ?', [schedule.id]).catch(() => null);
     await audit.log({
       username: 'scheduler',
       action: 'backup_schedule_run',
@@ -168,9 +169,15 @@ async function runBackupSchedule(schedule) {
       result: 'failure',
       details: e.message,
     }).catch(() => {});
+    // Tweak: escalate to 'critical' once 3+ runs in a row have failed —
+    // a single failed backup is a warning, a backup that's been silently
+    // broken for days is a much bigger deal and shouldn't look identical
+    // in a Telegram/Slack feed.
+    const n = streak?.consecutive_failures || 1;
     webhook.fire('backup.failed', {
-      schedule: schedule.name, error: e.message, severity: 'warning',
-      message: `Scheduled backup "${schedule.name}" failed: ${e.message}`,
+      schedule: schedule.name, error: e.message, consecutive_failures: n,
+      severity: n >= 3 ? 'critical' : 'warning',
+      message: `Scheduled backup "${schedule.name}" failed${n > 1 ? ` (${n} runs in a row)` : ''}: ${e.message}`,
     }).catch(() => {});
   }
 }
@@ -220,7 +227,7 @@ async function runLogExportSchedule(schedule) {
       const { sent, failed, total } = await syslogForwarder.exportEntries(rows);
 
       await execute(
-        `UPDATE log_export_schedules SET last_run = ?, last_status = 'success', last_error = NULL WHERE id = ?`,
+        `UPDATE log_export_schedules SET last_run = ?, last_status = 'success', last_error = NULL, consecutive_failures = 0 WHERE id = ?`,
         [Math.floor(Date.now() / 1000), schedule.id]
       );
 
@@ -234,6 +241,11 @@ async function runLogExportSchedule(schedule) {
         result: failed > 0 ? 'partial' : 'success',
         details: `${sent}/${total} rows sent to syslog server${failed ? `, ${failed} failed` : ''}`,
       });
+      webhook.fire('log_export.succeeded', {
+        schedule: schedule.name, target: 'syslog', sent, total, failed,
+        severity: failed > 0 ? 'warning' : 'info',
+        message: `Scheduled log export "${schedule.name}" sent ${sent}/${total} rows to syslog${failed ? ` (${failed} failed)` : ''}`,
+      }).catch(() => {});
       return;
     }
 
@@ -262,7 +274,7 @@ async function runLogExportSchedule(schedule) {
     const result = await destinations.writeToDestination(bufferToStream(body), filename, destination, backupService.BACKUP_STORE_DIR);
 
     await execute(
-      `UPDATE log_export_schedules SET last_run = ?, last_status = 'success', last_error = NULL WHERE id = ?`,
+      `UPDATE log_export_schedules SET last_run = ?, last_status = 'success', last_error = NULL, consecutive_failures = 0 WHERE id = ?`,
       [Math.floor(Date.now() / 1000), schedule.id]
     );
 
@@ -276,11 +288,17 @@ async function runLogExportSchedule(schedule) {
       result: 'success',
       details: `${filename} → ${destinationName || 'local'} (${result.bytes} bytes)`,
     });
+    webhook.fire('log_export.succeeded', {
+      schedule: schedule.name, target: 'file', filename, destination: destinationName || 'local',
+      bytes: result.bytes, severity: 'info',
+      message: `Scheduled log export "${schedule.name}" ran → ${destinationName || 'local'}/${filename}`,
+    }).catch(() => {});
   } catch (e) {
     await execute(
-      `UPDATE log_export_schedules SET last_run = ?, last_status = 'failure', last_error = ? WHERE id = ?`,
+      `UPDATE log_export_schedules SET last_run = ?, last_status = 'failure', last_error = ?, consecutive_failures = consecutive_failures + 1 WHERE id = ?`,
       [Math.floor(Date.now() / 1000), e.message.slice(0, 1000), schedule.id]
     ).catch(() => {});
+    const streak = await queryOne('SELECT consecutive_failures FROM log_export_schedules WHERE id = ?', [schedule.id]).catch(() => null);
     await audit.log({
       username: 'scheduler',
       action: 'log_export_schedule_run',
@@ -290,6 +308,12 @@ async function runLogExportSchedule(schedule) {
       ipSource: 'scheduler',
       result: 'failure',
       details: e.message,
+    }).catch(() => {});
+    const n = streak?.consecutive_failures || 1;
+    webhook.fire('log_export.failed', {
+      schedule: schedule.name, error: e.message, consecutive_failures: n,
+      severity: n >= 3 ? 'critical' : 'warning',
+      message: `Scheduled log export "${schedule.name}" failed${n > 1 ? ` (${n} runs in a row)` : ''}: ${e.message}`,
     }).catch(() => {});
   }
 }
