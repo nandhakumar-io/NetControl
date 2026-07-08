@@ -7,7 +7,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute: run } = require('../db');
 const { requireAuth }          = require('../middleware/auth');
-const { agentIngestLimiter, registerLimiter } = require('../middleware/rateLimiter');
+const { agentIngestLimiter, registerLimiter, sseStreamLimiter } = require('../middleware/rateLimiter');
 const { evaluateAlerts, pushNotification } = require('./alerts');
 const webhook = require('../services/webhook');
 const jwt    = require('jsonwebtoken');
@@ -119,7 +119,7 @@ async function agentAuth(req, res, next) {
 // Browser connects once; server pushes every agent update in real time.
 // On connect: immediately sends the full current snapshot so graphs appear
 // without waiting for the next agent push.
-router.get('/stream', (req, res) => {
+router.get('/stream', sseStreamLimiter, (req, res) => {
   const user = extractUser(req);
   if (!user) { res.status(401).end(); return; }
 

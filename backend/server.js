@@ -192,8 +192,24 @@ app.use((req, _res, next) => {
 // must keep working even when a busy dashboard has used up the general API
 // budget, otherwise a 429 there cascades into a forced logout / a Google
 // button that looks "unavailable" when it's really just rate-limited.
+//
+// BUG FIX: /api/metrics/stream (the dashboard's SSE feed) used to fall
+// through into this same apiLimiter, keyed per-user. It's meant to be one
+// long-lived connection, but as the comments on the /stream handler itself
+// already note, a proxy read-timeout or an expired token mid-stream makes
+// the frontend reconnect it repeatedly — and every reconnect burned one
+// request out of that user's shared 3000/15min budget. A short reconnect
+// storm (a flaky proxy hop, a laptop waking from sleep, several dashboard
+// tabs open) could exhaust it in minutes, after which literally every other
+// API call for that user — devices, groups, everything — started 429ing:
+// "Too many requests" / "failed to load" across the whole app, with the
+// actual cause invisible because it was the *stream* burning the budget,
+// not whatever the person was trying to click on. It now gets its own
+// dedicated, generous limiter (see sseStreamLimiter in rateLimiter.js)
+// instead of sharing the general one.
 app.use('/api', (req, res, next) => {
   if (req.path === '/auth/refresh' || req.path === '/auth/google/status' || req.path === '/auth/logout') return next();
+  if (req.path === '/metrics/stream') return next();
   return apiLimiter(req, res, next);
 });
 app.use('/api/devices/bulk-import', bulkImportLimiter);

@@ -91,9 +91,23 @@ const discoveryLimiter = rateLimit({
   keyGenerator:   (req) => req.user?.id || req.ip,
 });
 
+// ── Metrics SSE stream ────────────────────────────────────────────────────────
+// Separate from apiLimiter on purpose — see server.js for why sharing the
+// general budget with a long-lived reconnecting stream was blocking every
+// other feature for a user. This still caps genuine abuse (someone scripting
+// hundreds of connect attempts), just with a much higher, stream-appropriate
+// ceiling and its own bucket so it can never starve the rest of the API.
+const sseStreamLimiter = rateLimit({
+  windowMs:       60 * 1000,
+  max:            parseInt(process.env.SSE_STREAM_RATE_LIMIT) || 60, // 1 (re)connect/sec sustained
+  standardHeaders: true, legacyHeaders: false,
+  message:        { error: 'Reconnecting too frequently — please wait a moment' },
+  keyGenerator:   (req) => req.user?.id || req.ip,
+});
+
 module.exports = {
   apiLimiter, actionLimiter, authLimiter,
   bulkImportLimiter, agentIngestLimiter,
   agentRelayLimiter, registerLimiter,
-  discoveryLimiter,
+  discoveryLimiter, sseStreamLimiter,
 };
