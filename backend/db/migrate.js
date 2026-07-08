@@ -501,40 +501,31 @@ const MIGRATIONS = [
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'alert_triggered_log' AND COLUMN_NAME = 'acknowledged_by');
       SET @sqla2 = IF(@a2 = 0, 'ALTER TABLE alert_triggered_log ADD COLUMN acknowledged_by CHAR(36) DEFAULT NULL', 'SELECT 1');
       PREPARE stmta2 FROM @sqla2; EXECUTE stmta2; DEALLOCATE PREPARE stmta2;
-
-      SET @w1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhooks' AND COLUMN_NAME = 'chat_id');
-      SET @sqlw1 = IF(@w1 = 0, 'ALTER TABLE webhooks ADD COLUMN chat_id VARCHAR(100) DEFAULT NULL COMMENT ''Telegram chat/channel id — unused by other providers''', 'SELECT 1');
-      PREPARE stmtw1 FROM @sqlw1; EXECUTE stmtw1; DEALLOCATE PREPARE stmtw1;
-
-      SET @w2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhooks' AND COLUMN_NAME = 'min_severity');
-      SET @sqlw2 = IF(@w2 = 0, 'ALTER TABLE webhooks ADD COLUMN min_severity VARCHAR(20) NOT NULL DEFAULT ''info'' COMMENT ''only deliver events at or above this severity: info < warning < critical''', 'SELECT 1');
-      PREPARE stmtw2 FROM @sqlw2; EXECUTE stmtw2; DEALLOCATE PREPARE stmtw2;
     `,
   },
 
-  // ── 013: consecutive_failures counters for backup + log-export schedules ──
-  // Lets the new backup.failed / log_export.failed webhook events escalate
-  // their severity from 'warning' to 'critical' after N runs in a row have
-  // failed (same "don't page on a single blip, but do page on a pattern"
-  // idea as alert-rule escalation), instead of every single failed run
-  // looking identical regardless of whether it's the first hiccup or the
-  // fifth night in a row nothing has backed up.
-  {
-    id: '013_schedule_consecutive_failures',
-    sql: `
-      SET @cf1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_schedules' AND COLUMN_NAME = 'consecutive_failures');
-      SET @sqlcf1 = IF(@cf1 = 0, 'ALTER TABLE backup_schedules ADD COLUMN consecutive_failures SMALLINT UNSIGNED NOT NULL DEFAULT 0', 'SELECT 1');
-      PREPARE stmtcf1 FROM @sqlcf1; EXECUTE stmtcf1; DEALLOCATE PREPARE stmtcf1;
+  // NOTE: the webhooks.chat_id / webhooks.min_severity columns that used to
+  // be added here have been moved out — see migrateWebhookNoiseColumns()
+  // below, invoked in the post-run chain *after* migrateSecurityTables().
+  // Reason: `webhooks` is created by migrate-security.js, which (like
+  // migrate-scheduled-jobs.js) runs *after* this whole MIGRATIONS array, in
+  // the .then() chain at the bottom of this file. The info_schema guard here
+  // only checks whether the *column* exists, not the table, so on any DB
+  // where `webhooks` didn't already exist this ALTER failed outright with
+  // "Table 'webhooks' doesn't exist" and aborted the whole migration run —
+  // same bug as the old 013 migration, fixed the same way.
 
-      SET @cf2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_export_schedules' AND COLUMN_NAME = 'consecutive_failures');
-      SET @sqlcf2 = IF(@cf2 = 0, 'ALTER TABLE log_export_schedules ADD COLUMN consecutive_failures SMALLINT UNSIGNED NOT NULL DEFAULT 0', 'SELECT 1');
-      PREPARE stmtcf2 FROM @sqlcf2; EXECUTE stmtcf2; DEALLOCATE PREPARE stmtcf2;
-    `,
-  },
+  // NOTE: what was previously "013_schedule_consecutive_failures" has been
+  // moved out of this versioned array — see migrateConsecutiveFailures()
+  // below, invoked in the post-run chain *after* migrateScheduledJobs().
+  // Reason: this migration ALTERs backup_schedules / log_export_schedules,
+  // but those tables are only created by migrateScheduledJobs(), which used
+  // to run *after* this whole MIGRATIONS array (in the .then() chain at the
+  // bottom of this file). On any DB where those tables didn't already
+  // exist, this ALTER failed with "Table 'backup_schedules' doesn't exist"
+  // (the info_schema guard only checks for the *column*, not the table),
+  // which threw and aborted the entire migration run. Running it after
+  // migrateScheduledJobs() instead guarantees the tables exist first.
 
   // ── 014: webhook_log.response_body backfill ────────────────────────────
   // BUG FIX: services/webhook.js previously tried to backfill this column
@@ -547,17 +538,65 @@ const MIGRATIONS = [
   // empty even though deliveries themselves were succeeding. Formalized
   // here using the same info_schema-gated pattern as every other ALTER in
   // this file, which is known to work everywhere this app runs.
-  {
-    id: '014_webhook_log_response_body',
-    sql: `
+  // NOTE: what was previously "014_webhook_log_response_body" has been
+  // folded into migrateWebhookNoiseColumns() below — same root cause
+  // (webhook_log is also only created by migrateSecurityTables(), which
+  // runs after this array), so it's fixed the same way, in the same call.
+
+];
+
+// ── Post-hoc: webhooks noise-control columns (chat_id, min_severity) ──────
+// Must run *after* migrateSecurityTables() has created `webhooks` — see
+// NOTE above where this used to live inside versioned migration 012.
+async function migrateWebhookNoiseColumns() {
+  const conn = await connect();
+  try {
+    await conn.query(`
+      SET @w1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhooks' AND COLUMN_NAME = 'chat_id');
+      SET @sqlw1 = IF(@w1 = 0, 'ALTER TABLE webhooks ADD COLUMN chat_id VARCHAR(100) DEFAULT NULL COMMENT ''Telegram chat/channel id — unused by other providers''', 'SELECT 1');
+      PREPARE stmtw1 FROM @sqlw1; EXECUTE stmtw1; DEALLOCATE PREPARE stmtw1;
+
+      SET @w2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhooks' AND COLUMN_NAME = 'min_severity');
+      SET @sqlw2 = IF(@w2 = 0, 'ALTER TABLE webhooks ADD COLUMN min_severity VARCHAR(20) NOT NULL DEFAULT ''info'' COMMENT ''only deliver events at or above this severity: info < warning < critical''', 'SELECT 1');
+      PREPARE stmtw2 FROM @sqlw2; EXECUTE stmtw2; DEALLOCATE PREPARE stmtw2;
+
       SET @rb1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webhook_log' AND COLUMN_NAME = 'response_body');
       SET @sqlrb1 = IF(@rb1 = 0, 'ALTER TABLE webhook_log ADD COLUMN response_body TEXT DEFAULT NULL', 'SELECT 1');
       PREPARE stmtrb1 FROM @sqlrb1; EXECUTE stmtrb1; DEALLOCATE PREPARE stmtrb1;
-    `,
-  },
+    `);
+  } finally {
+    await conn.end();
+  }
+}
 
-];
+// ── Post-hoc: consecutive_failures counters for backup + log-export schedules ──
+// Lets the backup.failed / log_export.failed webhook events escalate their
+// severity from 'warning' to 'critical' after N runs in a row have failed
+// (same "don't page on a single blip, but do page on a pattern" idea as
+// alert-rule escalation). Must run *after* migrateScheduledJobs() has
+// created backup_schedules / log_export_schedules — see NOTE above where
+// this used to live as versioned migration 013.
+async function migrateConsecutiveFailures() {
+  const conn = await connect();
+  try {
+    await conn.query(`
+      SET @cf1 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'backup_schedules' AND COLUMN_NAME = 'consecutive_failures');
+      SET @sqlcf1 = IF(@cf1 = 0, 'ALTER TABLE backup_schedules ADD COLUMN consecutive_failures SMALLINT UNSIGNED NOT NULL DEFAULT 0', 'SELECT 1');
+      PREPARE stmtcf1 FROM @sqlcf1; EXECUTE stmtcf1; DEALLOCATE PREPARE stmtcf1;
+
+      SET @cf2 = (SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_export_schedules' AND COLUMN_NAME = 'consecutive_failures');
+      SET @sqlcf2 = IF(@cf2 = 0, 'ALTER TABLE log_export_schedules ADD COLUMN consecutive_failures SMALLINT UNSIGNED NOT NULL DEFAULT 0', 'SELECT 1');
+      PREPARE stmtcf2 FROM @sqlcf2; EXECUTE stmtcf2; DEALLOCATE PREPARE stmtcf2;
+    `);
+  } finally {
+    await conn.end();
+  }
+}
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 async function run() {
@@ -620,6 +659,12 @@ run()
       console.warn('  ⚠  security_tables:', e.message);
     }
     try {
+      await migrateWebhookNoiseColumns();
+      console.log('  ✓ webhook_noise_columns (webhooks.chat_id, webhooks.min_severity)');
+    } catch (e) {
+      console.warn('  ⚠  webhook_noise_columns:', e.message);
+    }
+    try {
       const { migrateDiscoveryTables } = require('./migrate-discovery');
       await migrateDiscoveryTables();
       console.log('  ✓ discovery_tables (discovery_scans, discovery_results)');
@@ -680,6 +725,12 @@ run()
       console.log('  ✓ scheduled_jobs (backup_schedules, log_export_schedules)');
     } catch (e) {
       console.warn('  ⚠  scheduled_jobs:', e.message);
+    }
+    try {
+      await migrateConsecutiveFailures();
+      console.log('  ✓ schedule_consecutive_failures (backup_schedules/log_export_schedules.consecutive_failures)');
+    } catch (e) {
+      console.warn('  ⚠  schedule_consecutive_failures:', e.message);
     }
     try {
       const { migrateLogExportTarget } = require('./migrate-log-export-target');
