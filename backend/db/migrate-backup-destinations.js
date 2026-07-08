@@ -46,14 +46,18 @@ async function migrateBackupDestinations() {
       CREATE TABLE IF NOT EXISTS backup_destinations (
         id          CHAR(36)      NOT NULL PRIMARY KEY,
         name        VARCHAR(100)  NOT NULL,
-        type        ENUM('s3','remote_folder') NOT NULL,
-        config      TEXT          NOT NULL COMMENT 'AES-256-GCM encrypted JSON blob — bucket/region/keys for s3, deviceId/remotePath for remote_folder',
+        type        ENUM('s3','azure_blob','remote_folder') NOT NULL,
+        config      TEXT          NOT NULL COMMENT 'AES-256-GCM encrypted JSON blob — bucket/region/keys for s3, account/container/keys for azure_blob, deviceId/remotePath for remote_folder',
         created_by  CHAR(36)      DEFAULT NULL,
         created_at  INT UNSIGNED  NOT NULL DEFAULT (UNIX_TIMESTAMP()),
         CONSTRAINT fk_backup_destinations_user FOREIGN KEY (created_by)
           REFERENCES users(id) ON DELETE SET NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+
+    // Widen the type ENUM for installs that already had this table from
+    // before azure_blob existed.
+    await conn.query(`ALTER TABLE backup_destinations MODIFY COLUMN type ENUM('s3','azure_blob','remote_folder') NOT NULL`);
 
     // ── backups: source device (NULL = local server) ───────────────────────
     if (!(await columnExists(conn, 'backups', 'device_id'))) {
@@ -71,7 +75,18 @@ async function migrateBackupDestinations() {
       await conn.query(`ALTER TABLE backups ADD COLUMN destination_name VARCHAR(100) DEFAULT NULL AFTER destination_id`);
     }
     if (!(await columnExists(conn, 'backups', 'destination_type'))) {
-      await conn.query(`ALTER TABLE backups ADD COLUMN destination_type ENUM('local','s3','remote_folder') NOT NULL DEFAULT 'local' AFTER destination_name`);
+      await conn.query(`ALTER TABLE backups ADD COLUMN destination_type ENUM('local','s3','azure_blob','remote_folder') NOT NULL DEFAULT 'local' AFTER destination_name`);
+    } else {
+      // Widen for installs migrated before azure_blob existed.
+      await conn.query(`ALTER TABLE backups MODIFY COLUMN destination_type ENUM('local','s3','azure_blob','remote_folder') NOT NULL DEFAULT 'local'`);
+    }
+
+    // ── backups: was the stored archive encrypted at rest? ─────────────────
+    // Set per-row at write time (services/backupDestinations.js
+    // shouldEncrypt()) so a later download knows whether to run it back
+    // through AES-256-GCM decryption before serving it.
+    if (!(await columnExists(conn, 'backups', 'encrypted'))) {
+      await conn.query(`ALTER TABLE backups ADD COLUMN encrypted TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'archive bytes at the destination are AES-256-GCM encrypted' AFTER checksum_sha256`);
     }
 
     // Existing rows already default to device_id=NULL, destination_type='local'
@@ -87,4 +102,4 @@ if (require.main === module) {
   migrateBackupDestinations()
     .then(() => { console.log('✅ backup_destinations table + backups source/destination columns ready'); process.exit(0); })
     .catch(e => { console.error('❌', e.message); process.exit(1); });
-}
+}1

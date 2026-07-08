@@ -15,7 +15,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Archive, Folder, FileText, ChevronRight, ChevronDown, Home, Shield, Loader2,
   Download, Trash2, RefreshCw, CheckCircle2, XCircle, Clock, HardDrive,
-  Server, Plus, Cloud, FolderInput, HardDriveDownload, X, Settings2, Pencil,
+  Server, Plus, Cloud, CloudCog, FolderInput, HardDriveDownload, X, Settings2, Pencil,
   CalendarClock, Play, PauseCircle, PlayCircle,
 } from 'lucide-react'
 import api from '../lib/api'
@@ -67,7 +67,12 @@ const STATUS_META = {
 const DEST_TYPE_META = {
   local:         { icon: HardDriveDownload, label: 'Local' },
   s3:            { icon: Cloud,             label: 'S3' },
+  azure_blob:    { icon: CloudCog,          label: 'Azure Blob' },
   remote_folder: { icon: FolderInput,       label: 'Remote folder' },
+}
+
+function destLabel(type) {
+  return DEST_TYPE_META[type]?.label || type
 }
 
 function StatusBadge({ status }) {
@@ -311,7 +316,7 @@ export default function BackupsPage() {
 
   const handleDownload = (row) => {
     if (row.destination_type && row.destination_type !== 'local') {
-      toast.error(`This backup was written to ${row.destination_type === 's3' ? 'S3' : 'a remote folder'} — download it from there.`)
+      toast.error(`This backup was written to ${destLabel(row.destination_type)} — download it from there.`)
       return
     }
     api.get(`/backup/${row.id}/download`, { responseType: 'blob' })
@@ -621,6 +626,11 @@ export default function BackupsPage() {
                         <Server size={10} /> {b.device_name || 'This server'}
                         <span className="opacity-40">→</span>
                         <DestIcon size={10} /> {b.destination_name || destMeta.label}
+                        {!!b.encrypted && (
+                          <span className="inline-flex items-center gap-0.5 text-accent-green" title="Encrypted at rest (AES-256-GCM)">
+                            <Shield size={10} /> encrypted
+                          </span>
+                        )}
                       </p>
                       {b.status === 'failed' && b.error_message && (
                         <p className="text-xs font-mono truncate text-accent-red mt-0.5">{b.error_message}</p>

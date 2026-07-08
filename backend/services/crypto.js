@@ -72,4 +72,98 @@ function decrypt(ciphertext) {
   }
 }
 
-module.exports = { encrypt, decrypt };
+// ── Streaming encrypt/decrypt for large payloads (backup archives, log
+// exports) ───────────────────────────────────────────────────────────────
+// encrypt()/decrypt() above buffer the whole value in memory, which is fine
+// for short strings (device credentials, destination configs) but wrong for
+// multi-gigabyte backup archives. These variants wrap AES-256-GCM in a
+// Transform stream so archive bytes are encrypted as they fly past on their
+// way to disk/S3/Azure/SFTP, never fully buffered.
+//
+// Wire format: 12-byte IV, then ciphertext, then a 16-byte GCM auth tag
+// appended at the very end (the tag can only be computed once the whole
+// stream has been seen, so it can't go in a header). Decryption holds back
+// the trailing 16 bytes of whatever it's seen so far — once more data
+// arrives it knows the previously-held bytes were mid-stream ciphertext, and
+// only the final held-back 16 bytes are ever treated as the tag.
+const { Transform } = require('stream');
+
+const IV_LENGTH  = 12;
+const TAG_LENGTH = 16;
+
+function createEncryptStream() {
+  if (!KEY || KEY.length !== 32) {
+    throw new Error('createEncryptStream() called but CREDENTIAL_ENCRYPTION_KEY is invalid');
+  }
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ALGO, rawKey(), iv);
+  let ivSent = false;
+
+  return new Transform({
+    transform(chunk, enc, cb) {
+      try {
+        if (!ivSent) { this.push(iv); ivSent = true; }
+        const out = cipher.update(chunk);
+        if (out.length) this.push(out);
+        cb();
+      } catch (e) { cb(e); }
+    },
+    flush(cb) {
+      try {
+        if (!ivSent) { this.push(iv); ivSent = true; } // zero-byte source: still emit IV + tag
+        const final = cipher.final();
+        if (final.length) this.push(final);
+        this.push(cipher.getAuthTag());
+        cb();
+      } catch (e) { cb(e); }
+    },
+  });
+}
+
+function createDecryptStream() {
+  if (!KEY || KEY.length !== 32) {
+    throw new Error('createDecryptStream() called but CREDENTIAL_ENCRYPTION_KEY is invalid');
+  }
+  let iv = null;
+  let header = Buffer.alloc(0);   // buffering until we have the 12-byte IV
+  let held = Buffer.alloc(0);     // trailing bytes held back in case they're the tag
+  let decipher = null;
+
+  return new Transform({
+    transform(chunk, enc, cb) {
+      try {
+        let data = chunk;
+        if (!iv) {
+          header = Buffer.concat([header, data]);
+          if (header.length < IV_LENGTH) return cb(); // still waiting for the full IV
+          iv = header.subarray(0, IV_LENGTH);
+          data = header.subarray(IV_LENGTH);
+          decipher = crypto.createDecipheriv(ALGO, rawKey(), iv);
+        }
+        const combined = Buffer.concat([held, data]);
+        if (combined.length <= TAG_LENGTH) {
+          held = combined; // not enough yet to know what's ciphertext vs. tag
+          return cb();
+        }
+        const toDecrypt = combined.subarray(0, combined.length - TAG_LENGTH);
+        held = combined.subarray(combined.length - TAG_LENGTH);
+        const out = decipher.update(toDecrypt);
+        if (out.length) this.push(out);
+        cb();
+      } catch (e) { cb(e); }
+    },
+    flush(cb) {
+      try {
+        if (!decipher || held.length !== TAG_LENGTH) {
+          return cb(new Error('Encrypted stream ended before a complete IV/tag was seen — data is truncated or not encrypted'));
+        }
+        decipher.setAuthTag(held);
+        const final = decipher.final();
+        if (final.length) this.push(final);
+        cb();
+      } catch (e) { cb(e); }
+    },
+  });
+}
+
+module.exports = { encrypt, decrypt, createEncryptStream, createDecryptStream };

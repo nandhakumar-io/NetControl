@@ -114,9 +114,9 @@ async function runBackupSchedule(schedule) {
     const result = await destinations.writeToDestination(stream, archiveName, destination, backupService.BACKUP_STORE_DIR);
 
     await execute(
-      `UPDATE backups SET source_type = ?, archive_name = ?, size_bytes = ?, checksum_sha256 = ?,
+      `UPDATE backups SET source_type = ?, archive_name = ?, size_bytes = ?, checksum_sha256 = ?, encrypted = ?,
               status = 'completed', completed_at = ? WHERE id = ?`,
-      [sourceType, archiveName, result.bytes, result.checksum, Math.floor(Date.now() / 1000), id]
+      [sourceType, archiveName, result.bytes, result.checksum, result.encrypted ? 1 : 0, Math.floor(Date.now() / 1000), id]
     );
 
     if (destination.type === 'local') {

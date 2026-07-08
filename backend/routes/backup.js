@@ -27,6 +27,7 @@
 'use strict';
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const { body, param, query: queryValidator, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 
@@ -163,7 +164,7 @@ router.post(
   requireRole('admin'),
   [
     body('name').notEmpty().isString().isLength({ max: 100 }),
-    body('type').isIn(['s3', 'remote_folder']),
+    body('type').isIn(['s3', 'azure_blob', 'remote_folder']),
     body('actionPin').notEmpty().isString(),
     body('config').isObject(),
   ],
@@ -177,6 +178,11 @@ router.post(
       if (type === 's3') {
         for (const f of ['bucket', 'region', 'accessKeyId', 'secretAccessKey']) {
           if (!config[f]) return res.status(400).json({ error: `config.${f} is required for an S3 destination` });
+        }
+      } else if (type === 'azure_blob') {
+        if (!config.container) return res.status(400).json({ error: 'config.container is required for an Azure destination' });
+        if (!config.connectionString && !(config.accountName && config.accountKey)) {
+          return res.status(400).json({ error: 'Azure destination needs either config.connectionString or both config.accountName and config.accountKey' });
         }
       } else if (type === 'remote_folder') {
         if (!config.deviceId) return res.status(400).json({ error: 'config.deviceId is required' });
@@ -239,6 +245,17 @@ router.put(
         }
         for (const f of ['bucket', 'region', 'accessKeyId', 'secretAccessKey']) {
           if (!config[f]) return res.status(400).json({ error: `config.${f} is required for an S3 destination` });
+        }
+      } else if (existing.type === 'azure_blob') {
+        if (!config.connectionString && !config.accountKey) {
+          const prevConfig = destinations.decryptConfig(existing.config);
+          if (!config.connectionString) config.connectionString = prevConfig.connectionString;
+          if (!config.accountKey) config.accountKey = prevConfig.accountKey;
+          if (!config.accountName) config.accountName = prevConfig.accountName;
+        }
+        if (!config.container) return res.status(400).json({ error: 'config.container is required for an Azure destination' });
+        if (!config.connectionString && !(config.accountName && config.accountKey)) {
+          return res.status(400).json({ error: 'Azure destination needs either config.connectionString or both config.accountName and config.accountKey' });
         }
       } else if (existing.type === 'remote_folder') {
         if (!config.deviceId) return res.status(400).json({ error: 'config.deviceId is required' });
@@ -394,9 +411,9 @@ router.post(
       const result = await destinations.writeToDestination(stream, archiveName, destination, backupService.BACKUP_STORE_DIR);
 
       await execute(
-        `UPDATE backups SET source_type = ?, archive_name = ?, size_bytes = ?, checksum_sha256 = ?,
+        `UPDATE backups SET source_type = ?, archive_name = ?, size_bytes = ?, checksum_sha256 = ?, encrypted = ?,
                 status = 'completed', completed_at = ? WHERE id = ?`,
-        [sourceType, archiveName, result.bytes, result.checksum, Math.floor(Date.now() / 1000), id]
+        [sourceType, archiveName, result.bytes, result.checksum, result.encrypted ? 1 : 0, Math.floor(Date.now() / 1000), id]
       );
 
       // Retention only applies to what's actually sitting in local storage —
@@ -474,12 +491,12 @@ router.get('/:id/download', [param('id').isUUID()], async (req, res) => {
     const row = await queryOne(`SELECT * FROM backups WHERE id = ?`, [req.params.id]);
     if (!row || row.status !== 'completed') return res.status(404).json({ error: 'Backup not found' });
     if (row.destination_type !== 'local') {
-      return res.status(400).json({ error: `This backup was written to ${row.destination_type === 's3' ? 'S3' : 'a remote folder'}, not local storage — download it from there.` });
+      const label = { s3: 'S3', azure_blob: 'Azure Blob Storage', remote_folder: 'a remote folder' }[row.destination_type] || row.destination_type;
+      return res.status(400).json({ error: `This backup was written to ${label}, not local storage — download it from there.` });
     }
 
     const filePath = backupService.archiveFilePath(row.archive_name);
-    res.download(filePath, row.archive_name, async (err) => {
-      if (err) return; // response already sent or connection dropped — nothing more to do
+    const finish = async () => {
       await audit.log({
         userId: req.user.id,
         username: req.user.username,
@@ -490,6 +507,26 @@ router.get('/:id/download', [param('id').isUUID()], async (req, res) => {
         ipSource: req.ip,
         result: 'success',
       }).catch(() => {});
+    };
+
+    if (row.encrypted) {
+      // Locally-stored archives are only ever encrypted if an admin opted
+      // into BACKUP_ENCRYPT_LOCAL — decrypt on the way out so the download
+      // is the same plain archive a human would expect to open.
+      res.setHeader('Content-Disposition', `attachment; filename="${row.archive_name}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      const readStream = fs.createReadStream(filePath);
+      readStream.on('error', (err) => { if (!res.headersSent) res.status(500).json({ error: err.message }); });
+      const decrypted = destinations.decryptReadStream(readStream);
+      decrypted.on('error', (err) => { if (!res.headersSent) res.status(500).json({ error: err.message }); });
+      decrypted.pipe(res);
+      res.on('finish', finish);
+      return;
+    }
+
+    res.download(filePath, row.archive_name, async (err) => {
+      if (err) return; // response already sent or connection dropped — nothing more to do
+      await finish();
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

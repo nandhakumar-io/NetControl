@@ -2,7 +2,7 @@
 // (S3 bucket or a folder on another registered device). Admin + action PIN,
 // same gate as every other credential-holding mutation in this app.
 import React, { useState, useEffect } from 'react'
-import { X, Cloud, FolderInput, Shield, Loader2 } from 'lucide-react'
+import { X, Cloud, CloudCog, FolderInput, Shield, Loader2 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 
@@ -17,6 +17,7 @@ function Field({ label, children }) {
 
 const TYPE_OPTIONS = [
   { value: 's3', label: 'S3 bucket', icon: Cloud },
+  { value: 'azure_blob', label: 'Azure Blob', icon: CloudCog },
   { value: 'remote_folder', label: 'Folder on another device', icon: FolderInput },
 ]
 
@@ -29,6 +30,12 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
   const [accessKeyId, setAccessKeyId] = useState('')
   const [secretAccessKey, setSecretAccessKey] = useState('')
   const [prefix, setPrefix] = useState('')
+  const [azureAuthMode, setAzureAuthMode] = useState('connectionString')
+  const [azureConnectionString, setAzureConnectionString] = useState('')
+  const [azureAccountName, setAzureAccountName] = useState('')
+  const [azureAccountKey, setAzureAccountKey] = useState('')
+  const [azureContainer, setAzureContainer] = useState('')
+  const [azurePrefix, setAzurePrefix] = useState('')
   const [deviceId, setDeviceId] = useState('')
   const [remotePath, setRemotePath] = useState('')
   const [pin, setPin] = useState('')
@@ -47,12 +54,20 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
       setAccessKeyId('') // masked server-side — left blank, kept unless retyped
       setSecretAccessKey('')
       setPrefix(editing.config?.prefix || '')
+      setAzureAuthMode(editing.config?.authMode === 'accountKey' ? 'accountKey' : 'connectionString')
+      setAzureConnectionString('')
+      setAzureAccountName(editing.config?.accountName || '')
+      setAzureAccountKey('')
+      setAzureContainer(editing.config?.container || '')
+      setAzurePrefix(editing.config?.prefix || '')
       setDeviceId(editing.config?.deviceId || remoteDevices[0]?.id || '')
       setRemotePath(editing.config?.remotePath || '')
       setPin(''); setError('')
     } else {
       setType('s3'); setName(''); setBucket(''); setRegion('us-east-1')
       setAccessKeyId(''); setSecretAccessKey(''); setPrefix('')
+      setAzureAuthMode('connectionString'); setAzureConnectionString('')
+      setAzureAccountName(''); setAzureAccountKey(''); setAzureContainer(''); setAzurePrefix('')
       setDeviceId(remoteDevices[0]?.id || ''); setRemotePath('')
       setPin(''); setError('')
     }
@@ -67,7 +82,13 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
   const canSubmit = name.trim() && pin.trim() && (
     type === 's3'
       ? bucket.trim() && region.trim() && (isEditing || (accessKeyId.trim() && secretAccessKey.trim()))
-      : deviceId && remotePath.trim()
+      : type === 'azure_blob'
+        ? azureContainer.trim() && (
+            azureAuthMode === 'connectionString'
+              ? (isEditing || azureConnectionString.trim())
+              : (azureAccountName.trim() && (isEditing || azureAccountKey.trim()))
+          )
+        : deviceId && remotePath.trim()
   )
 
   const handleSubmit = async () => {
@@ -80,7 +101,17 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
             ...(accessKeyId.trim() ? { accessKeyId: accessKeyId.trim() } : {}),
             ...(secretAccessKey.trim() ? { secretAccessKey: secretAccessKey.trim() } : {}),
           }
-        : { deviceId, remotePath: remotePath.trim() }
+        : type === 'azure_blob'
+          ? {
+              container: azureContainer.trim(), prefix: azurePrefix.trim() || undefined,
+              ...(azureAuthMode === 'connectionString'
+                ? (azureConnectionString.trim() ? { connectionString: azureConnectionString.trim() } : {})
+                : {
+                    accountName: azureAccountName.trim(),
+                    ...(azureAccountKey.trim() ? { accountKey: azureAccountKey.trim() } : {}),
+                  }),
+            }
+          : { deviceId, remotePath: remotePath.trim() }
 
       const { data } = isEditing
         ? await api.put(`/backup/destinations/${editing.id}`, { name: name.trim(), config, actionPin: pin })
@@ -149,6 +180,35 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
                   <input type="password" className="input-field font-mono" value={secretAccessKey} onChange={e => setSecretAccessKey(e.target.value)} autoComplete="off" />
                 </Field>
               </>
+            ) : type === 'azure_blob' ? (
+              <>
+                <Field label="Container"><input className="input-field" value={azureContainer} onChange={e => setAzureContainer(e.target.value)} placeholder="netcontrol-backups" /></Field>
+                <Field label="Prefix (optional)"><input className="input-field" value={azurePrefix} onChange={e => setAzurePrefix(e.target.value)} placeholder="backups/" /></Field>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setAzureAuthMode('connectionString')}
+                    className={`flex-1 py-2 rounded-lg border text-xs font-body ${azureAuthMode === 'connectionString' ? 'border-brand-500/50 bg-brand-500/10' : ''}`}
+                    style={azureAuthMode !== 'connectionString' ? { borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' } : { color: 'var(--text-primary)' }}>
+                    Connection string
+                  </button>
+                  <button type="button" onClick={() => setAzureAuthMode('accountKey')}
+                    className={`flex-1 py-2 rounded-lg border text-xs font-body ${azureAuthMode === 'accountKey' ? 'border-brand-500/50 bg-brand-500/10' : ''}`}
+                    style={azureAuthMode !== 'accountKey' ? { borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' } : { color: 'var(--text-primary)' }}>
+                    Account name + key
+                  </button>
+                </div>
+                {azureAuthMode === 'connectionString' ? (
+                  <Field label={isEditing ? 'Connection string (leave blank to keep existing)' : 'Connection string'}>
+                    <input type="password" className="input-field font-mono" value={azureConnectionString} onChange={e => setAzureConnectionString(e.target.value)} autoComplete="off" placeholder="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;" />
+                  </Field>
+                ) : (
+                  <>
+                    <Field label="Storage account name"><input className="input-field font-mono" value={azureAccountName} onChange={e => setAzureAccountName(e.target.value)} autoComplete="off" /></Field>
+                    <Field label={isEditing ? 'Account key (leave blank to keep existing)' : 'Account key'}>
+                      <input type="password" className="input-field font-mono" value={azureAccountKey} onChange={e => setAzureAccountKey(e.target.value)} autoComplete="off" />
+                    </Field>
+                  </>
+                )}
+              </>
             ) : (
               <>
                 <Field label="Device">
@@ -163,6 +223,11 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
                 <Field label="Remote folder path"><input className="input-field font-mono" value={remotePath} onChange={e => setRemotePath(e.target.value)} placeholder="/srv/backups" /></Field>
               </>
             )}
+
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border text-xs font-body" style={{ borderColor: 'var(--border-subtle)', background: 'var(--bg-input)', color: 'var(--text-muted)' }}>
+              <Shield size={14} className="text-brand-400 shrink-0 mt-0.5" />
+              <span>{type === 'local' ? 'Local archives are stored as-is unless BACKUP_ENCRYPT_LOCAL is enabled on the server.' : 'Archives sent to this destination are always AES-256-GCM encrypted before they leave this server.'}</span>
+            </div>
 
             <Field label="Action PIN">
               <div className="relative">

@@ -19,10 +19,26 @@
 const fs     = require('fs');
 const path   = require('path');
 const crypto = require('crypto');
-const { decrypt, encrypt } = require('./crypto');
+const { decrypt, encrypt, createEncryptStream, createDecryptStream } = require('./crypto');
 const remoteBrowse = require('./remoteBrowse');
 
 class DestinationError extends Error {}
+
+// ── Encryption-at-rest policy ────────────────────────────────────────────────
+// Archives/log exports leaving the NetControl host — S3, Azure Blob, or an
+// SFTP push to another device — are always encrypted (AES-256-GCM, see
+// services/crypto.js createEncryptStream) before they leave this process, so
+// a compromised bucket/container/remote box never yields readable data on
+// its own. Local storage stays as-is by default (the archive is already
+// behind this app's own auth), but can be opted into encryption with
+// BACKUP_ENCRYPT_LOCAL=true in .env for admins who want it everywhere.
+const ALWAYS_ENCRYPTED_TYPES = new Set(['s3', 'azure_blob', 'remote_folder']);
+
+function shouldEncrypt(type) {
+  if (ALWAYS_ENCRYPTED_TYPES.has(type)) return true;
+  if (type === 'local') return String(process.env.BACKUP_ENCRYPT_LOCAL).toLowerCase() === 'true';
+  return false;
+}
 
 // ── Config encrypt/decrypt — stored as one encrypted JSON blob per row ────────
 function encryptConfig(obj) {
@@ -38,6 +54,16 @@ function decryptConfig(ciphertext) {
 function redactConfig(type, config) {
   if (type === 's3') {
     return { bucket: config.bucket, region: config.region, prefix: config.prefix || '', accessKeyId: config.accessKeyId ? `${config.accessKeyId.slice(0, 4)}••••` : null };
+  }
+  if (type === 'azure_blob') {
+    return {
+      accountName: config.accountName || null,
+      container: config.container,
+      prefix: config.prefix || '',
+      authMode: config.connectionString ? 'connectionString' : 'accountKey',
+      connectionString: config.connectionString ? '••••(saved)' : null,
+      accountKey: config.accountKey ? '••••(saved)' : null,
+    };
   }
   if (type === 'remote_folder') {
     return { deviceId: config.deviceId, deviceName: config.deviceName, remotePath: config.remotePath };
@@ -87,6 +113,43 @@ async function writeS3(stream, archiveName, config) {
     throw new DestinationError(`S3 upload failed: ${e.message}`);
   }
   return { bytes, checksum: hash.digest('hex'), remoteKey: key };
+}
+
+// ── Azure Blob Storage ────────────────────────────────────────────────────────
+// Config shape: either { connectionString, container, prefix } or
+// { accountName, accountKey, container, prefix }. uploadStream handles
+// chunking/buffering internally (like S3's Upload helper), so this works the
+// same way for archives of unknown size streamed straight from the archiver.
+async function writeAzure(stream, archiveName, config) {
+  const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+
+  const hash = crypto.createHash('sha256');
+  let bytes = 0;
+  stream.on('data', chunk => { hash.update(chunk); bytes += chunk.length; });
+
+  let serviceClient;
+  try {
+    if (config.connectionString) {
+      serviceClient = BlobServiceClient.fromConnectionString(config.connectionString);
+    } else if (config.accountName && config.accountKey) {
+      const cred = new StorageSharedKeyCredential(config.accountName, config.accountKey);
+      serviceClient = new BlobServiceClient(`https://${config.accountName}.blob.core.windows.net`, cred);
+    } else {
+      throw new DestinationError('Azure destination needs either connectionString or accountName+accountKey');
+    }
+
+    const containerClient = serviceClient.getContainerClient(config.container);
+    const key = config.prefix ? `${config.prefix.replace(/\/+$/, '')}/${archiveName}` : archiveName;
+    const blockBlobClient = containerClient.getBlockBlobClient(key);
+
+    // bufferSize/maxConcurrency let this upload without knowing the final
+    // size up front, same reasoning as S3's multipart Upload helper above.
+    await blockBlobClient.uploadStream(stream, 8 * 1024 * 1024, 4);
+    return { bytes, checksum: hash.digest('hex'), remoteKey: key };
+  } catch (e) {
+    if (e instanceof DestinationError) throw e;
+    throw new DestinationError(`Azure upload failed: ${e.message}`);
+  }
 }
 
 // ── Remote folder (SFTP push to another device) ─────────────────────────────────
@@ -168,17 +231,40 @@ async function writeRemoteFolder(stream, archiveName, config, device) {
 // ── Dispatch ────────────────────────────────────────────────────────────────────
 // `destination` shape: { type, config, device? } — device is only needed
 // (and only loaded by the caller) for type === 'remote_folder'.
+// When the destination type is one that should be encrypted at rest (see
+// shouldEncrypt() above), the archive stream is piped through AES-256-GCM
+// first, so every writer below always just receives ready-to-store bytes
+// and doesn't need to know or care whether they're plaintext or ciphertext.
+// The checksum recorded in the DB is computed on whatever bytes actually get
+// written (ciphertext when encrypted), so a later download-and-verify still
+// checks the file that's really sitting at the destination.
 async function writeToDestination(stream, archiveName, destination, storeDir) {
+  const encrypted = shouldEncrypt(destination.type);
+  const finalStream = encrypted ? stream.pipe(createEncryptStream()) : stream;
+
+  let result;
   switch (destination.type) {
-    case 'local':          return writeLocal(stream, archiveName, storeDir);
-    case 's3':             return writeS3(stream, archiveName, destination.config);
-    case 'remote_folder':  return writeRemoteFolder(stream, archiveName, destination.config, destination.device);
+    case 'local':          result = await writeLocal(finalStream, archiveName, storeDir); break;
+    case 's3':              result = await writeS3(finalStream, archiveName, destination.config); break;
+    case 'azure_blob':      result = await writeAzure(finalStream, archiveName, destination.config); break;
+    case 'remote_folder':   result = await writeRemoteFolder(finalStream, archiveName, destination.config, destination.device); break;
     default: throw new DestinationError(`Unknown destination type: ${destination.type}`);
   }
+  return { ...result, encrypted };
+}
+
+// ── Decrypt-on-download ─────────────────────────────────────────────────────
+// Only used for local-destination archives (the only destination type this
+// app serves a download for directly — S3/Azure/remote-folder archives are
+// retrieved from that destination itself). Wraps the raw on-disk file stream
+// with the matching AES-256-GCM decrypt transform when the backups row says
+// it was written encrypted.
+function decryptReadStream(readStream) {
+  return readStream.pipe(createDecryptStream());
 }
 
 module.exports = {
   DestinationError,
   encryptConfig, decryptConfig, redactConfig,
-  writeToDestination,
+  writeToDestination, shouldEncrypt, decryptReadStream,
 };
