@@ -25,6 +25,7 @@ import DiscoveryPage   from './pages/DiscoveryPage'
 import CompliancePage  from './pages/CompliancePage'
 import ProcessPoliciesPage from './pages/ProcessPoliciesPage'
 import BackupsPage    from './pages/BackupPage'
+import SlaReportsPage from './pages/SlaReportsPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -114,6 +115,7 @@ export default function App() {
           <Route path="compliance"      element={<RequirePermission bit={2048}><CompliancePage /></RequirePermission>} />
           <Route path="process-policies" element={<RequirePermission bit={4096}><ProcessPoliciesPage /></RequirePermission>} />
           <Route path="backups"          element={<RequirePermission bit={8192}><BackupsPage /></RequirePermission>} />
+          <Route path="sla-reports"      element={<RequirePermission bit={16384}><SlaReportsPage /></RequirePermission>} />
 
           {/* Admin-only routes */}
           <Route

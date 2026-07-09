@@ -14,6 +14,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requireRole, requirePermission, requireActionPin } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const audit = require('../services/audit');
 const scheduledJobs = require('../services/scheduledJobs');
 
@@ -35,6 +36,7 @@ const cronValidator = body('cronExpr').custom((v) => {
 // ── /api/backup-schedules ───────────────────────────────────────────────────
 const backupSchedulesRouter = express.Router();
 backupSchedulesRouter.use(requireAuth);
+backupSchedulesRouter.use(requireOrgContext);
 backupSchedulesRouter.use(requireBackupPermission);
 
 // GET /api/backup-schedules
@@ -44,7 +46,9 @@ backupSchedulesRouter.get('/', async (req, res) => {
       `SELECT bs.*, d.name AS source_device_name
        FROM backup_schedules bs
        LEFT JOIN devices d ON d.id = bs.source_device_id
-       ORDER BY bs.created_at DESC`
+       WHERE bs.org_id = ?
+       ORDER BY bs.created_at DESC`,
+      [req.orgId]
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -81,11 +85,11 @@ backupSchedulesRouter.post(
 
     try {
       if (sourceDeviceId) {
-        const d = await queryOne('SELECT id FROM devices WHERE id = ?', [sourceDeviceId]);
+        const d = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [sourceDeviceId, req.orgId]);
         if (!d) return res.status(400).json({ error: 'Source device not found' });
       }
       if (destinationId) {
-        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ?', [destinationId]);
+        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ? AND org_id = ?', [destinationId, req.orgId]);
         if (!dest) return res.status(400).json({ error: 'Destination not found' });
       }
 
@@ -93,14 +97,14 @@ backupSchedulesRouter.post(
       await execute(
         `INSERT INTO backup_schedules
            (id, name, cron_expr, enabled, source_device_id, mount, source_path, format, label,
-            destination_id, created_by, created_by_name, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            destination_id, created_by, created_by_name, created_at, org_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, name, cronExpr, enabled ? 1 : 0, sourceDeviceId || null, mount || null, sourcePath,
          format, label || null, destinationId || null, req.user.id, req.user.username,
-         Math.floor(Date.now() / 1000)]
+         Math.floor(Date.now() / 1000), req.orgId]
       );
 
-      const schedule = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [id]);
+      const schedule = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [id, req.orgId]);
       scheduledJobs.registerBackupSchedule(schedule);
 
       await audit.log({
@@ -122,7 +126,7 @@ backupSchedulesRouter.put(
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
-      const existing = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [req.params.id]);
+      const existing = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       if (!existing) return res.status(404).json({ error: 'Schedule not found' });
 
       const {
@@ -134,11 +138,11 @@ backupSchedulesRouter.put(
         return res.status(400).json({ error: 'mount is required when backing up from a device' });
       }
       if (sourceDeviceId) {
-        const d = await queryOne('SELECT id FROM devices WHERE id = ?', [sourceDeviceId]);
+        const d = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [sourceDeviceId, req.orgId]);
         if (!d) return res.status(400).json({ error: 'Source device not found' });
       }
       if (destinationId) {
-        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ?', [destinationId]);
+        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ? AND org_id = ?', [destinationId, req.orgId]);
         if (!dest) return res.status(400).json({ error: 'Destination not found' });
       }
 
@@ -146,12 +150,12 @@ backupSchedulesRouter.put(
         `UPDATE backup_schedules
          SET name = ?, cron_expr = ?, enabled = ?, source_device_id = ?, mount = ?,
              source_path = ?, format = ?, label = ?, destination_id = ?
-         WHERE id = ?`,
+         WHERE id = ? AND org_id = ?`,
         [name, cronExpr, enabled ? 1 : 0, sourceDeviceId || null, mount || null,
-         sourcePath, format, label || null, destinationId || null, req.params.id]
+         sourcePath, format, label || null, destinationId || null, req.params.id, req.orgId]
       );
 
-      const schedule = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [req.params.id]);
+      const schedule = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       scheduledJobs.registerBackupSchedule(schedule);
 
       await audit.log({
@@ -169,11 +173,11 @@ backupSchedulesRouter.put(
 backupSchedulesRouter.patch('/:id/toggle', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const s = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [req.params.id]);
+    const s = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!s) return res.status(404).json({ error: 'Schedule not found' });
 
-    await execute('UPDATE backup_schedules SET enabled = ? WHERE id = ?', [s.enabled ? 0 : 1, req.params.id]);
-    const updated = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [req.params.id]);
+    await execute('UPDATE backup_schedules SET enabled = ? WHERE id = ? AND org_id = ?', [s.enabled ? 0 : 1, req.params.id, req.orgId]);
+    const updated = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     scheduledJobs.registerBackupSchedule(updated);
 
     await audit.log({
@@ -190,7 +194,7 @@ backupSchedulesRouter.patch('/:id/toggle', param('id').isUUID(), async (req, res
 backupSchedulesRouter.post('/:id/run', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const s = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [req.params.id]);
+    const s = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!s) return res.status(404).json({ error: 'Schedule not found' });
 
     await audit.log({
@@ -215,7 +219,7 @@ backupSchedulesRouter.delete(
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
-      const s = await queryOne('SELECT * FROM backup_schedules WHERE id = ?', [req.params.id]);
+      const s = await queryOne('SELECT * FROM backup_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       if (!s) return res.status(404).json({ error: 'Schedule not found' });
 
       scheduledJobs.unregisterBackupSchedule(req.params.id);
@@ -235,11 +239,12 @@ backupSchedulesRouter.delete(
 // ── /api/log-export-schedules ───────────────────────────────────────────────
 const logExportSchedulesRouter = express.Router();
 logExportSchedulesRouter.use(requireAuth);
+logExportSchedulesRouter.use(requireOrgContext);
 logExportSchedulesRouter.use(requirePermission(128)); // matches routes/audit.js's export gate
 
 logExportSchedulesRouter.get('/', async (req, res) => {
   try {
-    const rows = await query('SELECT * FROM log_export_schedules ORDER BY created_at DESC');
+    const rows = await query('SELECT * FROM log_export_schedules WHERE org_id = ? ORDER BY created_at DESC', [req.orgId]);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -274,7 +279,7 @@ logExportSchedulesRouter.post(
     const format = exportTarget === 'syslog' ? 'csv' : req.body.format; // unused for syslog, kept non-null to satisfy the column
     try {
       if (exportTarget === 'file' && destinationId) {
-        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ?', [destinationId]);
+        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ? AND org_id = ?', [destinationId, req.orgId]);
         if (!dest) return res.status(400).json({ error: 'Destination not found' });
       }
       if (exportTarget === 'syslog') {
@@ -288,14 +293,14 @@ logExportSchedulesRouter.post(
       const id = uuidv4();
       await execute(
         `INSERT INTO log_export_schedules
-           (id, name, cron_expr, enabled, format, export_target, filters, destination_id, created_by, created_by_name, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, name, cron_expr, enabled, format, export_target, filters, destination_id, created_by, created_by_name, created_at, org_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, name, cronExpr, enabled ? 1 : 0, format, exportTarget, JSON.stringify(filters),
          exportTarget === 'file' ? (destinationId || null) : null,
-         req.user.id, req.user.username, Math.floor(Date.now() / 1000)]
+         req.user.id, req.user.username, Math.floor(Date.now() / 1000), req.orgId]
       );
 
-      const schedule = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [id]);
+      const schedule = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [id, req.orgId]);
       scheduledJobs.registerLogExportSchedule(schedule);
 
       await audit.log({
@@ -316,7 +321,7 @@ logExportSchedulesRouter.put(
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
-      const existing = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
+      const existing = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       if (!existing) return res.status(404).json({ error: 'Schedule not found' });
 
       const { name, cronExpr, filters = {}, destinationId, enabled = true } = req.body;
@@ -324,7 +329,7 @@ logExportSchedulesRouter.put(
       const format = exportTarget === 'syslog' ? 'csv' : req.body.format;
 
       if (exportTarget === 'file' && destinationId) {
-        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ?', [destinationId]);
+        const dest = await queryOne('SELECT id FROM backup_destinations WHERE id = ? AND org_id = ?', [destinationId, req.orgId]);
         if (!dest) return res.status(400).json({ error: 'Destination not found' });
       }
       if (exportTarget === 'syslog') {
@@ -338,12 +343,12 @@ logExportSchedulesRouter.put(
       await execute(
         `UPDATE log_export_schedules
          SET name = ?, cron_expr = ?, enabled = ?, format = ?, export_target = ?, filters = ?, destination_id = ?
-         WHERE id = ?`,
+         WHERE id = ? AND org_id = ?`,
         [name, cronExpr, enabled ? 1 : 0, format, exportTarget, JSON.stringify(filters),
-         exportTarget === 'file' ? (destinationId || null) : null, req.params.id]
+         exportTarget === 'file' ? (destinationId || null) : null, req.params.id, req.orgId]
       );
 
-      const schedule = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
+      const schedule = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       scheduledJobs.registerLogExportSchedule(schedule);
 
       await audit.log({
@@ -360,11 +365,11 @@ logExportSchedulesRouter.put(
 logExportSchedulesRouter.patch('/:id/toggle', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const s = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
+    const s = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!s) return res.status(404).json({ error: 'Schedule not found' });
 
-    await execute('UPDATE log_export_schedules SET enabled = ? WHERE id = ?', [s.enabled ? 0 : 1, req.params.id]);
-    const updated = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
+    await execute('UPDATE log_export_schedules SET enabled = ? WHERE id = ? AND org_id = ?', [s.enabled ? 0 : 1, req.params.id, req.orgId]);
+    const updated = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     scheduledJobs.registerLogExportSchedule(updated);
 
     await audit.log({
@@ -380,7 +385,7 @@ logExportSchedulesRouter.patch('/:id/toggle', param('id').isUUID(), async (req, 
 logExportSchedulesRouter.post('/:id/run', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const s = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
+    const s = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!s) return res.status(404).json({ error: 'Schedule not found' });
 
     await audit.log({
@@ -400,7 +405,7 @@ logExportSchedulesRouter.delete(
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
-      const s = await queryOne('SELECT * FROM log_export_schedules WHERE id = ?', [req.params.id]);
+      const s = await queryOne('SELECT * FROM log_export_schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       if (!s) return res.status(404).json({ error: 'Schedule not found' });
 
       scheduledJobs.unregisterLogExportSchedule(req.params.id);

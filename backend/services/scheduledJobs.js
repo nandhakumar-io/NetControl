@@ -23,9 +23,12 @@ const webhook = require('./webhook');
 const backupService = require('./backupService');
 const remoteBrowse = require('./remoteBrowse');
 const destinations = require('./backupDestinations');
+const slaReportService = require('./slaReportService');
+const mailer = require('./mailer');
 
 const backupTasks = new Map();     // schedule.id -> cron task
 const logExportTasks = new Map();  // schedule.id -> cron task
+const slaReportTasks = new Map();  // schedule.id -> cron task
 
 const LOCAL_DEVICE_ID = 'local';
 const TIMEZONE = 'Asia/Kolkata'; // matches services/scheduler.js
@@ -85,11 +88,11 @@ async function runBackupSchedule(schedule) {
     await execute(
       `INSERT INTO backups (id, source_path, device_id, device_name, source_type, format,
               destination_id, destination_name, destination_type, archive_name, status,
-              created_by, created_by_name, created_at)
-       VALUES (?, ?, ?, ?, 'file', ?, ?, ?, ?, '', 'pending', ?, ?, ?)`,
+              created_by, created_by_name, created_at, org_id)
+       VALUES (?, ?, ?, ?, 'file', ?, ?, ?, ?, '', 'pending', ?, ?, ?, ?)`,
       [id, schedule.source_path, isRemoteSource ? schedule.source_device_id : null, sourceDeviceName, format,
        schedule.destination_id || null, destinationName, destination.type,
-       null, `schedule:${schedule.name}`, nowSec]
+       null, `schedule:${schedule.name}`, nowSec, schedule.org_id]
     );
 
     const cfg = backupService.FORMAT_CONFIG[format];
@@ -121,7 +124,8 @@ async function runBackupSchedule(schedule) {
 
     if (destination.type === 'local') {
       const rowsNewestFirst = await query(
-        `SELECT id, archive_name FROM backups WHERE status = 'completed' AND destination_type = 'local' ORDER BY created_at DESC`
+        `SELECT id, archive_name FROM backups WHERE status = 'completed' AND destination_type = 'local' AND org_id = ? ORDER BY created_at DESC`,
+        [schedule.org_id]
       );
       const removedIds = await backupService.pruneOldArchives(rowsNewestFirst);
       if (removedIds.length) {
@@ -344,6 +348,130 @@ function unregisterLogExportSchedule(id) {
   }
 }
 
+// ── SLA report schedules ─────────────────────────────────────────────────────
+// Reuses services/slaReportService.js's generateReport() — the exact same
+// code path POST /api/sla-reports/generate calls — so a scheduled report is
+// byte-for-byte what a human clicking "Generate" would get, just with the
+// period window computed from the schedule's period_mode instead of typed
+// in by hand, and attributed to "scheduler" rather than a user.
+function computePeriod(schedule) {
+  const now = new Date();
+  if (schedule.period_mode === 'trailing_days') {
+    const days = schedule.period_days || 30;
+    const to = Math.floor(now.getTime() / 1000);
+    const from = to - days * 86400;
+    return { from, to };
+  }
+  // previous_calendar_month (default): whatever month just ended relative
+  // to when this fires. A schedule set for "1st of month, 06:00" firing on
+  // e.g. March 1st reports on all of February — the natural meaning of
+  // "monthly SLA report" for a client-facing deliverable.
+  const firstOfThisMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const firstOfPrevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  return {
+    from: Math.floor(firstOfPrevMonth.getTime() / 1000),
+    to: Math.floor(firstOfThisMonth.getTime() / 1000),
+  };
+}
+
+async function runSlaReportSchedule(schedule) {
+  try {
+    const { from, to } = computePeriod(schedule);
+    const org = await queryOne('SELECT name FROM organizations WHERE id = ?', [schedule.org_id]);
+    if (!org) throw new Error('Organization for this schedule no longer exists');
+
+    const result = await slaReportService.generateReport({
+      orgId: schedule.org_id, orgName: org.name,
+      scope: schedule.scope_type, scopeId: schedule.scope_id || null,
+      from, to, userId: null, username: `scheduler:${schedule.name}`,
+    });
+
+    let emailResult = { sent: false, reason: 'No recipients configured' };
+    if (schedule.email_recipients) {
+      const fs = require('fs');
+      emailResult = await mailer.sendMail({
+        to: schedule.email_recipients,
+        subject: `${org.name} — Monthly SLA Report (${result.reportData.scopeName})`,
+        text: `Your scheduled SLA/uptime report for ${result.reportData.scopeName} is attached.\n\n` +
+              `Period: ${new Date(from * 1000).toISOString().slice(0, 10)} to ${new Date(to * 1000).toISOString().slice(0, 10)}\n` +
+              `Devices covered: ${result.reportData.deviceCount}\n` +
+              `Average uptime: ${result.reportData.avgUptimePct !== null ? result.reportData.avgUptimePct.toFixed(3) + '%' : 'n/a'}\n`,
+        html: `<p>Your scheduled SLA/uptime report for <strong>${result.reportData.scopeName}</strong> is attached.</p>
+               <p>Period: ${new Date(from * 1000).toISOString().slice(0, 10)} to ${new Date(to * 1000).toISOString().slice(0, 10)}<br/>
+               Devices covered: ${result.reportData.deviceCount}<br/>
+               Average uptime: ${result.reportData.avgUptimePct !== null ? result.reportData.avgUptimePct.toFixed(3) + '%' : 'n/a'}</p>`,
+        attachments: [{ filename: result.fileName, content: fs.readFileSync(result.filePath) }],
+      }).catch(e => ({ sent: false, reason: e.message }));
+    }
+
+    await execute(
+      `UPDATE sla_report_schedules SET last_run = ?, last_status = 'success', last_error = NULL,
+              last_report_id = ?, consecutive_failures = 0 WHERE id = ?`,
+      [Math.floor(Date.now() / 1000), result.id, schedule.id]
+    );
+
+    webhook.fire('sla_report.generated', {
+      org_id: schedule.org_id, schedule_name: schedule.name, report_id: result.id,
+      scope: result.reportData.scopeName, device_count: result.reportData.deviceCount,
+      avg_uptime_pct: result.reportData.avgUptimePct, severity: 'info',
+      message: `Scheduled SLA report "${schedule.name}" generated for ${result.reportData.scopeName} ` +
+               `(${result.reportData.deviceCount} device(s), avg uptime ${result.reportData.avgUptimePct ?? 'n/a'}%)` +
+               (schedule.email_recipients ? `, email ${emailResult.sent ? 'sent' : 'skipped: ' + emailResult.reason}` : ''),
+    }).catch(() => {});
+
+    await audit.log({
+      username: 'scheduler', action: 'sla_report_schedule_run', targetType: 'sla_report_schedule',
+      targetId: schedule.id, targetName: schedule.name, ipSource: 'scheduler', result: 'success',
+      details: `Report ${result.id} generated, email ${emailResult.sent ? 'sent' : 'skipped'}`,
+    }).catch(() => {});
+  } catch (e) {
+    await execute(
+      `UPDATE sla_report_schedules SET last_run = ?, last_status = 'failure', last_error = ?,
+              consecutive_failures = consecutive_failures + 1 WHERE id = ?`,
+      [Math.floor(Date.now() / 1000), e.message.slice(0, 1000), schedule.id]
+    ).catch(() => {});
+
+    webhook.fire('sla_report.failed', {
+      org_id: schedule.org_id, schedule_name: schedule.name, error: e.message, severity: 'warning',
+      message: `Scheduled SLA report "${schedule.name}" FAILED: ${e.message}`,
+    }).catch(() => {});
+
+    await audit.log({
+      username: 'scheduler', action: 'sla_report_schedule_run', targetType: 'sla_report_schedule',
+      targetId: schedule.id, targetName: schedule.name, ipSource: 'scheduler', result: 'failure',
+      details: e.message,
+    }).catch(() => {});
+
+    throw e;
+  }
+}
+
+function registerSlaReportSchedule(schedule) {
+  if (!cron.validate(schedule.cron_expr)) {
+    console.warn(`[ScheduledJobs] Invalid cron for SLA report schedule "${schedule.name}": ${schedule.cron_expr}`);
+    return false;
+  }
+  if (slaReportTasks.has(schedule.id)) {
+    slaReportTasks.get(schedule.id).stop();
+    slaReportTasks.delete(schedule.id);
+  }
+  if (!schedule.enabled) return true;
+
+  const task = cron.schedule(schedule.cron_expr, () => {
+    runSlaReportSchedule(schedule).catch(err => console.error(`[ScheduledJobs] SLA report run failed for "${schedule.name}":`, err.message));
+  }, { timezone: TIMEZONE });
+
+  slaReportTasks.set(schedule.id, task);
+  return true;
+}
+
+function unregisterSlaReportSchedule(id) {
+  if (slaReportTasks.has(id)) {
+    slaReportTasks.get(id).stop();
+    slaReportTasks.delete(id);
+  }
+}
+
 // ── Boot / shutdown ──────────────────────────────────────────────────────────
 async function start() {
   try {
@@ -363,17 +491,29 @@ async function start() {
   } catch (e) {
     console.error('[ScheduledJobs] Failed to load log export schedules — will not retry until restart:', e.message);
   }
+
+  try {
+    const slaRows = await query('SELECT * FROM sla_report_schedules WHERE enabled = 1');
+    let registered = 0;
+    for (const s of slaRows) if (registerSlaReportSchedule(s)) registered++;
+    console.log(`✅ ScheduledJobs: loaded ${registered} active SLA report schedule(s)`);
+  } catch (e) {
+    console.error('[ScheduledJobs] Failed to load SLA report schedules — will not retry until restart:', e.message);
+  }
 }
 
 function stop() {
   for (const task of backupTasks.values()) task.stop();
   for (const task of logExportTasks.values()) task.stop();
+  for (const task of slaReportTasks.values()) task.stop();
   backupTasks.clear();
   logExportTasks.clear();
+  slaReportTasks.clear();
 }
 
 module.exports = {
   start, stop,
   registerBackupSchedule, unregisterBackupSchedule, runBackupSchedule,
   registerLogExportSchedule, unregisterLogExportSchedule, runLogExportSchedule,
+  registerSlaReportSchedule, unregisterSlaReportSchedule, runSlaReportSchedule,
 };

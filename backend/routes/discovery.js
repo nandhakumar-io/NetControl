@@ -11,6 +11,7 @@ const { body, param, query: queryValidator, validationResult } = require('expres
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requirePermission, requireActionPin } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const { discoveryLimiter } = require('../middleware/rateLimiter');
 const discovery = require('../services/discoveryService');
 const { encrypt } = require('../services/crypto');
@@ -18,7 +19,7 @@ const { lookupVendor } = require('../services/discoveryVendors');
 const audit = require('../services/audit');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 const DISCOVER_NETWORK = 1024;
 const MANAGE_DEVICES    = 2;
@@ -68,13 +69,13 @@ router.post('/scans',
     try {
       await execute(
         `INSERT INTO discovery_scans
-           (id, name, cidr, methods, snmp_communities, nmap_options, status, total_hosts, created_by, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+           (id, name, cidr, methods, snmp_communities, nmap_options, status, total_hosts, created_by, created_at, org_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         [
           id, name, cidr, JSON.stringify(methods),
           methods.includes('snmp') ? encrypt(JSON.stringify(communities)) : null,
           nmapOptions ? JSON.stringify(nmapOptions) : null,
-          'queued', hostCount, req.user.id, now,
+          'queued', hostCount, req.user.id, now, req.orgId,
         ]
       );
 
@@ -104,7 +105,9 @@ router.get('/scans', requirePermission(DISCOVER_NETWORK), async (req, res) => {
       `SELECT s.id, s.name, s.cidr, s.methods, s.status, s.total_hosts, s.scanned_hosts,
               s.alive_hosts, s.error, s.created_at, s.started_at, s.finished_at, u.username as created_by_name
        FROM discovery_scans s LEFT JOIN users u ON u.id = s.created_by
-       ORDER BY s.created_at DESC LIMIT 100`
+       WHERE s.org_id = ?
+       ORDER BY s.created_at DESC LIMIT 100`,
+      [req.orgId]
     );
     res.json(rows.map(r => ({ ...r, methods: safeJson(r.methods, []) })));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -116,7 +119,7 @@ router.get('/scans/:id', requirePermission(DISCOVER_NETWORK), param('id').isUUID
   try {
     const scan = await queryOne(
       `SELECT s.*, u.username as created_by_name FROM discovery_scans s
-       LEFT JOIN users u ON u.id = s.created_by WHERE s.id = ?`, [req.params.id]
+       LEFT JOIN users u ON u.id = s.created_by WHERE s.id = ? AND s.org_id = ?`, [req.params.id, req.orgId]
     );
     if (!scan) return res.status(404).json({ error: 'Scan not found' });
     delete scan.snmp_communities; // never expose stored community strings back
@@ -130,6 +133,8 @@ router.get('/scans/:id', requirePermission(DISCOVER_NETWORK), param('id').isUUID
 router.get('/scans/:id/results', requirePermission(DISCOVER_NETWORK), param('id').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
   try {
+    const scanOwned = await queryOne('SELECT id FROM discovery_scans WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!scanOwned) return res.status(404).json({ error: 'Scan not found' });
     const rows = await query(
       `SELECT * FROM discovery_results WHERE scan_id = ? ORDER BY INET_ATON(ip_address)`,
       [req.params.id]
@@ -147,7 +152,7 @@ router.get('/scans/:id/results', requirePermission(DISCOVER_NETWORK), param('id'
 router.post('/scans/:id/cancel', requirePermission(DISCOVER_NETWORK), param('id').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
   try {
-    const scan = await queryOne('SELECT status FROM discovery_scans WHERE id = ?', [req.params.id]);
+    const scan = await queryOne('SELECT status FROM discovery_scans WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!scan) return res.status(404).json({ error: 'Scan not found' });
     if (!['queued', 'running'].includes(scan.status)) return res.json({ ok: true, status: scan.status });
     await execute('UPDATE discovery_scans SET cancel_requested = 1 WHERE id = ?', [req.params.id]);
@@ -159,7 +164,7 @@ router.post('/scans/:id/cancel', requirePermission(DISCOVER_NETWORK), param('id'
 router.delete('/scans/:id', requirePermission(DISCOVER_NETWORK), param('id').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
   try {
-    const scan = await queryOne('SELECT status FROM discovery_scans WHERE id = ?', [req.params.id]);
+    const scan = await queryOne('SELECT status FROM discovery_scans WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!scan) return res.status(404).json({ error: 'Scan not found' });
     if (scan.status === 'running') return res.status(409).json({ error: 'Cancel the scan before deleting it' });
     await execute('DELETE FROM discovery_scans WHERE id = ?', [req.params.id]); // results cascade
@@ -199,6 +204,9 @@ router.post('/scans/:id/import',
     const { encrypt } = require('../services/crypto');
 
     try {
+      const scanOwned = await queryOne('SELECT id FROM discovery_scans WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+      if (!scanOwned) return res.status(404).json({ error: 'Scan not found' });
+
       const resultIds = deviceSpecs.map(d => d.resultId);
       const placeholders = resultIds.map(() => '?').join(',');
       const dbResults = await query(
@@ -218,7 +226,7 @@ router.post('/scans/:id/import',
         // MAC is strongly preferred but not hard-required — some hosts (e.g. remote
         // subnets) won't have one in the ARP table. Warn but allow import.
         if (r.mac_address) {
-          const existing = await queryOne('SELECT id FROM devices WHERE mac_address = ?', [r.mac_address]);
+          const existing = await queryOne('SELECT id FROM devices WHERE mac_address = ? AND org_id = ?', [r.mac_address, req.orgId]);
           if (existing) { skipped.push({ name: spec.name, ip: r.ip_address, reason: 'A device with this MAC already exists' }); continue; }
         }
 
@@ -235,8 +243,8 @@ router.post('/scans/:id/import',
           `INSERT INTO devices
              (id, name, ip_address, mac_address, os_type, group_id,
               ssh_username, ssh_password, winrm_username, winrm_password,
-              status, last_seen, created_at)
-           VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?)`,
+              status, last_seen, created_at, org_id)
+           VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?)`,
           [
             deviceId,
             spec.name.trim(),
@@ -248,7 +256,7 @@ router.post('/scans/:id/import',
             sshPass   ? encrypt(sshPass)   : null,
             winrmUser,
             winrmPass ? encrypt(winrmPass) : null,
-            'unknown', now, now,
+            'unknown', now, now, req.orgId,
           ]
         );
         await execute('UPDATE discovery_results SET imported = 1, device_id = ? WHERE id = ?', [deviceId, r.id]);

@@ -56,6 +56,12 @@ const EVENTS = {
   // Scheduled digest reports (services/digestService.js) — a periodic
   // summary of device health, alerts, compliance drift, and backup status.
   'digest.weekly':              'Scheduled digest report',
+  // Automatic monthly SLA/uptime report generation (services/scheduledJobs.js
+  // runSlaReportSchedule) — separate from the on-demand generate endpoint,
+  // which doesn't fire a webhook since a human clicking "Generate" already
+  // sees the result in the UI immediately.
+  'sla_report.generated':        'Scheduled SLA report generated',
+  'sla_report.failed':           'Scheduled SLA report generation failed',
 };
 
 module.exports.EVENTS = EVENTS;
@@ -73,6 +79,7 @@ function buildPayload(provider, event, data) {
     'log_export.succeeded': '🗂️', 'log_export.failed': '🗂️',
     'schedule.action_succeeded': '⏱️', 'schedule.action_failed': '⏱️',
     'backup.verified': '✅', 'backup.verify_failed': '💥', 'digest.weekly': '📊',
+    'sla_report.generated': '📈', 'sla_report.failed': '💥',
   }[event] || 'ℹ️';
 
   const text  = `${emoji} *${EVENTS[event] || event}*\n${data.message || JSON.stringify(data)}`;

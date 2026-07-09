@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck,
-  ShieldBan, Archive,
+  ShieldBan, Archive, FileBarChart2,
   ChevronRight as ArrowIcon
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
@@ -217,6 +217,7 @@ export default function Layout() {
       label: 'Compliance',
       items: [
         { to: '/compliance', icon: ShieldCheck, label: 'Compliance', show: can(2048) },
+        { to: '/sla-reports', icon: FileBarChart2, label: 'SLA Reports', show: can(16384) },
         { to: '/audit',      icon: ScrollText,  label: 'Audit Log',  show: can(128) },
       ],
     },

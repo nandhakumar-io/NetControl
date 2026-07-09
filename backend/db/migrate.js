@@ -775,11 +775,25 @@ run()
       console.warn('  ⚠  api_keys:', e.message);
     }
     try {
-      const { migrateDeviceHostname } = require('./migrate-device-hostname');
-      await migrateDeviceHostname();
-      console.log('  ✓ devices.hostname (persistent hostname, separate from editable name — fixes /register dedup breaking on rename)');
+      const { migrateOrgs } = require('./migrate-orgs');
+      await migrateOrgs();
+      console.log('  ✓ orgs (multi-tenant/MSP client isolation + auto-remediation runbooks)');
     } catch (e) {
-      console.warn('  ⚠  devices.hostname:', e.message);
+      console.warn('  ⚠  orgs:', e.message);
+    }
+    try {
+      const { migrateSlaReports } = require('./migrate-sla-reports');
+      await migrateSlaReports();
+      console.log('  ✓ sla_reports (uptime/SLA PDF report storage)');
+    } catch (e) {
+      console.warn('  ⚠  sla_reports:', e.message);
+    }
+    try {
+      const { migrateSlaReportSchedules } = require('./migrate-sla-report-schedules');
+      await migrateSlaReportSchedules();
+      console.log('  ✓ sla_report_schedules (monthly automatic SLA report generation)');
+    } catch (e) {
+      console.warn('  ⚠  sla_report_schedules:', e.message);
     }
     console.log('\n✅ All done.\n');
   })

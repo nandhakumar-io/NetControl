@@ -5,11 +5,12 @@ const { v4: uuidv4 } = require('uuid');
 const cron = require('node-cron');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const { registerSchedule, unregisterSchedule } = require('../services/scheduler');
 const audit = require('../services/audit');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 // SECURITY FIX: manage_schedules (bit 64) gate — previously any authenticated
 // user, including viewers, could hit POST/PUT/PATCH/DELETE below.
@@ -28,15 +29,16 @@ async function verifyTargetAccess(req, res, next) {
   try {
     if (target_type === 'group') {
       const access = await queryOne(
-        'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
-        [req.user.id, target_id]
+        'SELECT 1 FROM user_group_access uga INNER JOIN `groups` g ON g.id = uga.group_id ' +
+        'WHERE uga.user_id = ? AND uga.group_id = ? AND g.org_id = ?',
+        [req.user.id, target_id, req.orgId]
       );
       if (!access) return res.status(403).json({ error: 'Access denied to this group' });
     } else if (target_type === 'device') {
       const access = await queryOne(
         'SELECT 1 FROM devices d INNER JOIN user_group_access uga ' +
-        'ON uga.group_id = d.group_id AND uga.user_id = ? WHERE d.id = ?',
-        [req.user.id, target_id]
+        'ON uga.group_id = d.group_id AND uga.user_id = ? WHERE d.id = ? AND d.org_id = ?',
+        [req.user.id, target_id, req.orgId]
       );
       if (!access) return res.status(403).json({ error: 'Access denied to this device' });
     }
@@ -59,8 +61,9 @@ router.get('/', async (req, res) => {
             WHEN 'group'  THEN (SELECT name FROM \`groups\` WHERE id = s.target_id)
           END as target_name
         FROM schedules s
+        WHERE s.org_id = ?
         ORDER BY s.created_at DESC
-      `);
+      `, [req.orgId]);
     } else {
       // Operators/viewers see:
       //   1. Schedules they created themselves
@@ -74,22 +77,24 @@ router.get('/', async (req, res) => {
             WHEN 'group'  THEN (SELECT name FROM \`groups\` WHERE id = s.target_id)
           END as target_name
         FROM schedules s
-        WHERE
-          -- own schedules
-          s.created_by = ?
-          OR
-          -- schedules targeting a group the user has access to
-          (s.target_type = 'group' AND s.target_id IN (
-            SELECT group_id FROM user_group_access WHERE user_id = ?
-          ))
-          OR
-          -- schedules targeting a device in one of the user's accessible groups
-          (s.target_type = 'device' AND s.target_id IN (
-            SELECT d.id FROM devices d
-            INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?
-          ))
+        WHERE s.org_id = ?
+          AND (
+            -- own schedules
+            s.created_by = ?
+            OR
+            -- schedules targeting a group the user has access to
+            (s.target_type = 'group' AND s.target_id IN (
+              SELECT group_id FROM user_group_access WHERE user_id = ?
+            ))
+            OR
+            -- schedules targeting a device in one of the user's accessible groups
+            (s.target_type = 'device' AND s.target_id IN (
+              SELECT d.id FROM devices d
+              INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?
+            ))
+          )
         ORDER BY s.created_at DESC
-      `, [req.user.id, req.user.id, req.user.id]);
+      `, [req.orgId, req.user.id, req.user.id, req.user.id]);
     }
 
     res.json(schedules);
@@ -116,8 +121,8 @@ router.post('/', requireManageSchedules, scheduleValidation, verifyTargetAccess,
     const id = uuidv4();
     const { name, action, cron_expression, target_type, target_id, enabled = true } = req.body;
     await execute(
-      'INSERT INTO schedules (id, name, action, cron_expr, target_type, target_id, enabled, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, name, action, cron_expression, target_type, target_id, enabled ? 1 : 0, req.user.id]
+      'INSERT INTO schedules (id, name, action, cron_expr, target_type, target_id, enabled, created_by, org_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, name, action, cron_expression, target_type, target_id, enabled ? 1 : 0, req.user.id, req.orgId]
     );
     const schedule = await queryOne('SELECT * FROM schedules WHERE id = ?', [id]);
     registerSchedule(schedule);
@@ -132,14 +137,14 @@ router.put('/:id', requireManageSchedules, param('id').isUUID(), scheduleValidat
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
-    const existing = await queryOne('SELECT * FROM schedules WHERE id = ?', [req.params.id]);
+    const existing = await queryOne('SELECT * FROM schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!existing) return res.status(404).json({ error: 'Schedule not found' });
     if (req.user.role !== 'admin' && existing.created_by !== req.user.id)
       return res.status(403).json({ error: 'You can only edit your own schedules' });
     const { name, action, cron_expression, target_type, target_id, enabled = true } = req.body;
     await execute(
-      'UPDATE schedules SET name=?, action=?, cron_expr=?, target_type=?, target_id=?, enabled=? WHERE id=?',
-      [name, action, cron_expression, target_type, target_id, enabled ? 1 : 0, req.params.id]
+      'UPDATE schedules SET name=?, action=?, cron_expr=?, target_type=?, target_id=?, enabled=? WHERE id=? AND org_id=?',
+      [name, action, cron_expression, target_type, target_id, enabled ? 1 : 0, req.params.id, req.orgId]
     );
     const schedule = await queryOne('SELECT * FROM schedules WHERE id = ?', [req.params.id]);
     registerSchedule(schedule);
@@ -151,11 +156,11 @@ router.put('/:id', requireManageSchedules, param('id').isUUID(), scheduleValidat
 router.patch('/:id/toggle', requireManageSchedules, param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const s = await queryOne('SELECT * FROM schedules WHERE id = ?', [req.params.id]);
+    const s = await queryOne('SELECT * FROM schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!s) return res.status(404).json({ error: 'Schedule not found' });
     if (req.user.role !== 'admin' && s.created_by !== req.user.id)
       return res.status(403).json({ error: 'You can only toggle your own schedules' });
-    await execute('UPDATE schedules SET enabled = ? WHERE id = ?', [s.enabled ? 0 : 1, req.params.id]);
+    await execute('UPDATE schedules SET enabled = ? WHERE id = ? AND org_id = ?', [s.enabled ? 0 : 1, req.params.id, req.orgId]);
     const updated = await queryOne('SELECT * FROM schedules WHERE id = ?', [req.params.id]);
     registerSchedule(updated);
     res.json(updated);
@@ -166,14 +171,14 @@ router.patch('/:id/toggle', requireManageSchedules, param('id').isUUID(), async 
 router.delete('/:id', requireManageSchedules, param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const owned = await queryOne('SELECT created_by FROM schedules WHERE id = ?', [req.params.id]);
+    const owned = await queryOne('SELECT created_by FROM schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!owned) return res.status(404).json({ error: 'Schedule not found' });
     if (req.user.role !== 'admin' && owned.created_by !== req.user.id)
       return res.status(403).json({ error: 'You can only delete your own schedules' });
-    const s = await queryOne('SELECT * FROM schedules WHERE id = ?', [req.params.id]);
+    const s = await queryOne('SELECT * FROM schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!s) return res.status(404).json({ error: 'Schedule not found' });
     unregisterSchedule(req.params.id);
-    await execute('DELETE FROM schedules WHERE id = ?', [req.params.id]);
+    await execute('DELETE FROM schedules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     await audit.log({ userId: req.user.id, username: req.user.username,
       action: 'delete_schedule', targetId: req.params.id, targetName: s.name,
       ipSource: req.realIp, result: 'success' });

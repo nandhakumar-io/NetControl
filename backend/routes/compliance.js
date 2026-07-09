@@ -9,11 +9,12 @@ const express = require('express');
 const { param, body, validationResult } = require('express-validator');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const compliance = require('../services/complianceService');
 const audit = require('../services/audit');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 const MANAGE_COMPLIANCE = 2048;
 
@@ -27,8 +28,8 @@ function safeJson(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
 }
 
-async function assertDevice(id, res) {
-  const device = await queryOne('SELECT id, name, os_type FROM devices WHERE id = ?', [id]);
+async function assertDevice(id, orgId, res) {
+  const device = await queryOne('SELECT id, name, os_type FROM devices WHERE id = ? AND org_id = ?', [id, orgId]);
   if (!device) { res.status(404).json({ error: 'Device not found' }); return null; }
   return device;
 }
@@ -62,8 +63,9 @@ router.get('/', requirePermission(MANAGE_COMPLIANCE), async (req, res) => {
           FROM compliance_snapshots GROUP BY device_id
         ) s2 ON s2.device_id = s1.device_id AND s2.max_taken = s1.taken_at
       ) ls ON ls.device_id = d.id
+      WHERE d.org_id = ?
       ORDER BY d.name ASC
-    `);
+    `, [req.orgId]);
     res.json(rows.map(r => ({ ...r, latest_diff: safeJson(r.latest_diff, null) })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -71,7 +73,7 @@ router.get('/', requirePermission(MANAGE_COMPLIANCE), async (req, res) => {
 // ── GET /api/compliance/:deviceId/config ──────────────────────────────────────
 router.get('/:deviceId/config', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
-  if (!(await assertDevice(req.params.deviceId, res))) return;
+  if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
   try {
     const cfg = await queryOne('SELECT * FROM compliance_config WHERE device_id = ?', [req.params.deviceId]);
     res.json(cfg || { device_id: req.params.deviceId, enabled: false, check_interval_hours: 24, last_checked_at: null });
@@ -86,7 +88,7 @@ router.put('/:deviceId/config',
   body('check_interval_hours').isInt({ min: 1, max: 720 }),
   async (req, res) => {
     if (validate(req, res)) return;
-    const device = await assertDevice(req.params.deviceId, res);
+    const device = await assertDevice(req.params.deviceId, req.orgId, res);
     if (!device) return;
     const { enabled, check_interval_hours } = req.body;
     const now = Math.floor(Date.now() / 1000);
@@ -112,7 +114,7 @@ router.put('/:deviceId/config',
 // ── POST /api/compliance/:deviceId/snapshot — run a check right now ──────────
 router.post('/:deviceId/snapshot', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
-  if (!(await assertDevice(req.params.deviceId, res))) return;
+  if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
   try {
     const result = await compliance.runCheck(req.params.deviceId);
     res.json(result);
@@ -122,7 +124,7 @@ router.post('/:deviceId/snapshot', requirePermission(MANAGE_COMPLIANCE), param('
 // ── GET /api/compliance/:deviceId/snapshots — history ─────────────────────────
 router.get('/:deviceId/snapshots', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
-  if (!(await assertDevice(req.params.deviceId, res))) return;
+  if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
   try {
     const rows = await query(
       `SELECT id, device_id, raw_hash, status, diff, error, unreachable, taken_at
@@ -136,7 +138,7 @@ router.get('/:deviceId/snapshots', requirePermission(MANAGE_COMPLIANCE), param('
 // ── DELETE /api/compliance/:deviceId/snapshots — clear check history ─────────
 router.delete('/:deviceId/snapshots', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
-  const device = await assertDevice(req.params.deviceId, res);
+  const device = await assertDevice(req.params.deviceId, req.orgId, res);
   if (!device) return;
   try {
     await execute('DELETE FROM compliance_snapshots WHERE device_id = ?', [req.params.deviceId]);
@@ -154,7 +156,7 @@ router.get('/:deviceId/snapshots/:id',
   requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), param('id').isUUID(),
   async (req, res) => {
     if (validate(req, res)) return;
-    if (!(await assertDevice(req.params.deviceId, res))) return;
+    if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
     try {
       const row = await queryOne(
         'SELECT * FROM compliance_snapshots WHERE id = ? AND device_id = ?',
@@ -169,7 +171,7 @@ router.get('/:deviceId/snapshots/:id',
 // ── GET /api/compliance/:deviceId/baseline ────────────────────────────────────
 router.get('/:deviceId/baseline', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
-  if (!(await assertDevice(req.params.deviceId, res))) return;
+  if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
   try {
     const row = await queryOne('SELECT * FROM compliance_baselines WHERE device_id = ?', [req.params.deviceId]);
     res.json(row || null);
@@ -185,7 +187,7 @@ router.post('/:deviceId/baseline',
   body('snapshotId').optional().isUUID(),
   async (req, res) => {
     if (validate(req, res)) return;
-    const device = await assertDevice(req.params.deviceId, res);
+    const device = await assertDevice(req.params.deviceId, req.orgId, res);
     if (!device) return;
     try {
       const result = await compliance.setBaseline(req.params.deviceId, {
@@ -205,7 +207,7 @@ router.post('/:deviceId/baseline',
 // ── GET /api/compliance/:deviceId/files — list watched file paths ────────────
 router.get('/:deviceId/files', requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
-  if (!(await assertDevice(req.params.deviceId, res))) return;
+  if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
   try {
     const rows = await query(
       'SELECT id, file_path, label, created_at FROM compliance_watched_files WHERE device_id = ? ORDER BY file_path ASC',
@@ -222,7 +224,7 @@ router.post('/:deviceId/files',
   body('label').optional({ nullable: true }).isString().trim().isLength({ max: 100 }),
   async (req, res) => {
     if (validate(req, res)) return;
-    const device = await assertDevice(req.params.deviceId, res);
+    const device = await assertDevice(req.params.deviceId, req.orgId, res);
     if (!device) return;
     const { v4: uuidv4 } = require('uuid');
     const id = uuidv4();
@@ -250,7 +252,7 @@ router.delete('/:deviceId/files/:id',
   requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), param('id').isUUID(),
   async (req, res) => {
     if (validate(req, res)) return;
-    const device = await assertDevice(req.params.deviceId, res);
+    const device = await assertDevice(req.params.deviceId, req.orgId, res);
     if (!device) return;
     try {
       const row = await queryOne('SELECT file_path FROM compliance_watched_files WHERE id = ? AND device_id = ?', [req.params.id, req.params.deviceId]);

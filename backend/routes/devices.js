@@ -4,11 +4,12 @@ const { body, param, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const { encrypt } = require('../services/crypto');
 const audit = require('../services/audit');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 /**
  * Strip only the secret values (passwords, private key).
@@ -97,12 +98,13 @@ router.get('/', async (req, res) => {
         'SELECT d.*, g.name as group_name FROM devices d ' +
         'INNER JOIN `groups` g ON g.id = d.group_id ' +
         'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
-        'ORDER BY d.name',
-        [req.user.id]
+        'WHERE d.org_id = ? ORDER BY d.name',
+        [req.user.id, req.orgId]
       );
     } else {
       devices = await query(
-        'SELECT d.*, g.name as group_name FROM devices d LEFT JOIN `groups` g ON g.id = d.group_id ORDER BY d.name'
+        'SELECT d.*, g.name as group_name FROM devices d LEFT JOIN `groups` g ON g.id = d.group_id WHERE d.org_id = ? ORDER BY d.name',
+        [req.orgId]
       );
     }
     const _ = null; // scoping done
@@ -126,13 +128,13 @@ router.get('/:id', param('id').isUUID(), async (req, res) => {
         'SELECT d.*, g.name as group_name FROM devices d ' +
         'INNER JOIN `groups` g ON g.id = d.group_id ' +
         'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
-        'WHERE d.id = ?',
-        [req.user.id, req.params.id]
+        'WHERE d.id = ? AND d.org_id = ?',
+        [req.user.id, req.params.id, req.orgId]
       );
     } else {
       device = await queryOne(
-        'SELECT d.*, g.name as group_name FROM devices d LEFT JOIN `groups` g ON g.id = d.group_id WHERE d.id = ?',
-        [req.params.id]
+        'SELECT d.*, g.name as group_name FROM devices d LEFT JOIN `groups` g ON g.id = d.group_id WHERE d.id = ? AND d.org_id = ?',
+        [req.params.id, req.orgId]
       );
     }
     if (!device) return res.status(404).json({ error: 'Device not found' });
@@ -159,12 +161,22 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
 
     const normalizedMac = normaliseMac(mac_address);
 
+    // Enforce the org's device-limit before writing (plan/billing gate) —
+    // an org on a 25-device trial plan can't silently grow past it.
+    const [{ device_count }] = await query('SELECT COUNT(*) AS device_count FROM devices WHERE org_id = ?', [req.orgId]);
+    if (req.org && device_count >= req.org.device_limit) {
+      return res.status(403).json({
+        error: `Device limit reached (${req.org.device_limit}) for this organization's plan.`,
+        code: 'DEVICE_LIMIT_REACHED',
+      });
+    }
+
     await execute(
       `INSERT INTO devices
          (id, name, ip_address, mac_address, os_type, group_id,
           ssh_username, ssh_password, ssh_key,
-          rpc_username, rpc_password)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          rpc_username, rpc_password, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, name, ip_address, normalizedMac, os_type, group_id || null,
         ssh_username  || null,
@@ -172,6 +184,7 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
         ssh_key       ? encrypt(ssh_key)        : null,
         rpc_username  || null,
         rpc_password  ? encrypt(rpc_password)  : null,
+        req.orgId,
       ]
     );
 
@@ -340,10 +353,10 @@ router.post('/bulk-import',
 // ── DELETE /api/devices — delete ALL devices (admin only) ───────────────────
 router.delete('/', requireRole('admin'), async (req, res) => {
   try {
-    const { c: count } = await queryOne('SELECT COUNT(*) as c FROM devices');
+    const { c: count } = await queryOne('SELECT COUNT(*) as c FROM devices WHERE org_id = ?', [req.orgId]);
     if (!count) return res.json({ message: 'No devices to delete', deleted: 0 });
 
-    await execute('DELETE FROM devices');
+    await execute('DELETE FROM devices WHERE org_id = ?', [req.orgId]);
 
     await audit.log({
       userId: req.user.id, username: req.user.username,
@@ -360,7 +373,7 @@ router.delete('/', requireRole('admin'), async (req, res) => {
 router.delete('/:id', requireRole('admin'), param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    const device = await queryOne('SELECT * FROM devices WHERE id = ?', [req.params.id]);
+    const device = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     await execute('DELETE FROM devices WHERE id = ?', [req.params.id]);
     await audit.log({
@@ -720,8 +733,8 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       rpc_username, rpc_password,
     } = req.body;
 
-    // Check device exists
-    const device = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    // Check device exists (and belongs to the active org)
+    const device = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
     const normalizedMac = normaliseMac(mac_address || device.mac_address);

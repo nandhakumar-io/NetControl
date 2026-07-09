@@ -66,7 +66,7 @@ async function requireAuth(req, res, next) {
 
       // Live DB check: reject immediately if the account has been disabled
       const liveUser = await queryOne(
-        'SELECT id, username, role, enabled, permissions FROM users WHERE id = ?',
+        'SELECT id, username, role, enabled, permissions, active_org_id FROM users WHERE id = ?',
         [payload.id]
       );
       if (!liveUser || !liveUser.enabled) {
@@ -74,7 +74,10 @@ async function requireAuth(req, res, next) {
       }
 
       // Attach fresh data (role/permissions may have changed since the token was issued)
-      req.user = { ...payload, role: liveUser.role, permissions: liveUser.permissions || 0 };
+      req.user = {
+        ...payload, role: liveUser.role, permissions: liveUser.permissions || 0,
+        activeOrgId: liveUser.active_org_id || null,
+      };
       return next();
     }
 

@@ -11,10 +11,11 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const audit = require('../services/audit');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 const MATCH_TYPES = ['exact', 'contains'];
 const ACTIONS = ['alert', 'kill'];
@@ -29,7 +30,9 @@ router.get('/', requirePermission(4096), async (req, res) => {
     LEFT JOIN devices d ON pp.device_id = d.id
     LEFT JOIN \`groups\` g ON pp.group_id = g.id
     LEFT JOIN users u ON pp.created_by = u.id
-        ORDER BY pp.created_at DESC`
+        WHERE pp.org_id = ?
+        ORDER BY pp.created_at DESC`,
+      [req.orgId]
     );
     res.json(rows.map(r => ({ ...r, enabled: !!r.enabled })));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -48,7 +51,9 @@ router.get('/violations', requirePermission(4096), async (req, res) => {
       `SELECT pv.*, d.name AS device_name
          FROM process_violations pv
          JOIN devices d ON pv.device_id = d.id
-        ORDER BY pv.detected_at DESC LIMIT ${limit}`
+        WHERE d.org_id = ?
+        ORDER BY pv.detected_at DESC LIMIT ${limit}`,
+      [req.orgId]
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -57,7 +62,7 @@ router.get('/violations', requirePermission(4096), async (req, res) => {
 // ── DELETE /api/process-policies/violations — clear history ──────────────────
 router.delete('/violations', requirePermission(4096), async (req, res) => {
   try {
-    await execute('DELETE FROM process_violations');
+    await execute('DELETE FROM process_violations WHERE device_id IN (SELECT id FROM devices WHERE org_id = ?)', [req.orgId]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -77,11 +82,11 @@ router.post('/', requirePermission(4096), async (req, res) => {
     if (device_id && group_id) return res.status(400).json({ error: 'choose either a device or a group, not both' });
 
     if (device_id) {
-      const d = await queryOne('SELECT id FROM devices WHERE id = ?', [device_id]);
+      const d = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [device_id, req.orgId]);
       if (!d) return res.status(404).json({ error: 'Device not found' });
     }
     if (group_id) {
-      const g = await queryOne('SELECT id FROM `groups` WHERE id = ?', [group_id]);
+      const g = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [group_id, req.orgId]);
       if (!g) return res.status(404).json({ error: 'Group not found' });
     }
 
@@ -89,10 +94,10 @@ router.post('/', requirePermission(4096), async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     await execute(
       `INSERT INTO process_policies
-         (id, device_id, group_id, process_name, match_type, action, os_type, enabled, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, device_id, group_id, process_name, match_type, action, os_type, enabled, created_by, created_at, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, device_id || null, group_id || null, process_name.trim(),
-       match_type, action, os_type || null, enabled ? 1 : 0, req.user.id, now]
+       match_type, action, os_type || null, enabled ? 1 : 0, req.user.id, now, req.orgId]
     );
 
     await audit.log({
@@ -109,7 +114,7 @@ router.post('/', requirePermission(4096), async (req, res) => {
 // ── PUT /api/process-policies/:id ──────────────────────────────────────────────
 router.put('/:id', requirePermission(4096), async (req, res) => {
   try {
-    const existing = await queryOne('SELECT * FROM process_policies WHERE id = ?', [req.params.id]);
+    const existing = await queryOne('SELECT * FROM process_policies WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!existing) return res.status(404).json({ error: 'Policy not found' });
 
     const {
@@ -125,9 +130,9 @@ router.put('/:id', requirePermission(4096), async (req, res) => {
     if (device_id && group_id) return res.status(400).json({ error: 'choose either a device or a group, not both' });
 
     await execute(
-      `UPDATE process_policies SET process_name=?, match_type=?, action=?, device_id=?, group_id=?, os_type=?, enabled=? WHERE id=?`,
+      `UPDATE process_policies SET process_name=?, match_type=?, action=?, device_id=?, group_id=?, os_type=?, enabled=? WHERE id=? AND org_id=?`,
       [process_name.trim(), match_type, action, device_id || null, group_id || null,
-       os_type || null, enabled ? 1 : 0, req.params.id]
+       os_type || null, enabled ? 1 : 0, req.params.id, req.orgId]
     );
 
     await audit.log({
@@ -143,8 +148,9 @@ router.put('/:id', requirePermission(4096), async (req, res) => {
 // ── DELETE /api/process-policies/:id ───────────────────────────────────────────
 router.delete('/:id', requirePermission(4096), async (req, res) => {
   try {
-    const existing = await queryOne('SELECT process_name FROM process_policies WHERE id = ?', [req.params.id]);
-    await execute('DELETE FROM process_policies WHERE id = ?', [req.params.id]);
+    const existing = await queryOne('SELECT process_name FROM process_policies WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!existing) return res.status(404).json({ error: 'Policy not found' });
+    await execute('DELETE FROM process_policies WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
 
     await audit.log({
       userId: req.user.id, username: req.user.username,

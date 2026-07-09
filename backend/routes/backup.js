@@ -32,6 +32,7 @@ const { body, param, query: queryValidator, validationResult } = require('expres
 const { v4: uuidv4 } = require('uuid');
 
 const { requireAuth, requireRole, requirePermission, requireActionPin } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const { query, queryOne, execute } = require('../db');
 const backupService = require('../services/backupService');
 const remoteBrowse = require('../services/remoteBrowse');
@@ -43,6 +44,7 @@ const webhook = require('../services/webhook');
 
 const router = express.Router();
 router.use(requireAuth);
+router.use(requireOrgContext);
 router.use(requirePermission(8192));
 
 const FORMATS = ['zip', 'tar', 'tar.gz'];
@@ -85,8 +87,8 @@ async function runVerification(row, actor) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-async function loadDeviceWithCreds(deviceId) {
-  const d = await queryOne(`SELECT * FROM devices WHERE id = ?`, [deviceId]);
+async function loadDeviceWithCreds(deviceId, orgId) {
+  const d = await queryOne(`SELECT * FROM devices WHERE id = ? AND org_id = ?`, [deviceId, orgId]);
   if (!d) return null;
   return {
     ...d,
@@ -112,7 +114,8 @@ router.get('/devices', async (req, res) => {
       `SELECT id, name, ip_address, os_type, status,
               (os_type = 'linux' AND ssh_username IS NOT NULL
                AND (ssh_password IS NOT NULL OR ssh_key IS NOT NULL)) AS sshCapable
-       FROM devices ORDER BY name`
+       FROM devices WHERE org_id = ? ORDER BY name`,
+      [req.orgId]
     );
     res.json([
       { id: LOCAL_DEVICE_ID, name: 'This server (local)', ip_address: null, os_type: null, status: 'online', isLocal: true, sshCapable: true },
@@ -130,7 +133,7 @@ router.get('/devices/:deviceId/disks', async (req, res) => {
       const info = backupService.getLocalDiskInfo();
       return res.json(info ? [info] : []);
     }
-    const device = await loadDeviceWithCreds(req.params.deviceId);
+    const device = await loadDeviceWithCreds(req.params.deviceId, req.orgId);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     const disks = await remoteBrowse.listDisks(device);
     res.json(disks);
@@ -149,7 +152,7 @@ router.get('/devices/:deviceId/browse', async (req, res) => {
       const result = await backupService.browse(req.query.path || '');
       return res.json(result);
     }
-    const device = await loadDeviceWithCreds(req.params.deviceId);
+    const device = await loadDeviceWithCreds(req.params.deviceId, req.orgId);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     if (!req.query.mount) return res.status(400).json({ error: 'mount is required for a remote device' });
     const result = await remoteBrowse.browse(device, req.query.mount, req.query.path || '');
@@ -181,7 +184,7 @@ router.get('/browse', async (req, res) => {
 // expose their decrypted config — only what's safe to show in a picker.
 router.get('/destinations', async (req, res) => {
   try {
-    const rows = await query(`SELECT id, name, type, config, created_at FROM backup_destinations ORDER BY name`);
+    const rows = await query(`SELECT id, name, type, config, created_at FROM backup_destinations WHERE org_id = ? ORDER BY name`, [req.orgId]);
     const saved = rows.map(r => {
       let config = {};
       try { config = destinations.redactConfig(r.type, destinations.decryptConfig(r.config)); } catch { /* leave empty on decrypt failure */ }
@@ -225,15 +228,15 @@ router.post(
       } else if (type === 'remote_folder') {
         if (!config.deviceId) return res.status(400).json({ error: 'config.deviceId is required' });
         if (!config.remotePath) return res.status(400).json({ error: 'config.remotePath is required' });
-        const device = await queryOne(`SELECT id, name FROM devices WHERE id = ?`, [config.deviceId]);
+        const device = await queryOne(`SELECT id, name FROM devices WHERE id = ? AND org_id = ?`, [config.deviceId, req.orgId]);
         if (!device) return res.status(400).json({ error: 'Selected device not found' });
         config.deviceName = device.name; // denormalized for display in redactConfig()
       }
 
       const id = uuidv4();
       await execute(
-        `INSERT INTO backup_destinations (id, name, type, config, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [id, name, type, destinations.encryptConfig(config), req.user.id, Math.floor(Date.now() / 1000)]
+        `INSERT INTO backup_destinations (id, name, type, config, created_by, created_at, org_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, name, type, destinations.encryptConfig(config), req.user.id, Math.floor(Date.now() / 1000), req.orgId]
       );
 
       await audit.log({
@@ -269,7 +272,7 @@ router.put(
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
-      const existing = await queryOne(`SELECT * FROM backup_destinations WHERE id = ?`, [req.params.id]);
+      const existing = await queryOne(`SELECT * FROM backup_destinations WHERE id = ? AND org_id = ?`, [req.params.id, req.orgId]);
       if (!existing) return res.status(404).json({ error: 'Destination not found' });
 
       const { name } = req.body;
@@ -298,14 +301,14 @@ router.put(
       } else if (existing.type === 'remote_folder') {
         if (!config.deviceId) return res.status(400).json({ error: 'config.deviceId is required' });
         if (!config.remotePath) return res.status(400).json({ error: 'config.remotePath is required' });
-        const device = await queryOne(`SELECT id, name FROM devices WHERE id = ?`, [config.deviceId]);
+        const device = await queryOne(`SELECT id, name FROM devices WHERE id = ? AND org_id = ?`, [config.deviceId, req.orgId]);
         if (!device) return res.status(400).json({ error: 'Selected device not found' });
         config.deviceName = device.name;
       }
 
       await execute(
-        `UPDATE backup_destinations SET name = ?, config = ? WHERE id = ?`,
-        [name, destinations.encryptConfig(config), req.params.id]
+        `UPDATE backup_destinations SET name = ?, config = ? WHERE id = ? AND org_id = ?`,
+        [name, destinations.encryptConfig(config), req.params.id, req.orgId]
       );
 
       await audit.log({
@@ -326,7 +329,7 @@ router.delete('/destinations/:id', requireRole('admin'), [param('id').isUUID()],
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
-    const row = await queryOne(`SELECT * FROM backup_destinations WHERE id = ?`, [req.params.id]);
+    const row = await queryOne(`SELECT * FROM backup_destinations WHERE id = ? AND org_id = ?`, [req.params.id, req.orgId]);
     if (!row) return res.status(404).json({ error: 'Destination not found' });
     await execute(`DELETE FROM backup_destinations WHERE id = ?`, [row.id]);
     await audit.log({
@@ -350,7 +353,8 @@ router.get('/', async (req, res) => {
               archive_name, size_bytes, checksum_sha256, status, error_message,
               encrypted, verify_status, verified_at, verify_error, verify_checksum,
               created_by, created_by_name, created_at, completed_at
-       FROM backups ORDER BY created_at DESC`
+       FROM backups WHERE org_id = ? ORDER BY created_at DESC`,
+      [req.orgId]
     );
     res.json(rows);
   } catch (e) {
@@ -395,19 +399,19 @@ router.post(
 
     try {
       if (isRemoteSource) {
-        const d = await queryOne(`SELECT name FROM devices WHERE id = ?`, [deviceId]);
+        const d = await queryOne(`SELECT name FROM devices WHERE id = ? AND org_id = ?`, [deviceId, req.orgId]);
         if (!d) return res.status(400).json({ error: 'Source device not found' });
         sourceDeviceName = d.name;
         if (!mount) return res.status(400).json({ error: 'mount is required when backing up from a device' });
       }
 
       if (req.body.destinationId) {
-        const destRow = await queryOne(`SELECT * FROM backup_destinations WHERE id = ?`, [req.body.destinationId]);
+        const destRow = await queryOne(`SELECT * FROM backup_destinations WHERE id = ? AND org_id = ?`, [req.body.destinationId, req.orgId]);
         if (!destRow) return res.status(400).json({ error: 'Destination not found' });
         const config = destinations.decryptConfig(destRow.config);
         destinationName = destRow.name;
         if (destRow.type === 'remote_folder') {
-          const destDevice = await loadDeviceWithCreds(config.deviceId);
+          const destDevice = await loadDeviceWithCreds(config.deviceId, req.orgId);
           if (!destDevice) return res.status(400).json({ error: 'Destination device not found' });
           destination = { type: 'remote_folder', config, device: destDevice };
         } else {
@@ -420,11 +424,11 @@ router.post(
       await execute(
         `INSERT INTO backups (id, source_path, device_id, device_name, source_type, format,
                 destination_id, destination_name, destination_type, archive_name, status,
-                created_by, created_by_name, created_at)
-         VALUES (?, ?, ?, ?, 'file', ?, ?, ?, ?, '', 'pending', ?, ?, ?)`,
+                created_by, created_by_name, created_at, org_id)
+         VALUES (?, ?, ?, ?, 'file', ?, ?, ?, ?, '', 'pending', ?, ?, ?, ?)`,
         [id, sourcePath, isRemoteSource ? deviceId : null, sourceDeviceName, effectiveFormat,
          req.body.destinationId || null, destinationName, destination.type,
-         req.user.id, req.user.username, nowSec]
+         req.user.id, req.user.username, nowSec, req.orgId]
       );
 
       const cfg = backupService.FORMAT_CONFIG[effectiveFormat];
@@ -434,7 +438,7 @@ router.post(
 
       let stream, sourceRel, sourceType;
       if (isRemoteSource) {
-        const device = await loadDeviceWithCreds(deviceId);
+        const device = await loadDeviceWithCreds(deviceId, req.orgId);
         const archiveResult = await remoteBrowse.archiveStream(device, mount, sourcePath, effectiveFormat);
         stream = archiveResult.stream;
         sourceRel = archiveResult.sourceRel;
@@ -461,7 +465,8 @@ router.post(
       let removedIds = [];
       if (destination.type === 'local') {
         const rowsNewestFirst = await query(
-          `SELECT id, archive_name FROM backups WHERE status = 'completed' AND destination_type = 'local' ORDER BY created_at DESC`
+          `SELECT id, archive_name FROM backups WHERE status = 'completed' AND destination_type = 'local' AND org_id = ? ORDER BY created_at DESC`,
+          [req.orgId]
         );
         removedIds = await backupService.pruneOldArchives(rowsNewestFirst);
         if (removedIds.length) {
@@ -539,7 +544,7 @@ router.get('/:id/download', [param('id').isUUID()], async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const row = await queryOne(`SELECT * FROM backups WHERE id = ?`, [req.params.id]);
+    const row = await queryOne(`SELECT * FROM backups WHERE id = ? AND org_id = ?`, [req.params.id, req.orgId]);
     if (!row || row.status !== 'completed') return res.status(404).json({ error: 'Backup not found' });
     if (row.destination_type !== 'local') {
       const label = { s3: 'S3', azure_blob: 'Azure Blob Storage', remote_folder: 'a remote folder' }[row.destination_type] || row.destination_type;
@@ -592,7 +597,7 @@ router.post('/:id/verify', [param('id').isUUID()], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
-    const row = await queryOne(`SELECT * FROM backups WHERE id = ?`, [req.params.id]);
+    const row = await queryOne(`SELECT * FROM backups WHERE id = ? AND org_id = ?`, [req.params.id, req.orgId]);
     if (!row || row.status !== 'completed') return res.status(404).json({ error: 'Backup not found' });
 
     const result = await runVerification(row, req.user);
@@ -608,7 +613,7 @@ router.delete('/:id', requireRole('admin'), [param('id').isUUID()], async (req, 
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const row = await queryOne(`SELECT * FROM backups WHERE id = ?`, [req.params.id]);
+    const row = await queryOne(`SELECT * FROM backups WHERE id = ? AND org_id = ?`, [req.params.id, req.orgId]);
     if (!row) return res.status(404).json({ error: 'Backup not found' });
 
     if (row.destination_type === 'local') {

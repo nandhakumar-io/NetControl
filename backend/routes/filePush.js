@@ -8,6 +8,7 @@ const { body, validationResult } = require('express-validator');
 
 const path = require('path');
 const { requireAuth, requireActionPin, requireRole } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const { query, queryOne }               = require('../db');
 const { decrypt }                       = require('../services/crypto');
 const { scpPushMany }                   = require('../services/scpPush');
@@ -15,7 +16,7 @@ const audit                             = require('../services/audit');
 const webhook                           = require('../services/webhook');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -89,19 +90,21 @@ router.post(
           devices = await query(
             `SELECT d.* FROM devices d
              INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?
-             WHERE d.id IN (${placeholders})`,
-            [req.user.id, ...rawDeviceIds]
+             WHERE d.id IN (${placeholders}) AND d.org_id = ?`,
+            [req.user.id, ...rawDeviceIds, req.orgId]
           );
           if (devices.length !== rawDeviceIds.length)
             return res.status(403).json({ error: 'One or more devices are not in your accessible groups' });
         } else {
           devices = await query(
-            `SELECT * FROM devices WHERE id IN (${placeholders})`,
-            rawDeviceIds
+            `SELECT * FROM devices WHERE id IN (${placeholders}) AND org_id = ?`,
+            [...rawDeviceIds, req.orgId]
           );
+          if (devices.length !== rawDeviceIds.length)
+            return res.status(403).json({ error: 'One or more devices were not found in this organization' });
         }
       } else {
-        const group = await queryOne('SELECT id FROM `groups` WHERE id = ?', [groupId]);
+        const group = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [groupId, req.orgId]);
         if (!group) return res.status(404).json({ error: 'Group not found' });
         if (req.user.role !== 'admin') {
           // SECURITY FIX: Operators can only push to their accessible groups
@@ -111,7 +114,7 @@ router.post(
           );
           if (!access) return res.status(403).json({ error: 'Access denied to this group' });
         }
-        devices = await query('SELECT * FROM devices WHERE group_id = ?', [groupId]);
+        devices = await query('SELECT * FROM devices WHERE group_id = ? AND org_id = ?', [groupId, req.orgId]);
       }
     } catch (e) {
       return res.status(500).json({ error: e.message });

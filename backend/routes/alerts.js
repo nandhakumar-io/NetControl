@@ -5,9 +5,11 @@ const { query, queryOne, execute } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const audit = require('../services/audit');
 const webhook = require('../services/webhook');
+const { runRunbookById } = require('../services/runbookRunner');
+const { requireOrgContext } = require('../middleware/tenant');
 
 const router = express.Router();
-router.use(requireAuth);
+router.use(requireAuth, requireOrgContext);
 
 // ── Auto-actions: alert rules can list actions like ['notify','wake'] — until
 // now 'actions' was only ever stored/logged, never actually executed, so a
@@ -19,30 +21,56 @@ router.use(requireAuth);
 const AUTO_ACTIONS = ['wake', 'restart', 'shutdown'];
 async function performAlertActions(rule, deviceId, deviceName, actions) {
   const toRun = (actions || []).filter(a => AUTO_ACTIONS.includes(a));
-  if (!toRun.length) return [];
-
-  const { loadDevice, performAction } = require('./actions');
   const results = [];
-  for (const action of toRun) {
-    // 'restart'/'shutdown' only make sense against a device that's actually
-    // reachable — running them for an offline-triggered rule would just
-    // fail (or hang on a dead SSH/WinRM connection), so only 'wake' runs
-    // automatically for offline incidents.
-    if (action !== 'wake' && rule.metric === 'offline') continue;
-    let result = 'success', detail;
-    try {
-      const device = await loadDevice(deviceId);
-      if (!device) throw new Error('Device not found');
-      detail = await performAction(action, device);
-    } catch (e) {
-      result = 'failure'; detail = e.message;
+
+  if (toRun.length) {
+    const { loadDevice, performAction } = require('./actions');
+    for (const action of toRun) {
+      // 'restart'/'shutdown' only make sense against a device that's actually
+      // reachable — running them for an offline-triggered rule would just
+      // fail (or hang on a dead SSH/WinRM connection), so only 'wake' runs
+      // automatically for offline incidents.
+      if (action !== 'wake' && rule.metric === 'offline') continue;
+      let result = 'success', detail;
+      try {
+        const device = await loadDevice(deviceId);
+        if (!device) throw new Error('Device not found');
+        detail = await performAction(action, device);
+      } catch (e) {
+        result = 'failure'; detail = e.message;
+      }
+      results.push({ action, result, detail });
+      await audit.log({
+        username: 'system (alert rule)', action, targetType: 'device', targetId: deviceId,
+        targetName: deviceName, result, details: `Auto-triggered by alert rule "${rule.name}": ${detail}`,
+      }).catch(() => {});
     }
-    results.push({ action, result, detail });
-    await audit.log({
-      username: 'system (alert rule)', action, targetType: 'device', targetId: deviceId,
-      targetName: deviceName, result, details: `Auto-triggered by alert rule "${rule.name}": ${detail}`,
-    }).catch(() => {});
   }
+
+  // ── Runbook actions (custom auto-remediation) ─────────────────────────
+  // Distinct from the fixed wake/restart/shutdown list above — these are
+  // admin-authored scripts (routes/runbooks.js), e.g. "restart nginx",
+  // "clear ARP cache". Skipped entirely for 'offline' incidents for the
+  // same reachability reason as restart/shutdown above.
+  const runbookIds = rule.runbook_action_ids ? JSON.parse(rule.runbook_action_ids) : [];
+  if (runbookIds.length && rule.metric !== 'offline') {
+    const { loadDevice } = require('./actions');
+    const device = await loadDevice(deviceId).catch(() => null);
+    if (device) {
+      for (const runbookId of runbookIds) {
+        const outcome = await runRunbookById(runbookId, device, {
+          triggeredBy: `alert rule: ${rule.name}`, ruleId: rule.id,
+        }).catch(e => ({ result: 'failure', output: e.message, runbookName: runbookId }));
+        results.push({ action: `runbook:${outcome.runbookName || runbookId}`, result: outcome.result, detail: outcome.output });
+        await audit.log({
+          username: 'system (alert rule)', action: 'run_runbook', targetType: 'device', targetId: deviceId,
+          targetName: deviceName, result: outcome.result,
+          details: `Runbook "${outcome.runbookName || runbookId}" auto-triggered by alert rule "${rule.name}": ${outcome.output}`,
+        }).catch(() => {});
+      }
+    }
+  }
+
   return results;
 }
 
@@ -144,11 +172,14 @@ router.get('/rules', async (req, res) => {
     if (!await tableExists('alert_rules')) return res.json([]);
     const rows = await query(
       `SELECT ar.*, d.name AS device_name FROM alert_rules ar
-       LEFT JOIN devices d ON ar.device_id = d.id ORDER BY ar.created_at DESC`
+       LEFT JOIN devices d ON ar.device_id = d.id
+       WHERE ar.org_id = ? ORDER BY ar.created_at DESC`,
+      [req.orgId]
     );
     res.json(rows.map(r => ({
       ...r,
       actions: JSON.parse(r.actions || '[]'),
+      runbook_action_ids: JSON.parse(r.runbook_action_ids || '[]'),
       enabled: !!r.enabled,
       notify_admins: !!r.notify_admins,
     })));
@@ -164,6 +195,7 @@ router.post('/rules', requireRole('admin', 'operator'), async (req, res) => {
       actions = ['notify'], notify_admins = true,
       cooldown_sec = 300, enabled = true,
       escalate_after_sec = null, escalate_severity = 'critical', escalate_webhook_ids = null,
+      runbook_action_ids = [],
     } = req.body;
 
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
@@ -174,16 +206,17 @@ router.post('/rules', requireRole('admin', 'operator'), async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     await execute(
       `INSERT INTO alert_rules
-         (id, name, metric, operator, threshold, severity, device_id,
+         (id, org_id, name, metric, operator, threshold, severity, device_id,
           actions, notify_admins, cooldown_sec, enabled,
           escalate_after_sec, escalate_severity, escalate_webhook_ids,
-          created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, name.trim(), metric, operator, threshold, severity,
+          runbook_action_ids, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, req.orgId, name.trim(), metric, operator, threshold, severity,
        device_id || null, JSON.stringify(actions),
        notify_admins ? 1 : 0, cooldown_sec, enabled ? 1 : 0,
        escalate_after_sec || null, escalate_severity || 'critical',
        escalate_webhook_ids ? JSON.stringify(escalate_webhook_ids) : null,
+       JSON.stringify(runbook_action_ids || []),
        req.user.id, now]
     );
 
@@ -198,7 +231,7 @@ router.post('/rules', requireRole('admin', 'operator'), async (req, res) => {
 // ── PUT /api/alerts/rules/:id ──────────────────────────────────────────────────
 router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
   try {
-    const existing = await queryOne('SELECT * FROM alert_rules WHERE id = ?', [req.params.id]);
+    const existing = await queryOne('SELECT * FROM alert_rules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     if (!existing) return res.status(404).json({ error: 'Rule not found' });
 
     const {
@@ -211,17 +244,19 @@ router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
       escalate_after_sec = existing.escalate_after_sec,
       escalate_severity = existing.escalate_severity || 'critical',
       escalate_webhook_ids = existing.escalate_webhook_ids ? JSON.parse(existing.escalate_webhook_ids) : null,
+      runbook_action_ids = existing.runbook_action_ids ? JSON.parse(existing.runbook_action_ids) : [],
     } = req.body;
 
     await execute(
       `UPDATE alert_rules SET name=?, metric=?, operator=?, threshold=?, severity=?,
          device_id=?, actions=?, notify_admins=?, cooldown_sec=?, enabled=?,
-         escalate_after_sec=?, escalate_severity=?, escalate_webhook_ids=? WHERE id=?`,
+         escalate_after_sec=?, escalate_severity=?, escalate_webhook_ids=?, runbook_action_ids=? WHERE id=?`,
       [name, metric, operator, threshold, severity,
        device_id || null, JSON.stringify(actions),
        notify_admins ? 1 : 0, cooldown_sec, enabled ? 1 : 0,
        escalate_after_sec || null, escalate_severity || 'critical',
        escalate_webhook_ids ? JSON.stringify(escalate_webhook_ids) : null,
+       JSON.stringify(runbook_action_ids || []),
        req.params.id]
     );
     res.json({ ok: true });
@@ -231,7 +266,7 @@ router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
 // ── DELETE /api/alerts/rules/:id ──────────────────────────────────────────────
 router.delete('/rules/:id', requireRole('admin'), async (req, res) => {
   try {
-    await execute('DELETE FROM alert_rules WHERE id = ?', [req.params.id]);
+    await execute('DELETE FROM alert_rules WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -318,15 +353,19 @@ async function evaluateAlerts(deviceId, snapshot) {
   try {
     if (!await tableExists('alert_rules')) return;
 
-    const device = await queryOne('SELECT id, name, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
+    const device = await queryOne('SELECT id, name, org_id, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
     if (!device) return;
     // Device is under maintenance — suppress alerts (no log entry, no admin
     // notification, no webhook) until it's marked ok again.
     if (device.maintenance_mode) return;
 
+    // Scoped to the device's own org — a "global" rule (device_id IS NULL)
+    // still only fires for devices belonging to the same tenant, so one
+    // client's blanket "CPU > 90%" rule never evaluates against another
+    // client's devices.
     const rules = await query(
-      `SELECT * FROM alert_rules WHERE enabled = 1 AND (device_id IS NULL OR device_id = ?)`,
-      [deviceId]
+      `SELECT * FROM alert_rules WHERE enabled = 1 AND org_id = ? AND (device_id IS NULL OR device_id = ?)`,
+      [device.org_id, deviceId]
     );
     if (!rules.length) return;
 

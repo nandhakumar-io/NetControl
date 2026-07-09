@@ -250,6 +250,8 @@ async function rejectDisabled(req, res, next) {
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/auth',      require('./routes/auth'));
 app.use('/api',           rejectDisabled);
+app.use('/api/orgs',      require('./routes/orgs'));
+app.use('/api/runbooks',  require('./routes/runbooks'));
 app.use('/api/devices',   require('./routes/devices'));
 app.use('/api/groups',    require('./routes/groups'));
 app.use('/api/actions',   require('./routes/actions'));
@@ -265,6 +267,8 @@ app.use('/api/discovery', require('./routes/discovery'));
 app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/process-policies', require('./routes/processPolicies'));
 app.use('/api/backup',   require('./routes/backup'));
+app.use('/api/sla-reports', require('./routes/slaReports'));
+app.use('/api/sla-report-schedules', require('./routes/slaReportSchedules'));
 const { backupSchedulesRouter, logExportSchedulesRouter } = require('./routes/scheduledJobs');
 app.use('/api/backup-schedules',     backupSchedulesRouter);
 app.use('/api/log-export-schedules', logExportSchedulesRouter);

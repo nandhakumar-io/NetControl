@@ -33,9 +33,12 @@ function getTransporter() {
 }
 
 // Sends to a comma-separated recipient list. Returns { sent, reason } rather
-// than throwing, so callers (the digest scheduler) can record the outcome on
-// their own row without the whole run failing just because mail bounced.
-async function sendMail({ to, subject, text, html }) {
+// than throwing, so callers (the digest scheduler, SLA report scheduler)
+// can record the outcome on their own row without the whole run failing
+// just because mail bounced. `attachments` is passed straight through to
+// nodemailer's own format (array of { filename, content }) — used by
+// services/scheduledJobs.js's SLA report schedule to attach the generated PDF.
+async function sendMail({ to, subject, text, html, attachments }) {
   if (!mailerEnabled()) return { sent: false, reason: 'SMTP is not configured (SMTP_HOST unset)' };
   const recipients = String(to || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!recipients.length) return { sent: false, reason: 'No recipients' };
@@ -48,6 +51,7 @@ async function sendMail({ to, subject, text, html }) {
       subject,
       text,
       html,
+      attachments,
     });
     return { sent: true };
   } catch (e) {
