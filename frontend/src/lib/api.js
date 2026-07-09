@@ -41,7 +41,19 @@ api.interceptors.response.use(
       return Promise.reject(err)
     }
 
-    if (status === 401 && !original._retry && original.url !== '/auth/refresh') {
+    // Endpoints that run *before* a session exists. A 401 from any of these
+    // means "wrong credentials" / "not verified yet" — never "your session
+    // expired", so they must never fall into the refresh-then-forceLogout
+    // flow below. Without this, a plain wrong password on /auth/login (401)
+    // was being treated as a stale session: the interceptor tried
+    // /auth/refresh (which also fails, since there was never a session),
+    // and then hard-redirected to /login?reason=Session+expired — so every
+    // failed login attempt looked like "session expired" regardless of what
+    // was actually typed.
+    const PRE_AUTH_PATHS = ['/auth/login', '/auth/refresh', '/auth/register', '/auth/2fa/verify', '/auth/google'];
+    const isPreAuth = PRE_AUTH_PATHS.some(p => original.url?.startsWith(p));
+
+    if (status === 401 && !original._retry && !isPreAuth) {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject })
