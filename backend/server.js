@@ -93,6 +93,17 @@ app.use(compression({
   threshold: 1024,
   filter: (req, res) => {
     if (req.path === '/api/metrics/stream') return false;
+    // Same issue as metrics/stream above: this is the terminal relay's SSE
+    // output feed (services/webTerminal.js — GET /session/:id/output). It
+    // was missing from this exclusion, so compression's default "text/*"
+    // filter caught text/event-stream here too and wrapped it in a gzip
+    // Transform that buffers pending output. That silently ate the relay's
+    // 15s keep-alive pings and live shell output — the agent side (plain
+    // HTTP POSTs from the Windows agent) kept working fine, so the terminal
+    // would visibly open on the device, but the browser's EventSource sat
+    // waiting on buffered/delayed bytes until it looked dead and fired
+    // onerror, surfacing as "Relay output stream lost" in the UI.
+    if (/^\/api\/terminal\/session\/[^/]+\/output$/.test(req.path)) return false;
     return compression.filter(req, res);
   },
 }));
@@ -210,6 +221,13 @@ app.use((req, _res, next) => {
 app.use('/api', (req, res, next) => {
   if (req.path === '/auth/refresh' || req.path === '/auth/google/status' || req.path === '/auth/logout') return next();
   if (req.path === '/metrics/stream') return next();
+  // Same reasoning as /metrics/stream: this is a long-lived SSE connection
+  // (the terminal relay's output feed), not a one-off API call, so it
+  // shouldn't burn the shared apiLimiter budget every time nginx/Cloudflare
+  // reconnects it. Previously missing here, so a flaky relay connection
+  // (or several open terminal tabs) could exhaust a user's whole API quota
+  // via reconnect storms — same failure mode metrics/stream used to have.
+  if (/^\/terminal\/session\/[^/]+\/output$/.test(req.path)) return next();
   // Personal/CI API keys (nck_...) get their own per-key budget instead of
   // apiLimiter's per-user/per-IP one — see isPersonalApiKey in rateLimiter.js.
   if (isPersonalApiKey(req)) return apiKeyLimiter(req, res, next);
