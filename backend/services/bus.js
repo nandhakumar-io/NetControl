@@ -90,6 +90,39 @@ function subscribe(channel, handler, opts = {}) {
     subscriber.subscribe(channel).catch(e =>
       console.error('[Bus] subscribe failed:', e.message));
   }
+  // Return the wrapped handler so the caller can unsubscribe cleanly later
+  // — needed now that some callers (services/webTerminal.js) open one
+  // channel per short-lived session rather than a handful of fixed,
+  // permanent channels, and must tear each one down or both the local
+  // EventEmitter's listener count and the Redis subscription list would
+  // grow without bound as sessions come and go.
+  return wrapped;
+}
+
+// Removes a single handler (the value subscribe() returned) from `channel`.
+// Once no local listeners remain for that channel, also unsubscribes from
+// Redis so `subscribedChannels`/the actual Redis SUBSCRIBE list don't leak.
+function unsubscribe(channel, wrappedHandler) {
+  local.removeListener(channel, wrappedHandler);
+  if (subscriber && subscribedChannels.has(channel) && local.listenerCount(channel) === 0) {
+    subscribedChannels.delete(channel);
+    subscriber.unsubscribe(channel).catch(e =>
+      console.error('[Bus] unsubscribe failed:', e.message));
+  }
+}
+
+// Exposes the underlying Redis connection (already open, already managed by
+// ioredis) for callers that need ordinary Redis commands — hashes, lists,
+// TTLs — alongside pub/sub, instead of opening a second dedicated
+// connection per caller. Returns null in the in-process fallback (no
+// REDIS_URL), same as everywhere else in this module — callers MUST handle
+// that case (see services/webTerminal.js: falls back to a plain in-memory
+// Map when this is null, since without Redis you're single-process anyway
+// and don't need cross-worker session sharing).
+// NOTE: this is the `publisher` connection specifically — `subscriber` is in
+// Redis's SUBSCRIBE mode and can't run other commands.
+function getClient() {
+  return publisher;
 }
 
 // ── Health introspection ──────────────────────────────────────────────────────
@@ -115,4 +148,4 @@ function getStatus() {
   };
 }
 
-module.exports = { publish, subscribe, PROCESS_ID, getStatus };
+module.exports = { publish, subscribe, unsubscribe, getClient, PROCESS_ID, getStatus };
