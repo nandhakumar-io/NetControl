@@ -79,6 +79,7 @@ export default function TerminalPage() {
   // Relay state
   const relaySessionRef  = useRef(null)
   const relaySseRef      = useRef(null)
+  const relaySseRetries  = useRef(0)
   const relayPollRef     = useRef(null)
   const relayActiveRef   = useRef(false)
 
@@ -105,6 +106,7 @@ export default function TerminalPage() {
   }
   const stopRelay = useCallback(() => {
     relayActiveRef.current = false
+    relaySseRetries.current = 0
     if (relaySseRef.current) { try { relaySseRef.current.close() } catch {} relaySseRef.current = null }
     if (relayPollRef.current) { clearInterval(relayPollRef.current); relayPollRef.current = null }
     if (relaySessionRef.current) {
@@ -175,19 +177,6 @@ export default function TerminalPage() {
   // Called when WebSocket SSH fails. Opens an HTTP relay session that the
   // netcontrol-agent on the device polls and proxies to a local shell.
   const startRelay = useCallback(async () => {
-    // BUG FIX: this used to jump straight into opening a new session,
-    // overwriting relaySessionRef/relaySseRef without ever closing what
-    // they previously pointed to. Every retry (WS falling back, "Retry
-    // SSH", a dropped SSE stream) therefore leaked the prior relay
-    // session — the backend never got the DELETE /session/:id that tells
-    // it (and, via the closed:true it then hands the agent, the agent
-    // itself) to tear down. The orphaned session only died on the
-    // server's 5-minute inactivity sweep, and the agent's spawned shell
-    // (cmd.exe on Windows) stayed alive that whole time — so a flaky
-    // relay connection could pile up several stuck shells on the device,
-    // one per failed retry, instead of ever cleanly replacing the last one.
-    stopRelay()
-
     const term = xtermRef.current
     term?.writeln('\r\n\x1b[90m[WebSocket unavailable — falling back to HTTP relay…]\x1b[0m\r\n')
     term?.writeln('\x1b[90m[The device agent must be running for this to work]\x1b[0m\r\n')
@@ -203,30 +192,63 @@ export default function TerminalPage() {
       relaySessionRef.current = sessionId
       relayActiveRef.current  = true
 
-      // SSE stream for output from agent → browser
-      const sseUrl = buildSseUrl(sessionId)
-      const es = new EventSource(sseUrl)
-      relaySseRef.current = es
+      // SSE stream for output from agent → browser.
+      //
+      // Retries transient failures instead of declaring the whole relay dead
+      // on the first onerror. Two very different things can trigger onerror:
+      //   1. A genuine "session not found" 404 (e.g. this GET happened to
+      //      reach a worker mid-restart, or arrived a beat before the
+      //      backend finished writing session state) — per the EventSource
+      //      spec, a non-2xx response is FATAL: readyState goes straight to
+      //      CLOSED and the browser will never retry on its own. Previously
+      //      any onerror was treated as unrecoverable and immediately tore
+      //      the whole relay down — so a single blip anywhere in that path
+      //      permanently killed the session from the browser's point of
+      //      view, even though the session itself was often still alive
+      //      server-side (see services/webTerminal.js's Redis-backed state).
+      //   2. A real, sustained disconnect (agent actually gone, session
+      //      actually closed/expired) — this should still fail visibly.
+      // So: reopen a fresh EventSource against the same sessionId with a
+      // short backoff, up to a few attempts, before giving up for good.
+      relaySseRetries.current = 0
+      const MAX_SSE_RETRIES = 4
+      const openSse = () => {
+        const es = new EventSource(buildSseUrl(sessionId))
+        relaySseRef.current = es
 
-      es.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data)
-          if (msg.type === 'data')   { xtermRef.current?.write(msg.data) }
-          if (msg.type === 'status') {
-            if (msg.data?.includes('starting shell')) setStatus('relay')
-            term?.writeln(`\r\n\x1b[90m${msg.data}\x1b[0m\r\n`)
+        es.onopen = () => { relaySseRetries.current = 0 }
+
+        es.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data)
+            if (msg.type === 'data')   { xtermRef.current?.write(msg.data) }
+            if (msg.type === 'status') {
+              if (msg.data?.includes('starting shell')) setStatus('relay')
+              term?.writeln(`\r\n\x1b[90m${msg.data}\x1b[0m\r\n`)
+            }
+            if (msg.type === 'closed') { setStatus('closed'); stopRelay() }
+          } catch {}
+        }
+
+        es.onerror = () => {
+          if (!relayActiveRef.current) return
+          try { es.close() } catch {}
+
+          if (relaySseRetries.current < MAX_SSE_RETRIES) {
+            relaySseRetries.current += 1
+            const delay = Math.min(500 * 2 ** relaySseRetries.current, 5000)
+            term?.writeln(`\r\n\x1b[90m[Relay stream hiccup — reconnecting… (${relaySseRetries.current}/${MAX_SSE_RETRIES})]\x1b[0m\r\n`)
+            setTimeout(() => { if (relayActiveRef.current) openSse() }, delay)
+            return
           }
-          if (msg.type === 'closed') { setStatus('closed'); stopRelay() }
-        } catch {}
-      }
 
-      es.onerror = () => {
-        if (!relayActiveRef.current) return
-        term?.writeln('\r\n\x1b[91m[Relay output stream lost]\x1b[0m\r\n')
-        setStatus('error')
-        setErrMsg('HTTP relay stream disconnected')
-        stopRelay()
+          term?.writeln('\r\n\x1b[91m[Relay output stream lost]\x1b[0m\r\n')
+          setStatus('error')
+          setErrMsg('HTTP relay stream disconnected')
+          stopRelay()
+        }
       }
+      openSse()
 
       // Wire terminal input → relay input endpoint
       disposeInput()
