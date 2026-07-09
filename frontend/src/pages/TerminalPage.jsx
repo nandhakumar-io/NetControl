@@ -175,6 +175,19 @@ export default function TerminalPage() {
   // Called when WebSocket SSH fails. Opens an HTTP relay session that the
   // netcontrol-agent on the device polls and proxies to a local shell.
   const startRelay = useCallback(async () => {
+    // BUG FIX: this used to jump straight into opening a new session,
+    // overwriting relaySessionRef/relaySseRef without ever closing what
+    // they previously pointed to. Every retry (WS falling back, "Retry
+    // SSH", a dropped SSE stream) therefore leaked the prior relay
+    // session — the backend never got the DELETE /session/:id that tells
+    // it (and, via the closed:true it then hands the agent, the agent
+    // itself) to tear down. The orphaned session only died on the
+    // server's 5-minute inactivity sweep, and the agent's spawned shell
+    // (cmd.exe on Windows) stayed alive that whole time — so a flaky
+    // relay connection could pile up several stuck shells on the device,
+    // one per failed retry, instead of ever cleanly replacing the last one.
+    stopRelay()
+
     const term = xtermRef.current
     term?.writeln('\r\n\x1b[90m[WebSocket unavailable — falling back to HTTP relay…]\x1b[0m\r\n')
     term?.writeln('\x1b[90m[The device agent must be running for this to work]\x1b[0m\r\n')
