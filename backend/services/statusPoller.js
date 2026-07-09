@@ -96,7 +96,11 @@ async function isReachable(device) {
 }
 
 // ── Poll a single device ──────────────────────────────────────────────────────
-async function pollDevice(device, nowSec) {
+// `freshMap` is a Map<deviceId, {last_seen, status}> for ALL agent devices,
+// built with ONE query per poll cycle in pollAll() — see the comment there
+// for why. Falls back to a per-device query only if no map is supplied
+// (keeps this function usable standalone, e.g. from tests).
+async function pollDevice(device, nowSec, freshMap = null) {
   // Devices awaiting admin approval are left alone entirely — no TCP probing,
   // no status overwrite — regardless of whether their agent is actively
   // reporting or has gone silent. The approval UI depends on status staying
@@ -109,14 +113,43 @@ async function pollDevice(device, nowSec) {
     return { id: device.id, name: device.name, newStatus: 'needs_approval', oldStatus: device.status, method: 'skip' };
   }
 
-  // Agent path: re-fetch last_seen fresh to avoid trusting stale batch data
+  // Agent path: re-fetch last_seen fresh to avoid trusting stale batch data.
+  //
+  // SCALE FIX: this used to run `SELECT last_seen, status FROM devices
+  // WHERE id = ?` as its OWN separate query, once PER agent device, every
+  // single poll cycle (5s). At 800 agent devices that's 800 concurrent
+  // individual round-trips fired at once via Promise.allSettled in
+  // pollAll() — every 5 seconds, forever. Against a 100-connection pool
+  // (queueLimit 500), a full boot/reconnect burst pushes 800 requests at
+  // 100 available connections; the ~200 that don't fit under the queue
+  // limit get rejected outright, not queued. Each rejection landed here as
+  // `fresh === null` — and then `fresh.status` below threw a TypeError,
+  // which Promise.allSettled turned into a silently-dropped rejected
+  // result for that device: no status update that cycle at all. A device
+  // stuck in that failure pattern (e.g. consistently one of the ~200 that
+  // miss the pool on every cycle) would sit at whatever status it started
+  // at — "unknown" forever for anything added after the pool started
+  // filling up — even though it's actively reporting and perfectly
+  // reachable. Fixed two ways: (1) one batched query for ALL agent devices
+  // per cycle instead of N individual ones (see pollAll), so this hot path
+  // no longer scales with fleet size at all; (2) a null `fresh` is now
+  // handled explicitly instead of crashing, so a genuinely failed lookup
+  // just skips this device for one cycle instead of raising.
   if (device.agent_key_hash) {
-    const fresh = await queryOne(
-      'SELECT last_seen, status FROM devices WHERE id = ?',
-      [device.id]
-    ).catch(() => null);
+    const fresh = freshMap
+      ? freshMap.get(device.id)
+      : await queryOne('SELECT last_seen, status FROM devices WHERE id = ?', [device.id]).catch(() => null);
 
-    const lastSeen = fresh?.last_seen || 0;
+    if (!fresh) {
+      // Couldn't get a fresh read this cycle (pool contention, transient
+      // DB hiccup, or the device vanished mid-cycle) — leave status exactly
+      // as it was rather than guessing. It'll be re-evaluated next cycle
+      // 5s later; one skipped tick is invisible in practice, unlike a
+      // crash that drops the device from status tracking entirely.
+      return { id: device.id, name: device.name, newStatus: device.status || 'unknown', oldStatus: device.status, method: 'skip' };
+    }
+
+    const lastSeen = fresh.last_seen || 0;
     const ageSec   = nowSec - lastSeen;
 
     if (ageSec <= AGENT_GRACE_SEC) {
@@ -334,11 +367,44 @@ async function pollAll() {
     return;
   }
 
-  if (!devices.length) return;
+  if (!devices.length) {
+    await execute(
+      `INSERT INTO poller_heartbeat (id, last_run_at, devices_polled, cycle_ms, pid)
+       VALUES (1, ?, 0, ?, ?)
+       ON DUPLICATE KEY UPDATE last_run_at = VALUES(last_run_at),
+         devices_polled = 0, cycle_ms = VALUES(cycle_ms), pid = VALUES(pid)`,
+      [nowSec, Date.now() - t0, process.pid]
+    ).catch(() => {});
+    return;
+  }
+
+  // ── Batched freshness fetch for agent devices ────────────────────────────
+  // ONE query for every agent device this cycle instead of N individual
+  // ones inside pollDevice() — see the long comment in pollDevice() for why
+  // that mattered at 800-device scale. Non-agent devices don't need this at
+  // all (they're TCP-probed, not DB-freshness-checked).
+  const agentIds = devices.filter(d => d.agent_key_hash).map(d => d.id);
+  let freshMap = new Map();
+  if (agentIds.length) {
+    try {
+      const ph = agentIds.map(() => '?').join(',');
+      const freshRows = await query(
+        `SELECT id, last_seen, status FROM devices WHERE id IN (${ph})`,
+        agentIds
+      );
+      freshMap = new Map(freshRows.map(r => [r.id, r]));
+    } catch (e) {
+      console.error('[Poller] agent freshness batch-fetch error:', e.message);
+      // freshMap stays empty — pollDevice() treats a missing entry as
+      // "couldn't confirm this cycle" and leaves status untouched rather
+      // than guessing, so a single bad cycle degrades gracefully instead
+      // of flipping every agent device to a wrong status at once.
+    }
+  }
 
   // Run all device polls concurrently (semaphore limits socket usage)
   const settled = await Promise.allSettled(
-    devices.map(d => pollDevice(d, nowSec))
+    devices.map(d => pollDevice(d, nowSec, freshMap))
   );
 
   const results = [];
@@ -363,6 +429,18 @@ async function pollAll() {
     `online:${counts.online||0} offline:${counts.offline||0} unknown:${counts.unknown||0} | ` +
     `agent:${counts.agent||0} tcp:${counts.tcp||0} skip:${counts.skip||0} err:${errors} | ${elapsed}ms`
   );
+
+  // Heartbeat — see db/migrate-poller-heartbeat.js for why this exists.
+  // Upsert rather than insert: this is a single always-current row, not a
+  // history log (device_status_history already covers "what changed and
+  // when" — this only ever answers "is the poller alive right now").
+  await execute(
+    `INSERT INTO poller_heartbeat (id, last_run_at, devices_polled, cycle_ms, pid)
+     VALUES (1, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE last_run_at = VALUES(last_run_at),
+       devices_polled = VALUES(devices_polled), cycle_ms = VALUES(cycle_ms), pid = VALUES(pid)`,
+    [nowSec, devices.length, elapsed, process.pid]
+  ).catch(e => console.error('[Poller] heartbeat write failed:', e.message));
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────

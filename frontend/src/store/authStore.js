@@ -10,6 +10,10 @@ export const useAuthStore = create((set) => ({
     set({ isLoading: true })
     try {
       const { data } = await api.post('/auth/login', { username, password })
+      if (data.requires2FA) {
+        set({ isLoading: false })
+        return { ok: false, requires2FA: true, mfaToken: data.mfaToken }
+      }
       const token = data.accessToken || data.token
       localStorage.setItem('nc_token', token)
       set({ user: data.user, token, isLoading: false })
@@ -17,6 +21,22 @@ export const useAuthStore = create((set) => ({
     } catch (err) {
       set({ isLoading: false })
       return { ok: false, message: err.response?.data?.error || err.response?.data?.message || 'Login failed' }
+    }
+  },
+
+  // Second step of a 2FA-protected login — redeems the mfaToken from
+  // login() above together with a TOTP or backup code.
+  verify2FA: async (mfaToken, code) => {
+    set({ isLoading: true })
+    try {
+      const { data } = await api.post('/auth/2fa/verify', { mfaToken, code })
+      const token = data.accessToken || data.token
+      localStorage.setItem('nc_token', token)
+      set({ user: data.user, token, isLoading: false })
+      return { ok: true, backupCodeUsed: data.backupCodeUsed, backupCodesRemaining: data.backupCodesRemaining }
+    } catch (err) {
+      set({ isLoading: false })
+      return { ok: false, message: err.response?.data?.error || 'Verification failed' }
     }
   },
 

@@ -36,6 +36,7 @@ const { query, queryOne, execute } = require('../db');
 const backupService = require('../services/backupService');
 const remoteBrowse = require('../services/remoteBrowse');
 const destinations = require('../services/backupDestinations');
+const backupVerify = require('../services/backupVerify');
 const { decrypt } = require('../services/crypto');
 const audit = require('../services/audit');
 const webhook = require('../services/webhook');
@@ -45,6 +46,43 @@ router.use(requireAuth);
 router.use(requirePermission(8192));
 
 const FORMATS = ['zip', 'tar', 'tar.gz'];
+
+// ── Shared verify runner ──────────────────────────────────────────────────────
+// Used both by the automatic post-backup check and the manual /:id/verify
+// endpoint, so the DB update + webhook/audit behavior stays identical either
+// way. Never throws — failures are recorded on the row, not surfaced as a
+// request error, since a failed verify is an expected, actionable outcome,
+// not a server error.
+async function runVerification(row, actor) {
+  const result = await backupVerify.verifyBackup(row, backupService.BACKUP_STORE_DIR);
+  await execute(
+    `UPDATE backups SET verify_status = ?, verified_at = ?, verify_error = ?, verify_checksum = ? WHERE id = ?`,
+    [result.status, Math.floor(Date.now() / 1000), result.status === 'failed' ? result.error : null, result.checksum, row.id]
+  );
+
+  if (result.status === 'failed') {
+    webhook.fire('backup.verify_failed', {
+      id: row.id, archive_name: row.archive_name, destination: row.destination_name || 'local',
+      error: result.error, severity: 'critical',
+      message: `Restore verification FAILED for backup ${row.archive_name} (${row.destination_name || 'local'}): ${result.error}`,
+    }).catch(() => {});
+  } else {
+    webhook.fire('backup.verified', {
+      id: row.id, archive_name: row.archive_name, destination: row.destination_name || 'local',
+      entryCount: result.entryCount, severity: 'info',
+      message: `Backup ${row.archive_name} verified OK (${result.entryCount} archive entries readable)`,
+    }).catch(() => {});
+  }
+
+  await audit.log({
+    userId: actor?.id || null, username: actor?.username || 'system',
+    action: 'backup_verify', targetType: 'backup', targetId: row.id, targetName: row.archive_name,
+    result: result.status === 'passed' ? 'success' : 'failure',
+    details: result.status === 'passed' ? `${result.entryCount} entries OK` : result.error,
+  }).catch(() => {});
+
+  return result;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 async function loadDeviceWithCreds(deviceId) {
@@ -310,6 +348,7 @@ router.get('/', async (req, res) => {
       `SELECT id, source_path, device_id, device_name, source_type, format,
               destination_id, destination_name, destination_type,
               archive_name, size_bytes, checksum_sha256, status, error_message,
+              encrypted, verify_status, verified_at, verify_error, verify_checksum,
               created_by, created_by_name, created_at, completed_at
        FROM backups ORDER BY created_at DESC`
     );
@@ -450,6 +489,18 @@ router.post(
         message: `${req.user.username} backed up ${sourcePath} → ${destinationName || 'local'}/${archiveName}`,
       }).catch(() => {});
 
+      // Fire-and-forget restore verification — reads the archive back from
+      // wherever it was just written and confirms it's intact and
+      // extractable. Doesn't block the response (this can mean re-downloading
+      // from S3/Azure/SFTP, which shouldn't hold up the UI), but its result
+      // lands on this row within moments and is visible via GET /api/backup.
+      runVerification(
+        { id, archive_name: archiveName, format: effectiveFormat, destination_id: req.body.destinationId || null,
+          destination_name: destinationName, destination_type: destination.type, encrypted: result.encrypted,
+          checksum_sha256: result.checksum },
+        req.user
+      ).catch(() => {});
+
       res.json({
         id, sourcePath, format: effectiveFormat,
         archiveName, sizeBytes: result.bytes, checksum: result.checksum,
@@ -528,6 +579,24 @@ router.get('/:id/download', [param('id').isUUID()], async (req, res) => {
       if (err) return; // response already sent or connection dropped — nothing more to do
       await finish();
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/backup/:id/verify — re-run restore verification on demand ──────
+// Useful for periodically re-checking older archives, or immediately after
+// changing/rotating destination credentials, rather than waiting for the
+// next scheduled backup of that same source to happen to touch this row.
+router.post('/:id/verify', [param('id').isUUID()], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const row = await queryOne(`SELECT * FROM backups WHERE id = ?`, [req.params.id]);
+    if (!row || row.status !== 'completed') return res.status(404).json({ error: 'Backup not found' });
+
+    const result = await runVerification(row, req.user);
+    res.json({ id: row.id, ...result });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

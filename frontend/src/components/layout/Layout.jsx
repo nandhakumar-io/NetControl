@@ -12,6 +12,7 @@ import { useThemeStore } from '../../store/themeStore'
 import { usePermissions } from '../../hooks/usePermissions'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import TwoFactorModal from '../modals/TwoFactorModal'
 
 // ── Notification bell — SSE listener only, no nav ─────────────────────────────
 // This component handles LIVE notifications (toasts + badge count).
@@ -157,6 +158,12 @@ function NotificationBell({ collapsed, isLight }) {
 // ── Layout ─────────────────────────────────────────────────────────────────────
 export default function Layout() {
   const [collapsed, setCollapsed] = useState(false)
+  // BUG FIX: TwoFactorModal (setup/disable/backup codes — routes/users.js's
+  // /me/2fa/* endpoints) was fully built but never mounted or given a
+  // trigger anywhere in the app — there's no Settings/Profile page, so it
+  // had no home. This was the only reason 2FA was invisible even though
+  // the whole backend flow already worked end to end.
+  const [show2FA, setShow2FA] = useState(false)
   const logout   = useAuthStore(s => s.logout)
   const user     = useAuthStore(s => s.user)
   const navigate = useNavigate()
@@ -378,6 +385,18 @@ export default function Layout() {
             {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{isLight ? 'Light mode' : 'Dark mode'}</span>}
           </button>
 
+          {/* Security / 2FA */}
+          <button
+            onClick={() => setShow2FA(true)}
+            title="Two-factor authentication"
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
+                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
+          >
+            <ShieldCheck size={16} className="shrink-0" />
+            {!collapsed && <span className="text-sm font-body font-medium">Security</span>}
+          </button>
+
           {/* Logout */}
           <button
             onClick={handleLogout}
@@ -388,6 +407,8 @@ export default function Layout() {
             {!collapsed && <span className="text-sm font-body font-medium">Logout</span>}
           </button>
         </div>
+
+        <TwoFactorModal open={show2FA} onClose={() => setShow2FA(false)} />
 
         {/* Collapse toggle */}
         <button

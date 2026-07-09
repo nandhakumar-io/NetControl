@@ -263,8 +263,65 @@ function decryptReadStream(readStream) {
   return readStream.pipe(createDecryptStream());
 }
 
+// ── Read-back for verification ────────────────────────────────────────────────
+// Returns a raw (still-encrypted-if-applicable) readable stream of exactly
+// the bytes that were written to `row`'s destination, regardless of type.
+// services/backupVerify.js uses this to recompute a checksum and — after
+// piping through createDecryptStream() when row.encrypted — to structurally
+// read the archive itself. Nothing here decrypts; that's the caller's job,
+// since some verification (raw checksum) wants the ciphertext as-is.
+async function readFromDestination(row, storeDir) {
+  switch (row.destination_type) {
+    case 'local': {
+      const filePath = path.join(storeDir, row.archive_name);
+      return fs.createReadStream(filePath);
+    }
+    case 's3': {
+      const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+      const destRow = await require('../db').queryOne('SELECT config FROM backup_destinations WHERE id = ?', [row.destination_id]);
+      if (!destRow) throw new DestinationError('Destination no longer exists');
+      const config = decryptConfig(destRow.config);
+      const client = new S3Client({ region: config.region, credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey } });
+      const key = config.prefix ? `${config.prefix.replace(/\/+$/, '')}/${row.archive_name}` : row.archive_name;
+      const resp = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key }));
+      return resp.Body; // Node readable stream
+    }
+    case 'azure_blob': {
+      const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+      const destRow = await require('../db').queryOne('SELECT config FROM backup_destinations WHERE id = ?', [row.destination_id]);
+      if (!destRow) throw new DestinationError('Destination no longer exists');
+      const config = decryptConfig(destRow.config);
+      let serviceClient;
+      if (config.connectionString) serviceClient = BlobServiceClient.fromConnectionString(config.connectionString);
+      else serviceClient = new BlobServiceClient(`https://${config.accountName}.blob.core.windows.net`, new StorageSharedKeyCredential(config.accountName, config.accountKey));
+      const containerClient = serviceClient.getContainerClient(config.container);
+      const key = config.prefix ? `${config.prefix.replace(/\/+$/, '')}/${row.archive_name}` : row.archive_name;
+      const download = await containerClient.getBlockBlobClient(key).download();
+      return download.readableStreamBody;
+    }
+    case 'remote_folder': {
+      const destRow = await require('../db').queryOne('SELECT config FROM backup_destinations WHERE id = ?', [row.destination_id]);
+      if (!destRow) throw new DestinationError('Destination no longer exists');
+      const config = decryptConfig(destRow.config);
+      const deviceRow = await require('../db').queryOne('SELECT * FROM devices WHERE id = ?', [config.deviceId]);
+      if (!deviceRow) throw new DestinationError('Destination device no longer exists');
+      const { decrypt: decryptCred } = require('./crypto');
+      const device = { ...deviceRow, ssh_password: decryptCred(deviceRow.ssh_password), ssh_key: decryptCred(deviceRow.ssh_key) };
+      const conn = await remoteBrowse.connect(device);
+      const remotePath = path.posix.join(config.remotePath, row.archive_name);
+      const sftp = await new Promise((resolve, reject) => conn.sftp((err, s) => err ? reject(err) : resolve(s)));
+      const stream = sftp.createReadStream(remotePath);
+      stream.on('close', () => { try { conn.end(); } catch {} });
+      stream.on('error', () => { try { conn.end(); } catch {} });
+      return stream;
+    }
+    default:
+      throw new DestinationError(`Unknown destination type: ${row.destination_type}`);
+  }
+}
+
 module.exports = {
   DestinationError,
   encryptConfig, decryptConfig, redactConfig,
-  writeToDestination, shouldEncrypt, decryptReadStream,
+  writeToDestination, shouldEncrypt, decryptReadStream, readFromDestination,
 };

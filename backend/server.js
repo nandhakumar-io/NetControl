@@ -246,6 +246,7 @@ app.use('/api/backup',   require('./routes/backup'));
 const { backupSchedulesRouter, logExportSchedulesRouter } = require('./routes/scheduledJobs');
 app.use('/api/backup-schedules',     backupSchedulesRouter);
 app.use('/api/log-export-schedules', logExportSchedulesRouter);
+app.use('/api/digest', require('./routes/digest'));
 
 // BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
 // by the terminal page (/api/terminal/open/:id, the SSE output stream, and
@@ -273,15 +274,24 @@ app.get('/api/health', (_req, res) => res.json({
 // worker a given browser request lands on may simply never have heard
 // about a device another worker is actively receiving agent POSTs for.
 app.get('/api/health/full', require('./middleware/auth').requireAuth, require('./middleware/auth').requireRole('admin'), async (_req, res) => {
-  const { ping: dbPing } = require('./db');
+  const { ping: dbPing, queryOne } = require('./db');
   const bus = require('./services/bus');
 
-  const [dbOk, busStatus] = await Promise.all([
+  const [dbOk, busStatus, heartbeat] = await Promise.all([
     dbPing(),
     Promise.resolve(bus.getStatus()),
+    queryOne('SELECT last_run_at, devices_polled, cycle_ms, pid FROM poller_heartbeat WHERE id = 1').catch(() => null),
   ]);
 
-  const healthy = dbOk && (busStatus.mode !== 'redis' || busStatus.connected);
+  // POLLER_STALE_SEC: the poll loop ticks every 5s (statusPoller.js); 30s
+  // is 6 missed cycles in a row, comfortably past a single slow tick, so
+  // this only fires for an actually-dead process, not jitter.
+  const POLLER_STALE_SEC = 30;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const pollerAgeSec = heartbeat ? nowSec - heartbeat.last_run_at : null;
+  const pollerAlive = heartbeat != null && pollerAgeSec <= POLLER_STALE_SEC;
+
+  const healthy = dbOk && (busStatus.mode !== 'redis' || busStatus.connected) && pollerAlive;
 
   res.status(healthy ? 200 : 503).json({
     status: healthy ? 'ok' : 'degraded',
@@ -298,6 +308,27 @@ app.get('/api/health/full', require('./middleware/auth').requireAuth, require('.
             ? 'Redis reachable — metrics and device-status changes sync across all web workers.'
             : 'REDIS_URL is set but Redis is NOT reachable right now — cross-worker sync is broken. Agents may appear offline/silent on some workers while genuinely online.',
       },
+      // Device status polling, scheduled backups/log-exports, and digests
+      // all live exclusively in the separate `poller` process (poller.js)
+      // — never in this web-tier process. If that process is down, none
+      // of those run and there's otherwise no error anywhere to see —
+      // devices just silently stay stuck on whatever status they last had
+      // (often "unknown" for anything added since it died), and scheduled
+      // exports/backups just show "Never run" forever. This is the
+      // authoritative way to tell "is the poller actually alive" instead
+      // of inferring it from those symptoms.
+      poller: heartbeat == null
+        ? { alive: false, note: 'No heartbeat row found yet — either the poller process has never completed a single cycle, or db/migrate-poller-heartbeat.js hasn\'t been run. Run `node db/migrate.js`, then check the poller container/process logs.' }
+        : {
+            alive: pollerAlive,
+            lastRunSecondsAgo: pollerAgeSec,
+            devicesPolled: heartbeat.devices_polled,
+            lastCycleMs: heartbeat.cycle_ms,
+            pid: heartbeat.pid,
+            note: pollerAlive
+              ? 'Poller is alive and completing poll cycles on schedule.'
+              : `No poll cycle in the last ${pollerAgeSec}s (expected every ~5s) — the poller process is very likely crashed, not started, or stuck. Devices will stay on their last known status and scheduled backups/log exports/digests will not run until it's restarted.`,
+          },
     },
   });
 });

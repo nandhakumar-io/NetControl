@@ -22,7 +22,9 @@ export default function LoginPage() {
   const [showPw, setShowPw] = useState(false)
   const [error, setError] = useState('')
   const [googleEnabled, setGoogleEnabled] = useState(false)
-  const { login, isLoading, token } = useAuthStore()
+  const [mfaToken, setMfaToken] = useState(null)
+  const [code, setCode] = useState('')
+  const { login, verify2FA, isLoading, token } = useAuthStore()
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -67,6 +69,26 @@ export default function LoginPage() {
     if (result.ok) {
       toast.success('Welcome back')
       navigate('/dashboard', { replace: true })
+    } else if (result.requires2FA) {
+      setMfaToken(result.mfaToken)
+    } else {
+      setError(result.message)
+    }
+  }
+
+  const handleVerify2FA = async (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!code.trim()) { setError('Enter your authentication code'); return }
+    setError('')
+    const result = await verify2FA(mfaToken, code.trim())
+    if (result.ok) {
+      if (result.backupCodeUsed) {
+        toast.success(`Signed in with a backup code — ${result.backupCodesRemaining} remaining`)
+      } else {
+        toast.success('Welcome back')
+      }
+      navigate('/dashboard', { replace: true })
     } else {
       setError(result.message)
     }
@@ -92,6 +114,7 @@ export default function LoginPage() {
         <div className="glass rounded-2xl border border-white/10 overflow-hidden">
           <div className="h-0.5 bg-gradient-to-r from-transparent via-brand-500 to-transparent opacity-60" />
 
+          {!mfaToken ? (
           <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
             <div>
               <label className="label">Username</label>
@@ -141,8 +164,51 @@ export default function LoginPage() {
               {isLoading ? 'Signing in...' : 'Sign In'}
             </button>
           </form>
+          ) : (
+          <form onSubmit={handleVerify2FA} className="p-6 flex flex-col gap-4">
+            <div>
+              <label className="label">Authentication code</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                className="input-field text-center tracking-[0.3em] font-mono"
+                placeholder="000000"
+                maxLength={11}
+                value={code}
+                onChange={e => setCode(e.target.value)}
+                autoComplete="one-time-code"
+                autoFocus
+              />
+              <p className="text-xs text-slate-500 font-body mt-2">
+                Enter the 6-digit code from your authenticator app, or one of your backup codes.
+              </p>
+            </div>
 
-          {googleEnabled && (
+            {error && (
+              <div className="px-3 py-2 rounded-lg bg-accent-red/10 border border-accent-red/20">
+                <p className="text-xs text-accent-red font-body">{error}</p>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="btn-primary w-full justify-center mt-1"
+              disabled={isLoading}
+            >
+              {isLoading ? <Loader2 size={14} className="animate-spin" /> : null}
+              {isLoading ? 'Verifying...' : 'Verify'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMfaToken(null); setCode(''); setError('') }}
+              className="text-xs text-slate-500 hover:text-slate-300 font-body text-center"
+            >
+              ← Back to sign in
+            </button>
+          </form>
+          )}
+
+          {googleEnabled && !mfaToken && (
             <div className="px-6 pb-2">
               <div className="flex items-center gap-3 mb-4">
                 <div className="flex-1 h-px bg-white/10" />

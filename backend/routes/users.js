@@ -20,7 +20,7 @@ function sanitizeUser(u) {
 // Columns safe to return to the client. google_linked is derived so we never
 // leak the raw Google subject id, just whether an account is linked.
 const USER_FIELDS = `id, username, email, display_name, role, permissions, enabled,
-  has_password, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
+  has_password, totp_enabled, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
 
 // ── POST /api/users/me/change-password — any authenticated user ──────────────
 // Used to satisfy must_change_password after the random one-time admin
@@ -54,6 +54,155 @@ router.post('/me/change-password',
     }
   }
 );
+
+// ── Two-factor authentication (TOTP) — self-service ───────────────────────────
+const twoFactor = require('../services/twoFactor');
+
+// GET /api/users/me/2fa/status — is 2FA on for the current account?
+router.get('/me/2fa/status', async (req, res) => {
+  try {
+    const user = await queryOne('SELECT totp_enabled, totp_confirmed_at FROM users WHERE id = ?', [req.user.id]);
+    res.json({ enabled: !!user?.totp_enabled, confirmedAt: user?.totp_confirmed_at || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/users/me/2fa/setup — start (or restart) setup: generates a new
+// secret, stores it encrypted but NOT enabled yet (login isn't affected until
+// /confirm succeeds), returns the QR code + manual entry key.
+router.post('/me/2fa/setup', async (req, res) => {
+  try {
+    const user = await queryOne('SELECT username, totp_enabled FROM users WHERE id = ?', [req.user.id]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.totp_enabled) return res.status(400).json({ error: '2FA is already enabled. Disable it first to re-run setup.' });
+
+    const secret = twoFactor.generateSecret();
+    await execute('UPDATE users SET totp_secret = ? WHERE id = ?', [twoFactor.encryptSecret(secret), req.user.id]);
+
+    const otpauthUrl = twoFactor.keyUri(secret, user.username);
+    const qrDataUrl = await twoFactor.qrCodeDataUrl(otpauthUrl);
+    res.json({ secret, otpauthUrl, qrDataUrl });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/users/me/2fa/confirm — verify a code against the pending secret
+// from /setup, and if it matches, turn 2FA on and mint backup codes (shown
+// to the user exactly once — only bcrypt hashes are ever stored).
+router.post('/me/2fa/confirm',
+  body('code').notEmpty().isString(),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const user = await queryOne('SELECT username, totp_secret FROM users WHERE id = ?', [req.user.id]);
+      if (!user?.totp_secret) return res.status(400).json({ error: 'No pending 2FA setup. Call /me/2fa/setup first.' });
+
+      const secret = twoFactor.decryptSecret(user.totp_secret);
+      if (!twoFactor.verifyToken(secret, req.body.code)) {
+        return res.status(401).json({ error: 'Invalid code. Check your authenticator app and try again.' });
+      }
+
+      const { plain, hashed } = await twoFactor.generateBackupCodes();
+      await execute(
+        `UPDATE users SET totp_enabled = 1, totp_backup_codes = ?, totp_confirmed_at = ? WHERE id = ?`,
+        [twoFactor.encryptBackupCodes(hashed), Math.floor(Date.now() / 1000), req.user.id]
+      );
+
+      await audit.log({
+        userId: req.user.id, username: user.username,
+        action: '2fa_enabled', targetType: 'user', targetId: req.user.id,
+        targetName: user.username, ipSource: req.realIp, result: 'success',
+      });
+
+      res.json({ enabled: true, backupCodes: plain });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// POST /api/users/me/2fa/disable — requires current password + a valid TOTP
+// or backup code, so a hijacked session alone can't turn protection off.
+router.post('/me/2fa/disable',
+  body('password').notEmpty(),
+  body('code').notEmpty().isString(),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.user.id]);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      const passOk = await bcrypt.compare(req.body.password, user.password || '');
+      if (!passOk) return res.status(401).json({ error: 'Current password is incorrect' });
+
+      const secret = twoFactor.decryptSecret(user.totp_secret);
+      let ok = twoFactor.verifyToken(secret, req.body.code);
+      if (!ok) {
+        const hashedCodes = twoFactor.decryptBackupCodes(user.totp_backup_codes);
+        ok = (await twoFactor.redeemBackupCode(hashedCodes, req.body.code)) !== null;
+      }
+      if (!ok) return res.status(401).json({ error: 'Invalid authentication code' });
+
+      await execute(
+        `UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_backup_codes = NULL, totp_confirmed_at = NULL WHERE id = ?`,
+        [req.user.id]
+      );
+      await audit.log({
+        userId: req.user.id, username: user.username,
+        action: '2fa_disabled', targetType: 'user', targetId: req.user.id,
+        targetName: user.username, ipSource: req.realIp, result: 'success',
+      });
+      res.json({ enabled: false });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// POST /api/users/me/2fa/backup-codes/regenerate — invalidate old backup
+// codes and issue a fresh set (e.g. after some have been used up).
+router.post('/me/2fa/backup-codes/regenerate',
+  body('code').notEmpty().isString(),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const user = await queryOne('SELECT username, totp_enabled, totp_secret FROM users WHERE id = ?', [req.user.id]);
+      if (!user?.totp_enabled) return res.status(400).json({ error: '2FA is not enabled' });
+      if (!twoFactor.verifyToken(twoFactor.decryptSecret(user.totp_secret), req.body.code)) {
+        return res.status(401).json({ error: 'Invalid code' });
+      }
+      const { plain, hashed } = await twoFactor.generateBackupCodes();
+      await execute('UPDATE users SET totp_backup_codes = ? WHERE id = ?', [twoFactor.encryptBackupCodes(hashed), req.user.id]);
+      await audit.log({
+        userId: req.user.id, username: user.username,
+        action: '2fa_backup_codes_regenerated', targetType: 'user', targetId: req.user.id,
+        targetName: user.username, ipSource: req.realIp, result: 'success',
+      });
+      res.json({ backupCodes: plain });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// POST /api/users/:id/2fa/reset — admin-only escape hatch for a locked-out
+// user (lost phone + backup codes). Turns 2FA off; the user re-enrolls from
+// scratch. Heavily audited since this removes a security control from
+// someone else's account.
+router.post('/:id/2fa/reset', requireRole('admin'), param('id').isUUID(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const target = await queryOne('SELECT username FROM users WHERE id = ?', [req.params.id]);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    await execute(
+      `UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_backup_codes = NULL, totp_confirmed_at = NULL WHERE id = ?`,
+      [req.params.id]
+    );
+    await audit.log({
+      userId: req.user.id, username: req.user.username,
+      action: '2fa_admin_reset', targetType: 'user', targetId: req.params.id,
+      targetName: target.username, ipSource: req.realIp, result: 'success',
+      details: `2FA reset for ${target.username} by admin ${req.user.username}`,
+    });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── GET /api/users — list all users (admin only) ─────────────────────────────
 router.get('/', requireRole('admin'), async (req, res) => {

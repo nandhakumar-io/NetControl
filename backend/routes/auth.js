@@ -13,6 +13,7 @@ const audit   = require('../services/audit');
 const webhook = require('../services/webhook');
 const { isIPAllowed, logBlockedAttempt } = require('../services/ipAllowlist');
 const bf      = require('../services/bruteForce');
+const twoFactor = require('../services/twoFactor');
 require('dotenv').config();
 
 const router = express.Router();
@@ -24,6 +25,18 @@ function signAccess(user) {
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRY || '8h' }
   );
+}
+// Short-lived, single-purpose token issued after password verification for
+// accounts with 2FA enabled. It can ONLY be redeemed at /api/auth/2fa/verify
+// (checked via `purpose`) and expires in 5 minutes — it carries no role or
+// permissions, so on its own it grants no access to anything.
+function signMfaToken(userId) {
+  return jwt.sign({ id: userId, purpose: '2fa_pending' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+}
+function verifyMfaToken(token) {
+  const payload = jwt.verify(token, process.env.JWT_SECRET); // throws if invalid/expired
+  if (payload.purpose !== '2fa_pending') throw new Error('Invalid token purpose');
+  return payload;
 }
 function publicUser(user) {
   return { id: user.id, username: user.username, role: user.role, permissions: user.permissions || 0 };
@@ -123,6 +136,15 @@ router.post('/login', authLimiter, async (req, res) => {
     // Success — reset brute-force counter
     bf.recordSuccess(ip);
 
+    // ── 2FA step-up ─────────────────────────────────────────────────────
+    // Password is correct, but this account requires a second factor.
+    // Issue only a short-lived, scope-limited mfaToken — no accessToken,
+    // no refreshToken cookie — until /api/auth/2fa/verify confirms the code.
+    if (user.totp_enabled) {
+      await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa', ipSource: ip, result: 'success' });
+      return res.json({ requires2FA: true, mfaToken: signMfaToken(user.id) });
+    }
+
     const accessToken = signAccess(user);
     await createRefreshToken(user.id, res);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
@@ -133,6 +155,80 @@ router.post('/login', authLimiter, async (req, res) => {
       accessToken,
       user: publicUser(user),
       mustChangePassword: !!user.must_change_password,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/auth/2fa/verify — redeem an mfaToken + TOTP/backup code ────────
+// Completes a login that was stepped up above. Rate-limited and brute-force
+// tracked the same as /login itself, since this is just as sensitive a gate.
+router.post('/2fa/verify', authLimiter, async (req, res) => {
+  const ip = req.realIp || req.ip;
+  const { mfaToken, code } = req.body;
+  if (!mfaToken || !code) return res.status(400).json({ error: 'mfaToken and code are required' });
+
+  try {
+    const banCheck = await bf.isBanned(ip);
+    if (banCheck.banned) {
+      const mins = Math.ceil(banCheck.remaining / 60);
+      return res.status(429).json({ error: `Too many failed attempts. This IP is temporarily blocked for ${mins} more minute${mins !== 1 ? 's' : ''}.`, code: 'IP_BANNED' });
+    }
+
+    let payload;
+    try {
+      payload = verifyMfaToken(mfaToken);
+    } catch {
+      return res.status(401).json({ error: 'Your login attempt expired. Please sign in again.' });
+    }
+
+    const user = await queryOne('SELECT * FROM users WHERE id = ?', [payload.id]);
+    if (!user || !user.totp_enabled) return res.status(401).json({ error: 'Please sign in again.' });
+    if (!user.enabled) return res.status(403).json({ error: 'Account is disabled. Contact your administrator.' });
+
+    const secret = twoFactor.decryptSecret(user.totp_secret);
+    let usedBackupCode = false;
+    let ok = twoFactor.verifyToken(secret, code);
+    let remainingBackupCodes = null;
+    if (!ok) {
+      const hashedCodes = twoFactor.decryptBackupCodes(user.totp_backup_codes);
+      const result = await twoFactor.redeemBackupCode(hashedCodes, code);
+      if (result !== null) { ok = true; usedBackupCode = true; remainingBackupCodes = result; }
+    }
+
+    if (!ok) {
+      const bfResult = await bf.recordFailure(ip, user.username);
+      await audit.log({ userId: user.id, username: user.username, action: '2fa_verify_failed', ipSource: ip, result: 'failure' });
+      if (bfResult.banned) return res.status(429).json({ error: 'Too many failed attempts. Your IP has been temporarily blocked.', code: 'IP_BANNED' });
+      return res.status(401).json({ error: 'Invalid authentication code', attemptsRemaining: bfResult.remaining });
+    }
+
+    if (usedBackupCode) {
+      await execute('UPDATE users SET totp_backup_codes = ? WHERE id = ?', [twoFactor.encryptBackupCodes(remainingBackupCodes), user.id]);
+    }
+
+    const ipCheck = await isIPAllowed(ip, user.id, user.role);
+    if (!ipCheck.allowed) {
+      await logBlockedAttempt({ username: user.username, ip, reason: `IP allowlist: ${ipCheck.reason}` });
+      await audit.log({ userId: user.id, username: user.username, action: 'login_blocked_ip', ipSource: ip, result: 'failure', details: 'IP not in allowlist (post-2FA)' });
+      return res.status(403).json({ error: 'Access denied: your IP address is not permitted.', code: 'IP_NOT_ALLOWED' });
+    }
+
+    bf.recordSuccess(ip);
+    const accessToken = signAccess(user);
+    await createRefreshToken(user.id, res);
+    await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
+    await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: usedBackupCode ? 'via 2FA backup code' : 'via 2FA TOTP' });
+    webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip}${usedBackupCode ? ' (backup code used)' : ''}` }).catch(() => {});
+
+    res.json({
+      accessToken,
+      user: publicUser(user),
+      mustChangePassword: !!user.must_change_password,
+      backupCodeUsed: usedBackupCode,
+      backupCodesRemaining: usedBackupCode ? remainingBackupCodes.length : undefined,
     });
   } catch (e) {
     console.error(e);

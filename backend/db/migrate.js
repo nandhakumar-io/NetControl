@@ -739,6 +739,34 @@ run()
     } catch (e) {
       console.warn('  ⚠  log_export_schedules.export_target:', e.message);
     }
+    try {
+      const { migrateTwoFactor } = require('./migrate-2fa');
+      await migrateTwoFactor();
+      console.log('  ✓ two_factor (users.totp_secret/totp_enabled/totp_backup_codes)');
+    } catch (e) {
+      console.warn('  ⚠  two_factor:', e.message);
+    }
+    try {
+      const { migrateBackupVerify } = require('./migrate-backup-verify');
+      await migrateBackupVerify();
+      console.log('  ✓ backup_verify (backups.verify_status/verified_at/verify_error/verify_checksum)');
+    } catch (e) {
+      console.warn('  ⚠  backup_verify:', e.message);
+    }
+    try {
+      const { migrateDigestTables } = require('./migrate-digest');
+      await migrateDigestTables();
+      console.log('  ✓ digest_tables (digest_schedules, digest_log)');
+    } catch (e) {
+      console.warn('  ⚠  digest_tables:', e.message);
+    }
+    try {
+      const { migratePollerHeartbeat } = require('./migrate-poller-heartbeat');
+      await migratePollerHeartbeat();
+      console.log('  ✓ poller_heartbeat (lets /api/health/full detect a dead poller process)');
+    } catch (e) {
+      console.warn('  ⚠  poller_heartbeat:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

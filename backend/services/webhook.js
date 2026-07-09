@@ -49,6 +49,13 @@ const EVENTS = {
   // — previously silent besides an audit-log entry.
   'schedule.action_succeeded': 'Scheduled device action completed',
   'schedule.action_failed':    'Scheduled device action failed',
+  // Backup restore/integrity verification (services/backupVerify.js) —
+  // fired automatically right after every backup completes.
+  'backup.verified':            'Backup restore verification passed',
+  'backup.verify_failed':       'Backup restore verification FAILED',
+  // Scheduled digest reports (services/digestService.js) — a periodic
+  // summary of device health, alerts, compliance drift, and backup status.
+  'digest.weekly':              'Scheduled digest report',
 };
 
 module.exports.EVENTS = EVENTS;
@@ -65,6 +72,7 @@ function buildPayload(provider, event, data) {
     'alert.escalated': '📣', 'backup.created': '💾', 'backup.failed': '💥',
     'log_export.succeeded': '🗂️', 'log_export.failed': '🗂️',
     'schedule.action_succeeded': '⏱️', 'schedule.action_failed': '⏱️',
+    'backup.verified': '✅', 'backup.verify_failed': '💥', 'digest.weekly': '📊',
   }[event] || 'ℹ️';
 
   const text  = `${emoji} *${EVENTS[event] || event}*\n${data.message || JSON.stringify(data)}`;
