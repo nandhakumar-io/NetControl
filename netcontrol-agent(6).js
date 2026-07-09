@@ -501,7 +501,7 @@ async function runRelaySession(creds, sessionId) {
     proc = spawn(
       IS_WINDOWS ? 'cmd.exe' : (process.env.SHELL || '/bin/bash'),
       IS_WINDOWS ? [] : ['-i'],
-      { env: { ...process.env, TERM: 'xterm-256color' }, stdio: ['pipe', 'pipe', 'pipe'] }
+      { env: { ...process.env, TERM: 'xterm-256color' }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }
     );
   } catch (e) {
     await httpReq(`${base}/session/${sessionId}/output`, { method: 'POST', headers: hdrs },
