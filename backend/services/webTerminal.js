@@ -236,6 +236,7 @@ router.post('/open/:deviceId', requireAuth, async (req, res) => {
   try {
     await createSession(sessionId, { deviceId, deviceName: device.name, userId: req.user.id });
     await enqueuePending(deviceId, sessionId);
+    console.log(`[WebTerminal] Session ${sessionId} opened + enqueued for device ${deviceId} (${device.name})`);
   } catch (e) {
     return res.status(500).json({ error: `Could not create session: ${e.message}` });
   }
@@ -324,6 +325,7 @@ router.delete('/session/:sessionId', requireAuth, async (req, res) => {
 // ── GET /api/terminal/device/:deviceId/pending — agent polls for sessions ─────
 router.get('/device/:deviceId/pending', agentRelayLimiter, agentAuthMiddleware, async (req, res) => {
   const deviceId = req.agentDevice.id;
+  console.log(`[WebTerminal] Agent poll for pending: device=${deviceId} (${req.agentDevice.name})`);
   let settled = false;
   const finish = async (sessionId) => {
     if (settled) return;
@@ -331,6 +333,7 @@ router.get('/device/:deviceId/pending', agentRelayLimiter, agentAuthMiddleware, 
     clearTimeout(timeout);
     bus.unsubscribe(`term:pending-ready:${deviceId}`, wake);
     if (sessionId) {
+      console.log(`[WebTerminal] Handing session ${sessionId} to agent for device ${deviceId}`);
       await markAgentConnected(sessionId);
       bus.publish(`term:output:${sessionId}`, { type: 'status', data: '\x1b[90m[Agent connected — starting shell…]\x1b[0m\r\n' });
       res.json({ session: { sessionId } });
