@@ -6,6 +6,7 @@ import { useThemeStore } from './store/themeStore'
 import { usePermissions } from './hooks/usePermissions'
 import Layout          from './components/layout/Layout'
 import LoginPage       from './pages/LoginPage'
+import SetupPage       from './pages/SetupPage'
 import GoogleCallbackPage from './pages/GoogleCallbackPage'
 import DashboardPage   from './pages/DashboardPage'
 import DevicesPage     from './pages/DevicesPage'
@@ -87,6 +88,7 @@ export default function App() {
       />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/setup" element={<SetupPage />} />
         <Route path="/auth/callback" element={<GoogleCallbackPage />} />
 
         {/* Terminal opens in a new tab — outside the main Layout */}

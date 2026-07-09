@@ -767,6 +767,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  poller_heartbeat:', e.message);
     }
+    try {
+      const { migrateApiKeys } = require('./migrate-api-keys');
+      await migrateApiKeys();
+      console.log('  ✓ api_keys (long-lived scoped keys for scripts/Terraform/CI)');
+    } catch (e) {
+      console.warn('  ⚠  api_keys:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

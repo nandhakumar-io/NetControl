@@ -39,7 +39,7 @@ const cookieParser = require('cookie-parser');
 const compression  = require('compression');
 const fs           = require('fs');
 
-const { apiLimiter, bulkImportLimiter } = require('./middleware/rateLimiter');
+const { apiLimiter, bulkImportLimiter, apiKeyLimiter, isPersonalApiKey } = require('./middleware/rateLimiter');
 const { loadAllSchedules }      = require('./services/scheduler');
 const statusPoller              = require('./services/statusPoller');
 const complianceService          = require('./services/complianceService');
@@ -210,6 +210,9 @@ app.use((req, _res, next) => {
 app.use('/api', (req, res, next) => {
   if (req.path === '/auth/refresh' || req.path === '/auth/google/status' || req.path === '/auth/logout') return next();
   if (req.path === '/metrics/stream') return next();
+  // Personal/CI API keys (nck_...) get their own per-key budget instead of
+  // apiLimiter's per-user/per-IP one — see isPersonalApiKey in rateLimiter.js.
+  if (isPersonalApiKey(req)) return apiKeyLimiter(req, res, next);
   return apiLimiter(req, res, next);
 });
 app.use('/api/devices/bulk-import', bulkImportLimiter);
@@ -236,6 +239,7 @@ app.use('/api/schedules', require('./routes/schedules'));
 app.use('/api/audit',     require('./routes/audit'));
 app.use('/api/file-push', require('./routes/filePush'));
 app.use('/api/users',     require('./routes/users'));
+app.use('/api/api-keys',  require('./routes/apiKeys'));
 app.use('/api/security',   require('./routes/security'));
 app.use('/api/metrics',   require('./routes/metrics'));
 app.use('/api/alerts',    require('./routes/alerts').router);

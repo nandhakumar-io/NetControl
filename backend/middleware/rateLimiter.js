@@ -7,7 +7,15 @@ require('dotenv').config();
 const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
 
 // ── Detect agent requests ─────────────────────────────────────────────────────
-const isAgent = (req) => !!(req.headers['x-api-key'] || req.headers['x-metrics-key']);
+// Device agent keys are prefixed 'nca_'; personal/CI API keys (routes/apiKeys.js,
+// checked in middleware/auth.js) are prefixed 'nck_' and are NOT device agents —
+// they hit ordinary /api routes and must get their own budget below rather than
+// being skipped here, or a script could hammer the API with zero rate limiting.
+const isAgent = (req) => {
+  const key = req.headers['x-api-key'];
+  return !!((key && key.startsWith('nca_')) || req.headers['x-metrics-key']);
+};
+const isPersonalApiKey = (req) => !!(req.headers['x-api-key'] && req.headers['x-api-key'].startsWith('nck_'));
 
 // ── General browser/dashboard limiter ────────────────────────────────────────
 // Agents are fully skipped — they have dedicated limiters below.
@@ -105,9 +113,22 @@ const sseStreamLimiter = rateLimit({
   keyGenerator:   (req) => req.user?.id || req.ip,
 });
 
+// ── Personal/CI API keys ──────────────────────────────────────────────────────
+// Generous but real budget, keyed per key (not per IP) so one script's key
+// can't be starved by another's traffic from behind the same NAT, and one
+// runaway script can't be rate-limited into affecting a human user's session.
+const apiKeyLimiter = rateLimit({
+  windowMs,
+  max:            parseInt(process.env.API_KEY_RATE_LIMIT_MAX) || 3000,
+  standardHeaders: true, legacyHeaders: false,
+  message:        { error: 'Too many requests for this API key, please slow down' },
+  keyGenerator:   (req) => req.headers['x-api-key'] || req.ip,
+});
+
 module.exports = {
   apiLimiter, actionLimiter, authLimiter,
   bulkImportLimiter, agentIngestLimiter,
   agentRelayLimiter, registerLimiter,
   discoveryLimiter, sseStreamLimiter,
+  apiKeyLimiter, isPersonalApiKey,
 };

@@ -1,36 +1,91 @@
 // middleware/auth.js — JWT verification + role guard + action PIN verification
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { queryOne } = require('../db');
+const crypto = require('crypto');
+const { queryOne, execute } = require('../db');
 require('dotenv').config();
 
+// ── Personal/automation API keys ─────────────────────────────────────────────
+// These are distinct from the per-device agent keys used by routes/metrics.js
+// (prefix 'nca_', looked up against devices.agent_key_hash). Long-lived
+// scoped keys for scripts/Terraform/CI use their own prefix ('nck_') and
+// their own table (api_keys) so revoking a script's key can never touch a
+// device's agent registration, and vice versa. See routes/apiKeys.js.
+const API_KEY_PREFIX = 'nck_';
+function hashApiKey(key) { return crypto.createHash('sha256').update(key).digest('hex'); }
+
+// Fire-and-forget last-used stamp — must never slow down or fail the request
+// that's using the key.
+function touchApiKey(id, ip) {
+  execute('UPDATE api_keys SET last_used_at = UNIX_TIMESTAMP(), last_used_ip = ? WHERE id = ?', [ip || null, id])
+    .catch(() => {});
+}
+
+async function authenticateApiKey(req) {
+  const raw = req.headers['x-api-key'];
+  if (!raw || !raw.startsWith(API_KEY_PREFIX)) return null;
+
+  const keyHash = hashApiKey(raw);
+  const row = await queryOne(
+    `SELECT ak.id AS key_id, ak.permissions AS key_permissions, ak.expires_at, ak.revoked,
+            u.id, u.username, u.role, u.enabled
+       FROM api_keys ak JOIN users u ON u.id = ak.user_id
+      WHERE ak.key_hash = ?`,
+    [keyHash]
+  );
+  if (!row || row.revoked || !row.enabled) return null;
+  if (row.expires_at && row.expires_at < Math.floor(Date.now() / 1000)) return null;
+
+  touchApiKey(row.key_id, req.realIp || req.ip);
+
+  // A key's permissions were fixed (possibly narrowed) at creation time —
+  // it never inherits permission changes later granted to the owning user,
+  // so a compromised script key is bounded by what it was issued for.
+  return {
+    id: row.id,
+    username: row.username,
+    role: row.role,
+    permissions: row.key_permissions,
+    apiKeyId: row.key_id,
+  };
+}
+
 /**
- * Middleware: Verify JWT access token from Authorization header.
- * Also checks the DB to ensure the user is still enabled — catching
- * the case where an admin disables a user who still holds a valid token.
+ * Middleware: Verify JWT access token from Authorization header, OR a
+ * long-lived personal API key (X-Api-Key: nck_...) for scripts/CI. Also
+ * checks the DB to ensure the user is still enabled — catching the case
+ * where an admin disables a user who still holds a valid token/key.
  */
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authentication required' });
-  }
 
-  const token = authHeader.slice(7);
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7);
+      const payload = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Live DB check: reject immediately if the account has been disabled
-    const liveUser = await queryOne(
-      'SELECT id, username, role, enabled, permissions FROM users WHERE id = ?',
-      [payload.id]
-    );
-    if (!liveUser || !liveUser.enabled) {
-      return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
+      // Live DB check: reject immediately if the account has been disabled
+      const liveUser = await queryOne(
+        'SELECT id, username, role, enabled, permissions FROM users WHERE id = ?',
+        [payload.id]
+      );
+      if (!liveUser || !liveUser.enabled) {
+        return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
+      }
+
+      // Attach fresh data (role/permissions may have changed since the token was issued)
+      req.user = { ...payload, role: liveUser.role, permissions: liveUser.permissions || 0 };
+      return next();
     }
 
-    // Attach fresh data (role/permissions may have changed since the token was issued)
-    req.user = { ...payload, role: liveUser.role, permissions: liveUser.permissions || 0 };
-    next();
+    if (req.headers['x-api-key']) {
+      const apiUser = await authenticateApiKey(req);
+      if (!apiUser) return res.status(401).json({ error: 'Invalid or expired API key' });
+      req.user = apiUser;
+      return next();
+    }
+
+    return res.status(401).json({ error: 'Authentication required' });
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
@@ -144,4 +199,7 @@ async function requireActionPin(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireRole, requirePermission, requireActionPin, ROLE_PERMISSIONS };
+module.exports = {
+  requireAuth, requireRole, requirePermission, requireActionPin, ROLE_PERMISSIONS,
+  API_KEY_PREFIX, hashApiKey,
+};
