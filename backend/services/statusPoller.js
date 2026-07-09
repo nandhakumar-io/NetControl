@@ -15,12 +15,15 @@
 //    25s gives real margin over that throttle plus poll-cycle jitter, so a
 //    healthy, actively-reporting agent never gets falsely flagged.
 // 6. TCP_TIMEOUT_MS = 2000 (was 3000). LAN devices respond in <200ms.
-// 7. Lapsed agent heartbeat -> offline DIRECTLY, no TCP-probe fallback.
-//    Agent devices are typically outbound-only with no listening port, so
-//    the TCP probe failed almost every time regardless of real agent
-//    health, flipping actively-reporting agents to "offline"/"silent" the
-//    moment they brushed past the grace window. TCP reachability answers
-//    "is the host up", not "is the agent reporting" — don't conflate them.
+// 7. Lapsed agent heartbeat -> TCP-probe fallback before offline. Agent
+//    devices are typically outbound-only with no listening port most of
+//    the time, so a plain TCP probe alone isn't a substitute for the
+//    heartbeat — but a HOST that's genuinely reachable (SSH/RDP/WinRM open,
+//    etc.) shouldn't show "offline" just because its agent crashed or lost
+//    connectivity to the backend. Ping/TCP is checked first as the
+//    fallback signal once the heartbeat has lapsed; last_seen itself is
+//    never touched by this probe so the heartbeat clock stays honest (see
+//    the comment in pollDevice()/flushToDB() for why that matters).
 
 'use strict';
 
@@ -163,16 +166,31 @@ async function pollDevice(device, nowSec, freshMap = null) {
       return { id: device.id, name: device.name, newStatus: 'online', oldStatus: device.status, method: 'agent' };
     }
 
-    // Agent heartbeat has genuinely lapsed past grace — mark offline directly.
-    // BUG FIX: this used to "fall through to TCP probe" here, but agent
-    // devices are typically outbound-only with no listening service port —
-    // the TCP probe fails almost every time regardless of agent health, so
-    // a device that's still actively POSTing metrics (just briefly outside
-    // the grace window due to the metrics-route write-throttle, see below)
-    // got yanked to 'offline' by an unrelated, unreliable signal. TCP
-    // reachability tells you whether the HOST is up, not whether the AGENT
-    // is reporting — conflating the two caused exactly the "agent is
-    // reporting but shows silent" symptom.
+    // Agent heartbeat has genuinely lapsed past grace. Before declaring the
+    // device offline, fall back to a TCP reachability probe — the same
+    // check non-agent devices get. This is the fix for "the PC is right
+    // there on the network, agent just isn't reporting, but it shows
+    // offline": a crashed agent service, a firewall rule that blocks
+    // outbound-to-backend but not inbound probes, or an agent that's
+    // simply not installed correctly yet all previously read as "offline"
+    // even though the host answers on a probe port.
+    //
+    // IMPORTANT: unlike the non-agent TCP path below, this must NOT touch
+    // last_seen — last_seen has to stay a pure record of "last real agent
+    // heartbeat" or the exact feedback loop described in flushToDB's
+    // comment comes back (a TCP-confirmed-but-agent-dead device would keep
+    // last_seen artificially fresh forever, so it would always read as
+    // "agent online" next cycle instead of "reachable but agent is down").
+    // Status is allowed to reflect ping; the heartbeat clock is not.
+    const lp = lastProbed.get(device.id) || 0;
+    if ((nowSec - lp) >= NON_AGENT_POLL_S) {
+      lastProbed.set(device.id, nowSec);
+      const reachable = await isReachable(device);
+      if (reachable) {
+        return { id: device.id, name: device.name, newStatus: 'online', oldStatus: device.status, method: 'agent-ping-fallback' };
+      }
+    }
+
     return { id: device.id, name: device.name, newStatus: 'offline', oldStatus: device.status, method: 'agent' };
   }
 
@@ -210,7 +228,11 @@ async function flushToDB(results, nowSec) {
   for (const r of results) {
     if (r.method === 'skip') continue;
     if (r.newStatus === 'online' && r.method === 'tcp')   toOnlineTcp.push(r.id);
-    if (r.newStatus === 'online' && r.method === 'agent') toOnlineAgent.push(r.id);
+    // agent-ping-fallback (heartbeat lapsed, but a TCP probe found the host
+    // reachable) is intentionally bucketed with pure agent confirmations —
+    // both are status-only updates that leave last_seen as the untouched
+    // heartbeat clock. See the comment in pollDevice() for why.
+    if (r.newStatus === 'online' && (r.method === 'agent' || r.method === 'agent-ping-fallback')) toOnlineAgent.push(r.id);
     if (r.newStatus === 'offline') toOffline.push(r.id);
   }
 
@@ -427,7 +449,7 @@ async function pollAll() {
   console.log(
     `[Poller] ${devices.length} devices | ` +
     `online:${counts.online||0} offline:${counts.offline||0} unknown:${counts.unknown||0} | ` +
-    `agent:${counts.agent||0} tcp:${counts.tcp||0} skip:${counts.skip||0} err:${errors} | ${elapsed}ms`
+    `agent:${counts.agent||0} ping-fallback:${counts['agent-ping-fallback']||0} tcp:${counts.tcp||0} skip:${counts.skip||0} err:${errors} | ${elapsed}ms`
   );
 
   // Heartbeat — see db/migrate-poller-heartbeat.js for why this exists.
