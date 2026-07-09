@@ -31,6 +31,28 @@ export default function LoginPage() {
     if (token) navigate('/dashboard', { replace: true })
   }, [token])
 
+  // A Google sign-in that needed a second factor hands off here via
+  // sessionStorage (see GoogleCallbackPage) instead of setting a session
+  // directly — this reuses the exact same code-entry form and verify2FA()
+  // call as a password login, so there's only one 2FA UI to maintain.
+  useEffect(() => {
+    const pending = sessionStorage.getItem('nc_pending_mfa_token')
+    if (pending) {
+      sessionStorage.removeItem('nc_pending_mfa_token')
+      setMfaToken(pending)
+    }
+  }, [])
+
+  // A freshly deployed instance has no users yet — send the operator to the
+  // setup wizard instead of a login form they can't possibly get through.
+  useEffect(() => {
+    let cancelled = false
+    api.get('/auth/setup')
+      .then(({ data }) => { if (!cancelled && data.needsSetup) navigate('/setup', { replace: true }) })
+      .catch(() => { /* if this check fails, fall through to the normal login form */ })
+    return () => { cancelled = true }
+  }, [])
+
   // Show reason if redirected here by the api interceptor or a failed Google sign-in
   useEffect(() => {
     const reason = new URLSearchParams(window.location.search).get('reason')

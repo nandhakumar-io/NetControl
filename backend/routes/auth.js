@@ -5,6 +5,7 @@ const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const crypto  = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
+const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth } = require('../middleware/auth');
@@ -73,6 +74,97 @@ async function createRefreshToken(userId, res) {
     ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
   });
 }
+
+// ── First-run setup ────────────────────────────────────────────────────────────
+// Before this existed, the ONLY way to get a working instance was to run
+// `node db/setup.js` (or hand-write SQL) with direct DB credentials — fine
+// for the original deployment, a real barrier for anyone else cloning the
+// repo. This route does the same job (create the first admin) over HTTP,
+// but is only ever usable once: it hard-fails the moment a single row
+// exists in `users`, so it can be left mounted in production without being
+// a standing "create admin" backdoor. db/setup.js still works and is
+// unaffected — whichever happens first wins, the other becomes a no-op.
+
+// GET /api/auth/setup — tells the frontend whether to show the setup wizard
+// or the normal login screen. No auth required by design: an unconfigured
+// instance has no admin to authenticate as yet.
+router.get('/setup', async (req, res) => {
+  try {
+    const row = await queryOne('SELECT COUNT(*) AS c FROM users');
+    res.json({ needsSetup: row.c === 0 });
+  } catch (e) {
+    // Table may not exist yet if migrations haven't run — surface as "needs setup"
+    // rather than a raw 500, since that's the state the operator needs to fix first.
+    res.json({ needsSetup: true });
+  }
+});
+
+// POST /api/auth/setup — create the org name + first admin account.
+// Rate-limited with authLimiter (10/15min/IP) — this is a one-shot
+// operation for a legitimate operator, so that's plenty, and it closes off
+// any window for a race/brute-force attempt to squat the first-admin slot
+// on a freshly deployed, not-yet-configured instance.
+router.post('/setup',
+  authLimiter,
+  body('username').trim().notEmpty().isLength({ min: 3, max: 50 })
+    .matches(/^[a-zA-Z0-9_.-]+$/).withMessage('Username may only contain letters, numbers, dots, dashes and underscores'),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  body('orgName').optional({ nullable: true }).trim().isLength({ max: 100 }),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+    try {
+      // Re-check right before the insert (not just at GET time) — the whole
+      // point of this route is to be safe to leave mounted, so the guard
+      // has to be the source of truth at write time, not a client-trusted flag.
+      const existing = await queryOne('SELECT COUNT(*) AS c FROM users');
+      if (existing.c > 0) {
+        return res.status(403).json({ error: 'Setup has already been completed. Log in normally, or ask an existing admin to create your account.' });
+      }
+
+      const { username, password, orgName } = req.body;
+      const hash = await bcrypt.hash(password, 12);
+      const id = uuidv4();
+      const now = Math.floor(Date.now() / 1000);
+
+      await execute(
+        'INSERT INTO users (id, username, password, role, permissions, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)',
+        [id, username, hash, 'admin', 0xFFFF, now]
+      );
+
+      if (orgName) {
+        await execute(
+          `INSERT INTO system_settings (\`key\`, value, updated_by, updated_at)
+           VALUES ('org_name', ?, ?, ?)
+           ON DUPLICATE KEY UPDATE value = VALUES(value), updated_by = VALUES(updated_by), updated_at = VALUES(updated_at)`,
+          [orgName, id, now]
+        );
+      }
+
+      await audit.log({
+        userId: id, username, action: 'first_run_setup',
+        targetType: 'user', targetId: id, targetName: username,
+        ipSource: req.realIp || req.ip, result: 'success',
+        details: orgName ? `Org name set to "${orgName}"` : null,
+      });
+
+      // Auto-login: same tokens a normal /login issues, so the wizard can
+      // drop the operator straight into the dashboard instead of a second
+      // login prompt right after they just typed this password in.
+      const user = { id, username, role: 'admin', permissions: 0xFFFF };
+      const accessToken = signAccess(user);
+      await createRefreshToken(id, res);
+
+      res.status(201).json({ accessToken, user: publicUser(user) });
+    } catch (e) {
+      if (e.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ error: 'That username is already taken.' });
+      }
+      res.status(500).json({ error: 'Setup failed' });
+    }
+  }
+);
 
 // ── POST /api/auth/login ───────────────────────────────────────────────────────
 router.post('/login', authLimiter, async (req, res) => {
@@ -378,6 +470,21 @@ router.get('/google/callback', authLimiter, async (req, res) => {
     }
 
     bf.recordSuccess(ip);
+
+    // ── 2FA step-up ─────────────────────────────────────────────────────
+    // SECURITY FIX: this used to issue a full accessToken unconditionally,
+    // which meant enabling 2FA on an account did nothing if you signed in
+    // via Google instead of the password form — the whole point of 2FA
+    // (a second factor beyond "whatever proved your identity to Google")
+    // was silently skipped for every Google-linked account. Reuses the
+    // exact same short-lived mfaToken + /api/auth/2fa/verify flow the
+    // password login already uses, so there's only one 2FA
+    // implementation to keep correct, not two.
+    if (user.totp_enabled) {
+      await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa', ipSource: ip, result: 'success', details: 'via Google' });
+      return res.redirect(`${frontendUrl}/auth/callback#requires2FA=1&mfaToken=${encodeURIComponent(signMfaToken(user.id))}`);
+    }
+
     const accessToken = signAccess(user);
     await createRefreshToken(user.id, res);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
