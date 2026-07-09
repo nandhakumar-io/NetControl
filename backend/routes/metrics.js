@@ -214,10 +214,16 @@ router.post('/register', registerLimiter, async (req, res) => {
       }
     }
 
-    // If not found by MAC, try IP+hostname (legacy behavior)
+    // If not found by MAC, try IP+hostname (legacy behavior).
+    // BUG FIX: this used to match on `name`, the user-editable display name
+    // set via PUT /api/devices/:id — so renaming a device in the UI
+    // permanently broke this fallback (the agent always sends its raw OS
+    // hostname, which no longer matches the renamed `name`). Match on the
+    // persistent `hostname` column instead, which is only ever set here at
+    // registration time and never touched by the rename endpoint.
     if (!device) {
       device = await queryOne(
-        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE ip_address = ? AND name = ?',
+        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE ip_address = ? AND hostname = ?',
         [ip, hostname]
       );
       if (device) {
@@ -227,11 +233,14 @@ router.post('/register', registerLimiter, async (req, res) => {
 
     // If device already exists, just update the key and return
     if (device) {
-      // Update agent key, OS info, and last seen timestamp
+      // Update agent key, OS info, and last seen timestamp.
+      // NOTE: hostname is intentionally NOT overwritten here beyond keeping
+      // it in sync with what the agent reports — `name` (display name) is
+      // left alone so admin renames survive re-registration.
       await run(
-        `UPDATE devices SET ip_address=?, mac_address=?, agent_key_hash=?, 
+        `UPDATE devices SET ip_address=?, mac_address=?, hostname=?, agent_key_hash=?, 
          agent_registered_at=?, os_version=?, arch=?, last_seen=? WHERE id=?`,
-        [ip, macFormatted, keyHash, now, os_version || null, arch || null, now, device.id]
+        [ip, macFormatted, hostname, keyHash, now, os_version || null, arch || null, now, device.id]
       );
 
       console.log(`[Agent] Updated existing device: ${device.name} (${device.id})`);
@@ -253,10 +262,10 @@ router.post('/register', registerLimiter, async (req, res) => {
 
     await run(
       `INSERT INTO devices
-         (id, name, ip_address, mac_address, os_type, os_version, arch,
+         (id, name, hostname, ip_address, mac_address, os_type, os_version, arch,
           agent_key_hash, agent_registered_at, status, last_seen, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, hostname, ip, macFormatted, osType, os_version || null,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, hostname, hostname, ip, macFormatted, osType, os_version || null,
        arch || null, keyHash, now, approvalStatus, now, now]
     );
 

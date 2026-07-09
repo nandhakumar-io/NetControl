@@ -241,7 +241,13 @@ function httpReq(urlStr, opts = {}, body = null) {
 }
 
 function longPoll(urlStr, headers = {}) {
-  return httpReq(urlStr, { timeout: 25000, headers });
+  // +3s over the backend's own 25s/20s poll timeouts (routes rely on
+  // services/webTerminal.js's setTimeout(...,25000)/(...,20000)) so the
+  // server always gets to respond with a clean { session: null } / { data:
+  // null } first, instead of this socket getting destroyed by our own
+  // timeout at nearly the same instant and surfacing as a spurious
+  // "Request timeout" error that then costs relayLoop() an extra retry delay.
+  return httpReq(urlStr, { timeout: 28000, headers });
 }
 
 // ── Credentials ────────────────────────────────────────────────────────────────

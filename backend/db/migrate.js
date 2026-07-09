@@ -774,6 +774,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  api_keys:', e.message);
     }
+    try {
+      const { migrateDeviceHostname } = require('./migrate-device-hostname');
+      await migrateDeviceHostname();
+      console.log('  ✓ devices.hostname (persistent hostname, separate from editable name — fixes /register dedup breaking on rename)');
+    } catch (e) {
+      console.warn('  ⚠  devices.hostname:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

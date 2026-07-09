@@ -314,15 +314,17 @@ export default function TerminalPage() {
         setStatus('closed')
         xtermRef.current?.writeln('\r\n\x1b[90m[Connection closed]\x1b[0m\r\n')
       } else if (e.code === 1011 || e.code === 1008) {
-        // Server error / auth failure
-        if (wsFailedClean) {
-          // SSH credentials failed — offer relay fallback
-          setStatus('error')
-          const reason = e.reason || `SSH failed (${e.code})`
-          setErrMsg(reason)
+        // Server error / SSH failure (e.g. connection refused, auth failed,
+        // sshd not running). This used to just report the error and stop —
+        // but "SSH service not working" is exactly the case the HTTP relay
+        // exists for, so fall back to it here too, same as the network-level
+        // (1006) case below.
+        const reason = e.reason || `SSH failed (${e.code})`
+        setErrMsg(reason)
+        if (!relayActiveRef.current) {
+          startRelay()
         } else {
           setStatus('error')
-          setErrMsg(e.reason || `Connection error (${e.code})`)
         }
       } else if (e.code === 1006 || e.code === 0) {
         // Abnormal close / network failure — try HTTP relay automatically
