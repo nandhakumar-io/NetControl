@@ -206,4 +206,39 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
   }
 });
 
+// ── GET /api/orgs/:id/enrollment-token — the token this org's agents use
+//    with POST /api/metrics/register (x-enrollment-token header) so newly
+//    installed agents land in the right tenant. See
+//    db/migrate-agent-enrollment.js for why this exists. ────────────────────
+router.get('/:id/enrollment-token', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
+  try {
+    const org = await queryOne('SELECT agent_enrollment_token FROM organizations WHERE id = ?', [req.params.id]);
+    if (!org) return res.status(404).json({ error: 'Organization not found' });
+    res.json({ enrollment_token: org.agent_enrollment_token });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/orgs/:id/enrollment-token/regenerate — invalidate the old
+//    token and issue a new one. Existing agents keep working (their own
+//    per-device api_key from registration isn't affected) — only *new*
+//    enrollments need the updated token. ────────────────────────────────────
+router.post('/:id/enrollment-token/regenerate', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
+  try {
+    const crypto = require('crypto');
+    let token, collided;
+    do {
+      token = 'nce_' + crypto.randomBytes(24).toString('hex');
+      collided = !!(await queryOne('SELECT 1 FROM organizations WHERE agent_enrollment_token = ?', [token]));
+    } while (collided);
+
+    await execute('UPDATE organizations SET agent_enrollment_token = ? WHERE id = ?', [token, req.params.id]);
+
+    await audit.log({ userId: req.user.id, username: req.user.username,
+      action: 'regenerate_enrollment_token', targetType: 'organization', targetId: req.params.id,
+      targetName: req.org.name, ipSource: req.realIp || req.ip, result: 'success' });
+
+    res.json({ enrollment_token: token });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

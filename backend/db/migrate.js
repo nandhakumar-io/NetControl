@@ -809,6 +809,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  lab_layout:', e.message);
     }
+    try {
+      const { migrateAgentEnrollment } = require('./migrate-agent-enrollment');
+      await migrateAgentEnrollment();
+      console.log('  ✓ agent enrollment tokens (per-org, fixes agent devices never getting org_id set)');
+    } catch (e) {
+      console.warn('  ⚠  agent enrollment tokens:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

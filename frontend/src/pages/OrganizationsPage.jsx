@@ -9,13 +9,14 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Building2, Plus, X, Loader2, Users, ArrowRightLeft, Trash2,
-  Crown, Eye, Wrench, Gauge, Check,
+  Crown, Eye, Wrench, Gauge, Check, KeyRound,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
 import { useAuthStore } from '../store/authStore'
+import EnrollmentTokenModal from '../components/modals/EnrollmentTokenModal'
 
 const ROLE_ICON = { admin: Crown, operator: Wrench, viewer: Eye }
 
@@ -26,6 +27,7 @@ export default function OrganizationsPage() {
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [managingOrg, setManagingOrg] = useState(null)
+  const [tokenOrg, setTokenOrg] = useState(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -138,6 +140,11 @@ export default function OrganizationsPage() {
                         <Users size={15} />
                       </button>
                     )}
+                    {org.org_role === 'admin' && (
+                      <button onClick={() => setTokenOrg(org)} className="text-slate-500 hover:text-brand-400 p-2" title="Agent enrollment token">
+                        <KeyRound size={15} />
+                      </button>
+                    )}
                     {org.org_role === 'admin' && user?.role === 'admin' && (
                       <button onClick={() => deleteOrg(org)} className="text-slate-500 hover:text-accent-red p-2" title="Delete organization">
                         <Trash2 size={15} />
@@ -156,6 +163,9 @@ export default function OrganizationsPage() {
       )}
       {managingOrg && (
         <MembersModal org={managingOrg} onClose={() => setManagingOrg(null)} />
+      )}
+      {tokenOrg && (
+        <EnrollmentTokenModal org={tokenOrg} onClose={() => setTokenOrg(null)} />
       )}
     </div>
   )

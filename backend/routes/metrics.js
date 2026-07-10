@@ -172,14 +172,46 @@ function timingSafeEqualStr(a, b) {
 }
 
 router.post('/register', registerLimiter, async (req, res) => {
-  const regSecret = process.env.AGENT_REGISTRATION_SECRET;
-  if (!regSecret) {
-    console.error('[metrics/register] AGENT_REGISTRATION_SECRET is not set — refusing all registrations');
-    return res.status(500).json({ error: 'Agent registration is not configured on the server' });
-  }
-  const provided = req.headers['x-registration-secret'];
-  if (!provided || !timingSafeEqualStr(provided, regSecret)) {
-    return res.status(401).json({ error: 'Invalid or missing registration secret' });
+  // ── Resolve which org this agent belongs to ────────────────────────────
+  // Preferred: a per-org enrollment token (see db/migrate-agent-enrollment.js
+  // + routes/orgs.js GET/POST .../enrollment-token). Each org has its own
+  // token, so the org_id below comes from *which token was used*, not from
+  // anything the agent can just claim in its request body.
+  //
+  // Legacy fallback: the old single global AGENT_REGISTRATION_SECRET.
+  // BUG THIS SECTION FIXES: this used to be the *only* path, and it never
+  // resolved an org_id at all — new agent devices were inserted with
+  // org_id = NULL. Every other device route filters `WHERE org_id = ?`,
+  // so those devices were invisible on the Devices page (including the
+  // approval queue) even though their metrics kept flowing in fine, since
+  // POST /api/metrics (ingest) authenticates by agent_key_hash with no org
+  // filter at all. The legacy path only makes sense for a single-org
+  // install, so it's only honored when exactly one organization exists.
+  const enrollmentToken = req.headers['x-enrollment-token'];
+  const legacySecret = req.headers['x-registration-secret'];
+  let orgId = null;
+
+  if (enrollmentToken) {
+    const org = await queryOne('SELECT id FROM organizations WHERE agent_enrollment_token = ?', [enrollmentToken]);
+    if (!org) return res.status(401).json({ error: 'Invalid enrollment token' });
+    orgId = org.id;
+  } else if (legacySecret) {
+    const regSecret = process.env.AGENT_REGISTRATION_SECRET;
+    if (!regSecret) {
+      return res.status(500).json({ error: 'Agent registration is not configured on the server' });
+    }
+    if (!timingSafeEqualStr(legacySecret, regSecret)) {
+      return res.status(401).json({ error: 'Invalid or missing registration secret' });
+    }
+    const orgs = await query('SELECT id FROM organizations LIMIT 2');
+    if (orgs.length !== 1) {
+      return res.status(400).json({
+        error: 'This install has multiple organizations — register with a per-org x-enrollment-token instead of the legacy shared secret so the agent lands in the right one.',
+      });
+    }
+    orgId = orgs[0].id;
+  } else {
+    return res.status(401).json({ error: 'Missing x-enrollment-token (or legacy x-registration-secret) header' });
   }
 
   const { hostname, ip, mac, os_type, os_version, arch } = req.body;
@@ -196,9 +228,16 @@ router.post('/register', registerLimiter, async (req, res) => {
 
     // FIXED: Proper deduplication logic
     // Strategy: MAC is the most reliable identifier
-    // 1. If MAC provided and exists in DB → same device (update it)
-    // 2. If MAC doesn't exist but IP+hostname match → legacy match (update)
+    // 1. If MAC provided and exists in DB (within this org) → same device (update it)
+    // 2. If MAC doesn't exist but IP+hostname match (within this org) → legacy match (update)
     // 3. Otherwise → new device (create)
+    //
+    // Both lookups are scoped to `org_id = ?` — without that, an agent
+    // re-registering with a different org's token than it originally used
+    // could match another tenant's device by coincidence (private IP
+    // ranges and generic hostnames like "DESKTOP-1" collide across
+    // separate clients constantly) and silently reassign it. Dedup must
+    // never cross a tenant boundary.
 
     let device = null;
     let action = null;
@@ -206,8 +245,8 @@ router.post('/register', registerLimiter, async (req, res) => {
     // Try to find by MAC first (most reliable)
     if (macNorm && macNorm !== '000000000000') {
       device = await queryOne(
-        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE mac_address = ?',
-        [macFormatted]
+        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE mac_address = ? AND org_id = ?',
+        [macFormatted, orgId]
       );
       if (device) {
         action = 'updated';
@@ -223,8 +262,8 @@ router.post('/register', registerLimiter, async (req, res) => {
     // registration time and never touched by the rename endpoint.
     if (!device) {
       device = await queryOne(
-        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE ip_address = ? AND hostname = ?',
-        [ip, hostname]
+        'SELECT id, name, ip_address, mac_address, status FROM devices WHERE ip_address = ? AND hostname = ? AND org_id = ?',
+        [ip, hostname, orgId]
       );
       if (device) {
         action = 'updated';
@@ -239,8 +278,8 @@ router.post('/register', registerLimiter, async (req, res) => {
       // left alone so admin renames survive re-registration.
       await run(
         `UPDATE devices SET ip_address=?, mac_address=?, hostname=?, agent_key_hash=?, 
-         agent_registered_at=?, os_version=?, arch=?, last_seen=? WHERE id=?`,
-        [ip, macFormatted, hostname, keyHash, now, os_version || null, arch || null, now, device.id]
+         agent_registered_at=?, os_version=?, arch=?, last_seen=? WHERE id=? AND org_id=?`,
+        [ip, macFormatted, hostname, keyHash, now, os_version || null, arch || null, now, device.id, orgId]
       );
 
       console.log(`[Agent] Updated existing device: ${device.name} (${device.id})`);
@@ -263,13 +302,13 @@ router.post('/register', registerLimiter, async (req, res) => {
     await run(
       `INSERT INTO devices
          (id, name, hostname, ip_address, mac_address, os_type, os_version, arch,
-          agent_key_hash, agent_registered_at, status, last_seen, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          agent_key_hash, agent_registered_at, status, last_seen, created_at, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, hostname, hostname, ip, macFormatted, osType, os_version || null,
-       arch || null, keyHash, now, approvalStatus, now, now]
+       arch || null, keyHash, now, approvalStatus, now, now, orgId]
     );
 
-    console.log(`[Agent] Registered new device: ${hostname} (${id})`);
+    console.log(`[Agent] Registered new device: ${hostname} (${id}) → org ${orgId}`);
 
     require('../services/webhook').fire('system.agent_registered', {
       device_id: id, device_name: hostname, ip, severity: 'info',

@@ -239,7 +239,18 @@ router.post('/bulk-import',
 
     // ── Phase 2: load existing devices for duplicate detection ────────────
     // We only load the columns we need — no secrets come out of the DB here.
-    const existing = await query('SELECT id, ip_address, mac_address FROM devices');
+    // SECURITY/CORRECTNESS FIX: this used to load every device in the
+    // entire installation with no org_id filter. Two real problems:
+    //   1. A MAC/IP collision with another tenant's device (private IP
+    //      ranges collide across separate clients constantly) would match
+    //      here and the "toUpdate" path below would silently overwrite
+    //      that OTHER org's device's IP/name — a bulk import in org A
+    //      could corrupt org B's inventory.
+    //   2. Legitimate new devices for this org would get incorrectly
+    //      "skipped" as duplicates if another tenant happened to already
+    //      have a device with the same MAC.
+    // Scoping to this org's devices only fixes both.
+    const existing = await query('SELECT id, ip_address, mac_address FROM devices WHERE org_id = ?', [req.orgId]);
     const byMac = new Map(existing.map(d => [d.mac_address.toUpperCase(), d]));
     const byIp  = new Map(existing.map(d => [d.ip_address, d]));
 
@@ -308,8 +319,8 @@ router.post('/bulk-import',
       const name = String(row.name).trim();
       try {
         await execute(
-          'UPDATE devices SET ip_address = ?, name = ? WHERE id = ?',
-          [row.ip, name, row.existingId]
+          'UPDATE devices SET ip_address = ?, name = ? WHERE id = ? AND org_id = ?',
+          [row.ip, name, row.existingId, req.orgId]
         );
         results.push({ name, status: 'imported', reason: 'IP updated (device moved)' });
         imported++;
@@ -401,9 +412,12 @@ router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
   try {
     // BUG FIX 1: Select all fields pollDevice needs — agent_key_hash and last_seen were missing,
     // causing agent devices to always fall through to TCP and never detect correctly.
+    // SECURITY FIX: scoped to this org — was previously fetchable/pollable by
+    // UUID alone, letting an admin/operator in one org trigger a poll
+    // against (and read the status of) a device belonging to another tenant.
     const device = await queryOne(
-      'SELECT id, name, ip_address, os_type, status, last_seen, agent_key_hash FROM devices WHERE id = ?',
-      [req.params.id]
+      'SELECT id, name, ip_address, os_type, status, last_seen, agent_key_hash FROM devices WHERE id = ? AND org_id = ?',
+      [req.params.id, req.orgId]
     );
     if (!device) return res.status(404).json({ error: 'Device not found' });
     const { pollDevice, flushToDB } = require('../services/statusPoller');
@@ -516,7 +530,11 @@ router.post('/:id/maintenance',
     if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
 
     try {
-      const device = await queryOne('SELECT id, name, group_id, maintenance_mode FROM devices WHERE id = ?', [req.params.id]);
+      // SECURITY FIX: this used to fetch by id alone — same class of bug as
+      // approve-registration above. Scope to this org so an admin/operator
+      // of one tenant can't toggle maintenance mode on another tenant's
+      // device just by knowing/guessing its UUID.
+      const device = await queryOne('SELECT id, name, group_id, maintenance_mode FROM devices WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       if (!device) return res.status(404).json({ error: 'Device not found' });
 
       // SECURITY: operators are restricted to devices in their accessible
@@ -538,10 +556,10 @@ router.post('/:id/maintenance',
         `UPDATE devices
            SET maintenance_mode = ?, maintenance_note = ?,
                maintenance_since = ?, maintenance_by = ?, maintenance_until = ?
-         WHERE id = ?`,
+         WHERE id = ? AND org_id = ?`,
         [enabled ? 1 : 0, enabled ? note : null,
          enabled ? now : null, enabled ? req.user.id : null, until,
-         req.params.id]
+         req.params.id, req.orgId]
       );
 
       // Drop the webhook service's cached maintenance flag for this device
@@ -559,7 +577,7 @@ router.post('/:id/maintenance',
                  (until ? ` (auto-clears ${new Date(until * 1000).toISOString()})` : ''),
       });
 
-      const updated = await queryOne('SELECT * FROM devices WHERE id = ?', [req.params.id]);
+      const updated = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
       res.json(sanitizeDevice(updated));
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -583,6 +601,14 @@ router.post('/:id/maintenance',
 // ── POST /api/devices/:id/approve-registration ─────────────────────────────────
 // Admin approves a device that was registered by an agent
 // Sets up default group assignment and marks device as properly configured
+//
+// SECURITY FIX: this used to fetch/update the device by id alone, with no
+// org_id check — requireRole('admin') only confirms the caller is an admin
+// of *some* org, not necessarily this device's org (the whole app is
+// multi-tenant; see middleware/tenant.js). Any admin who knew or guessed a
+// pending device's UUID could approve/edit a different tenant's device.
+// Also validates that group_id (if provided) belongs to the same org,
+// otherwise a device could be moved into another tenant's group.
 router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUID(), async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid id' });
@@ -591,10 +617,15 @@ router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUI
     const deviceId = req.params.id;
     const { name, os_type, ip_address, mac_address, group_id } = req.body;
 
-    // Get the device first
-    const device = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    // Get the device first — scoped to this org.
+    const device = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);
     if (!device) {
       return res.status(404).json({ error: 'Device not found' });
+    }
+
+    if (group_id) {
+      const group = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [group_id, req.orgId]);
+      if (!group) return res.status(400).json({ error: 'Group not found' });
     }
 
     // Update device with approved information
@@ -605,7 +636,7 @@ router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUI
       `UPDATE devices 
        SET name=?, os_type=?, ip_address=?, mac_address=?, group_id=?, 
            status='unknown', last_approved_at=?, updated_at=?
-       WHERE id=?`,
+       WHERE id=? AND org_id=?`,
       [
         name || device.name,
         os_type || device.os_type,
@@ -614,7 +645,8 @@ router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUI
         group_id || device.group_id || null,
         now,
         now,
-        deviceId
+        deviceId,
+        req.orgId
       ]
     );
 
@@ -641,7 +673,7 @@ router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUI
     }).catch(() => {});
 
     // Return the updated device
-    const updatedDevice = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    const updatedDevice = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);
     res.json(sanitizeDevice(updatedDevice));
 
   } catch (e) {
@@ -685,7 +717,7 @@ router.put('/bulk-update',
 
     try {
       if (updates.group_id) {
-        const g = await queryOne('SELECT id FROM `groups` WHERE id = ?', [updates.group_id]);
+        const g = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [updates.group_id, req.orgId]);
         if (!g) return res.status(400).json({ error: 'Group not found' });
       }
 
@@ -702,10 +734,17 @@ router.put('/bulk-update',
       setClauses.push('updated_at = ?');
       values.push(now);
 
+      // SECURITY FIX: this used to run `WHERE id IN (...)` with no org
+      // filter at all — an admin of one org could pass another tenant's
+      // device UUIDs (guessed, leaked, or from an old session) and edit
+      // their credentials/group in bulk. Scoping by org_id here means the
+      // update can only ever touch devices in the caller's active org;
+      // any ids that don't belong to it are silently excluded rather than
+      // acted on, and affectedRows below reflects the real count.
       const placeholders = deviceIds.map(() => '?').join(',');
       const result = await execute(
-        `UPDATE devices SET ${setClauses.join(', ')} WHERE id IN (${placeholders})`,
-        [...values, ...deviceIds]
+        `UPDATE devices SET ${setClauses.join(', ')} WHERE id IN (${placeholders}) AND org_id = ?`,
+        [...values, ...deviceIds, req.orgId]
       );
 
       await audit.log({
@@ -738,6 +777,13 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
     const device = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
+    // SECURITY: group_id must belong to this same org, otherwise a device
+    // could be reassigned into another tenant's group.
+    if (group_id) {
+      const group = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [group_id, req.orgId]);
+      if (!group) return res.status(400).json({ error: 'Group not found' });
+    }
+
     const normalizedMac = normaliseMac(mac_address || device.mac_address);
     const now = Math.floor(Date.now() / 1000);
 
@@ -747,7 +793,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
        SET name=?, ip_address=?, mac_address=?, os_type=?, group_id=?,
            ssh_username=?, ssh_password=?, ssh_key=?,
            rpc_username=?, rpc_password=?, updated_at=?
-       WHERE id=?`,
+       WHERE id=? AND org_id=?`,
       [
         name,
         ip_address,
@@ -760,7 +806,8 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
         rpc_username || null,
         rpc_password ? encrypt(rpc_password) : (req.body.rpc_password === null ? null : device.rpc_password),
         now,
-        deviceId
+        deviceId,
+        req.orgId
       ]
     );
 
@@ -775,7 +822,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       result: 'success',
     });
 
-    const updated = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    const updated = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);
     res.json(sanitizeDevice(updated));
   } catch (e) {
     res.status(500).json({ error: e.message });
