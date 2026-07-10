@@ -795,6 +795,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  sla_report_schedules:', e.message);
     }
+    try {
+      const { migrateDeviceHostname } = require('./migrate-device-hostname');
+      await migrateDeviceHostname();
+      console.log('  ✓ devices.hostname (immutable OS hostname, separate from the editable display name)');
+    } catch (e) {
+      console.warn('  ⚠  devices.hostname:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node
