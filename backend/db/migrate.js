@@ -816,6 +816,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  agent enrollment tokens:', e.message);
     }
+    try {
+      const { migratePushTables } = require('./migrate-push');
+      await migratePushTables();
+      console.log('  ✓ push_subscriptions (web push for mobile alert triage + alert snooze)');
+    } catch (e) {
+      console.warn('  ⚠  push_subscriptions:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

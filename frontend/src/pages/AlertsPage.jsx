@@ -5,13 +5,15 @@ import {
   AlertTriangle, CheckCircle2, Info, Cpu, HardDrive,
   WifiOff, Clock, RefreshCw, Power, RotateCcw, Activity,
   ToggleLeft, ToggleRight, List, Filter, ChevronDown,
-  Shield, TrendingUp, Zap, Search, Calendar, MemoryStick, Wrench
+  Shield, TrendingUp, Zap, Search, Calendar, MemoryStick, Wrench,
+  Smartphone, BellPlus, Check, AlarmClockOff,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import { useThemeStore } from '../store/themeStore'
 import PageHeader from '../components/ui/PageHeader'
 import { Link } from 'react-router-dom'
+import { isPushSupported, getPushSubscriptionState, enablePush, disablePush, sendTestPush } from '../lib/push'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const METRICS = [
@@ -285,6 +287,98 @@ function RuleModal({ open, onClose, onSaved, rule, devices }) {
   )
 }
 
+// ── Mobile push banner ───────────────────────────────────────────────────────
+// One-tap enable for real mobile/browser push (see frontend/public/sw.js +
+// backend services/webPush.js) — separate from the in-app SSE bell, which
+// only reaches an open tab. Critical alerts pushed this way carry
+// Acknowledge/Snooze action buttons for triage without opening the app.
+function PushBanner() {
+  const [state, setState] = useState({ supported: false, permission: 'default', subscribed: false })
+  const [busy, setBusy] = useState(false)
+  const [dismissed, setDismissed] = useState(() => sessionStorage.getItem('nc_push_banner_dismissed') === '1')
+
+  const refresh = useCallback(() => {
+    getPushSubscriptionState().then(setState).catch(() => {})
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const handleEnable = async () => {
+    setBusy(true)
+    try {
+      await enablePush()
+      toast.success('Mobile alerts enabled — critical alerts will push to this device')
+      refresh()
+    } catch (e) {
+      toast.error(e.message || 'Could not enable push notifications')
+    } finally { setBusy(false) }
+  }
+
+  const handleDisable = async () => {
+    setBusy(true)
+    try { await disablePush(); toast.success('Mobile alerts disabled for this device'); refresh() }
+    catch { toast.error('Could not disable push') }
+    finally { setBusy(false) }
+  }
+
+  const handleTest = async () => {
+    setBusy(true)
+    try { await sendTestPush(); toast.success('Test notification sent') }
+    catch { toast.error('Test push failed — is this device still subscribed?') }
+    finally { setBusy(false) }
+  }
+
+  if (!state.supported || state.permission === 'denied') return null
+  if (state.subscribed) {
+    return (
+      <div className="glass rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+            style={{ background: '#34d39915', border: '1px solid #34d39928' }}>
+            <Smartphone size={16} style={{ color: '#34d399' }} />
+          </div>
+          <div>
+            <p className="text-sm font-body font-medium" style={{ color: 'var(--text-primary)' }}>Mobile alerts enabled</p>
+            <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
+              Critical alerts will push to this device with one-tap Acknowledge / Snooze
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={handleTest} disabled={busy} className="btn-ghost text-xs px-3 py-1.5">Send test</button>
+          <button onClick={handleDisable} disabled={busy} className="btn-ghost text-xs px-3 py-1.5">Disable</button>
+        </div>
+      </div>
+    )
+  }
+  if (dismissed) return null
+  return (
+    <div className="glass rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap"
+      style={{ background: 'rgba(124,92,245,0.06)', border: '1px solid rgba(124,92,245,0.18)' }}>
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+          style={{ background: '#a78bfa15', border: '1px solid #a78bfa28' }}>
+          <BellPlus size={16} style={{ color: '#a78bfa' }} />
+        </div>
+        <div>
+          <p className="text-sm font-body font-medium" style={{ color: 'var(--text-primary)' }}>Get critical alerts on your phone</p>
+          <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
+            Away from your desk? Enable push notifications with one-tap Acknowledge / Snooze.
+          </p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button onClick={handleEnable} disabled={busy} className="btn-primary text-xs px-3 py-1.5">
+          {busy ? 'Enabling…' : 'Enable mobile alerts'}
+        </button>
+        <button
+          onClick={() => { setDismissed(true); sessionStorage.setItem('nc_push_banner_dismissed', '1') }}
+          className="icon-btn !w-8 !h-8"><X size={13} /></button>
+      </div>
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function AlertsPage() {
   const [rules,     setRules]     = useState([])
@@ -296,6 +390,7 @@ export default function AlertsPage() {
   const [editRule,  setEditRule]  = useState(null)
   const [search,    setSearch]    = useState('')
   const [sevFilt,   setSevFilt]   = useState('all')
+  const [ackBusyId, setAckBusyId] = useState(null)
   const { theme } = useThemeStore()
   const isLight = theme === 'light'
 
@@ -322,6 +417,45 @@ export default function AlertsPage() {
       api.get('/alerts/triggered?limit=300').then(r => setTriggered(r.data)).catch(()=>{})
     }, 30000)
     return () => clearInterval(t)
+  }, [])
+
+  const ackAlert = async (id) => {
+    setAckBusyId(id)
+    try {
+      await api.post(`/alerts/triggered/${id}/ack`)
+      setTriggered(prev => prev.map(t => t.id === id ? { ...t, acknowledged_at: Math.floor(Date.now()/1000) } : t))
+      toast.success('Acknowledged')
+    } catch { toast.error('Could not acknowledge') }
+    finally { setAckBusyId(null) }
+  }
+
+  const snoozeAlert = async (id, minutes = 60) => {
+    setAckBusyId(id)
+    try {
+      const { data } = await api.post(`/alerts/triggered/${id}/snooze`, { minutes })
+      setTriggered(prev => prev.map(t => t.id === id ? { ...t, snoozed_until: data.snoozed_until } : t))
+      toast.success(`Snoozed for ${minutes >= 60 ? `${Math.round(minutes/60)}h` : `${minutes}m`}`)
+    } catch { toast.error('Could not snooze') }
+    finally { setAckBusyId(null) }
+  }
+
+  // One-tap triage from a push notification: the service worker opens
+  // /alerts?ack=<id> or /alerts?snooze=<id>&minutes=60 (see public/sw.js).
+  // Resolved here using the already-logged-in session rather than requiring
+  // a separate unauthenticated deep-link token.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const ackId = params.get('ack')
+    const snoozeId = params.get('snooze')
+    if (ackId) ackAlert(ackId)
+    if (snoozeId) snoozeAlert(snoozeId, parseInt(params.get('minutes')) || 60)
+    if (ackId || snoozeId) {
+      params.delete('ack'); params.delete('snooze'); params.delete('minutes')
+      const clean = window.location.pathname + (params.toString() ? `?${params}` : '')
+      window.history.replaceState({}, '', clean)
+      setTab('history')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const deleteRule = async (id) => {
@@ -386,6 +520,9 @@ export default function AlertsPage() {
           </div>
         }
       />
+
+      {/* Mobile push */}
+      <PushBanner />
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -568,22 +705,26 @@ export default function AlertsPage() {
               {/* Table head */}
               <div className="grid px-5 py-3 border-b text-[11px] font-semibold uppercase tracking-wider"
                 style={{...borderSubtle, ...textMuted,
-                  gridTemplateColumns:'160px 1fr 140px 110px 90px'}}>
+                  gridTemplateColumns:'160px 1fr 140px 110px 90px 190px'}}>
                 <span>Time</span>
                 <span>Details</span>
                 <span>Device</span>
                 <span>Metric</span>
                 <span>Severity</span>
+                <span>Status</span>
               </div>
 
               <div className="divide-y" style={borderSubtle}>
                 {filtTriggered.slice(0,200).map((t,i)=>{
                   const s = sev(t.severity)
                   const m = met(t.metric)
+                  const isAcked = !!t.acknowledged_at
+                  const isSnoozed = t.snoozed_until && t.snoozed_until > Math.floor(Date.now()/1000)
+                  const isOpen = !t.resolved_at
                   return (
                     <div key={t.id||i}
                       className="grid px-5 py-3.5 items-center hover:bg-white/[0.015] transition-colors"
-                      style={{gridTemplateColumns:'160px 1fr 140px 110px 90px'}}>
+                      style={{gridTemplateColumns:'160px 1fr 140px 110px 90px 190px'}}>
                       <span className="text-xs font-mono" style={textMuted}>{fmtTs(t.triggered_at)}</span>
                       <div className="pr-4 min-w-0">
                         <p className="text-sm truncate" style={textPrimary}>
@@ -596,6 +737,36 @@ export default function AlertsPage() {
                       <span className="text-xs truncate" style={textSecondary}>{t.device_name||'—'}</span>
                       <span className="text-xs" style={textMuted}>{m?.label||t.metric}</span>
                       <SevBadge v={t.severity} sm/>
+                      <div className="flex items-center gap-1.5">
+                        {!isOpen ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono" style={{color:'#34d399'}}>
+                            <CheckCircle2 size={11}/> Resolved
+                          </span>
+                        ) : isAcked ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full"
+                            style={{background:'rgba(52,211,153,0.1)', color:'#34d399'}}>
+                            <Check size={10}/> Acked
+                          </span>
+                        ) : isSnoozed ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-full"
+                            style={{background:'rgba(251,191,36,0.1)', color:'#fbbf24'}}>
+                            <AlarmClockOff size={10}/> Snoozed
+                          </span>
+                        ) : (
+                          <>
+                            <button onClick={()=>ackAlert(t.id)} disabled={ackBusyId===t.id}
+                              className="text-[10px] font-mono px-2 py-1 rounded-lg flex items-center gap-1 disabled:opacity-40"
+                              style={{background:'rgba(124,92,245,0.1)', color:'#c4b5fd', border:'1px solid rgba(167,139,250,0.2)'}}>
+                              <Check size={10}/> Ack
+                            </button>
+                            <button onClick={()=>snoozeAlert(t.id,60)} disabled={ackBusyId===t.id}
+                              className="text-[10px] font-mono px-2 py-1 rounded-lg flex items-center gap-1 disabled:opacity-40"
+                              style={{background:'transparent', color:'var(--text-muted)', border:'1px solid var(--border-subtle)'}}>
+                              <Clock size={10}/> Snooze 1h
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   )
                 })}

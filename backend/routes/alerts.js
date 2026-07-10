@@ -290,6 +290,34 @@ router.post('/triggered/:id/ack', requireRole('admin', 'operator'), async (req, 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POST /api/alerts/triggered/:id/snooze ──────────────────────────────────────
+// The other half of the one-tap mobile triage flow (see push notification
+// actions wired up below in evaluateAlerts / services/webPush.js): "I saw
+// this, don't page me again for a while, but I haven't necessarily fixed it
+// yet" — distinct from ack, which is meant to be permanent for that incident.
+// snoozed_until is checked alongside `acknowledged` in the escalation guard
+// further down so a snoozed breach doesn't escalate or re-notify until the
+// snooze expires, at which point it behaves as if never snoozed.
+// Body: { minutes?: number } — defaults to 60, capped to a sane range so a
+// fat-fingered value from the push action (or a scripted call) can't
+// silently snooze something for a year.
+router.post('/triggered/:id/snooze', requireRole('admin', 'operator'), async (req, res) => {
+  try {
+    if (!await tableExists('alert_triggered_log')) return res.status(404).json({ error: 'Not found' });
+    const row = await queryOne('SELECT id FROM alert_triggered_log WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Triggered alert not found' });
+
+    const minutes = Math.min(Math.max(parseInt(req.body?.minutes) || 60, 5), 7 * 24 * 60);
+    const now = Math.floor(Date.now() / 1000);
+    const until = now + minutes * 60;
+    await execute(
+      'UPDATE alert_triggered_log SET snoozed_until = ?, snoozed_by = ? WHERE id = ?',
+      [until, req.user.id, req.params.id]
+    );
+    res.json({ ok: true, snoozed_until: until });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Alert evaluator ────────────────────────────────────────────────────────────
 // Noise-control model (all state lives in the `alert_state` table, not
 // process memory — see db/migrate.js migration 012 for why that matters:
@@ -334,7 +362,7 @@ function advanceFlapTracking(prevState, now) {
   return { flap_count: flapCount, flap_window_start: windowStart, flapping };
 }
 
-async function notifyAdmins(rule, deviceId, deviceName, severity, message, now) {
+async function notifyAdmins(rule, deviceId, deviceName, severity, message, now, logId = null) {
   const admins = await query('SELECT id FROM users WHERE role = ? AND enabled = 1', ['admin']);
   for (const admin of admins) {
     await execute(
@@ -347,6 +375,30 @@ async function notifyAdmins(rule, deviceId, deviceName, severity, message, now) 
     type: 'alert', severity, rule_name: rule.name, device_id: deviceId,
     device_name: deviceName, metric: rule.metric, message, triggered_at: now,
   });
+
+  // Real mobile/browser push (see services/webPush.js) — separate from the
+  // in-app SSE notification above, which only reaches an open tab. Skipped
+  // for 'info' severity (resolved messages) so a device coming back online
+  // doesn't buzz someone's phone the same way an actual breach does; the
+  // one-tap Acknowledge/Snooze actions only make sense for an open incident
+  // anyway, which is exactly when logId is passed in.
+  if (severity !== 'info') {
+    const webPush = require('../services/webPush');
+    const actions = logId
+      ? [
+          { action: 'ack',    title: 'Acknowledge' },
+          { action: 'snooze', title: 'Snooze 1h' },
+        ]
+      : [];
+    webPush.sendToUsers(admins.map(a => a.id), {
+      title: `${severity === 'critical' ? '🔴' : '🟡'} ${rule.name}`,
+      body: message,
+      tag: logId ? `nc-alert-${logId}` : `nc-alert-${rule.id}-${deviceId}`,
+      requireInteraction: severity === 'critical',
+      data: { type: 'alert', logId, ruleId: rule.id, deviceId, severity, url: '/alerts' },
+      actions,
+    }).catch(() => {});
+  }
 }
 
 async function evaluateAlerts(deviceId, snapshot) {
@@ -412,7 +464,7 @@ async function evaluateAlerts(deviceId, snapshot) {
           [logId, rule.id, deviceId, now, rule.severity, details, JSON.stringify(actions)]
         );
         if (rule.notify_admins) {
-          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now);
+          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now, logId);
         }
         webhook.fire(rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered', {
           device_id: deviceId, device_name: device.name, rule_name: rule.name,
@@ -489,7 +541,7 @@ async function evaluateAlerts(deviceId, snapshot) {
           // "noise control" notice becomes its own noise.
           if (!state.flapping) {
             const flapMsg = `${rule.name} on ${device.name} is flapping — triggered/cleared ${flap.flap_count} times in the last ${Math.round(FLAP_WINDOW_SEC / 60)} min. Notifications for this condition are suppressed until it settles down.`;
-            if (rule.notify_admins) await notifyAdmins(rule, deviceId, device.name, 'warning', flapMsg, now);
+            if (rule.notify_admins) await notifyAdmins(rule, deviceId, device.name, 'warning', flapMsg, now, null);
             webhook.fire('alert.flapping', {
               device_id: deviceId, device_name: device.name, rule_name: rule.name,
               metric: rule.metric, severity: 'warning', message: flapMsg,
@@ -500,7 +552,7 @@ async function evaluateAlerts(deviceId, snapshot) {
         }
 
         if (rule.notify_admins) {
-          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now);
+          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now, logId);
         }
         const autoActions = await performAlertActions(rule, deviceId, device.name, actions).catch(() => []);
         const actionSummary = autoActions.length
@@ -524,9 +576,16 @@ async function evaluateAlerts(deviceId, snapshot) {
 
       const openSec = now - (state.first_breached_at || now);
       const logRow = state.last_log_id
-        ? await queryOne('SELECT acknowledged_at FROM alert_triggered_log WHERE id = ?', [state.last_log_id])
+        ? await queryOne('SELECT acknowledged_at, snoozed_until FROM alert_triggered_log WHERE id = ?', [state.last_log_id])
         : null;
       const acknowledged = !!logRow?.acknowledged_at;
+      const snoozed = !!(logRow?.snoozed_until && logRow.snoozed_until > now);
+
+      // Snoozed (one-tap "Snooze 1h" from a push notification, see
+      // routes/alerts.js POST /triggered/:id/snooze): stay completely quiet
+      // — no escalation, no repeat reminder — until the snooze window
+      // expires, then fall through to normal behavior again automatically.
+      if (snoozed) continue;
 
       // One-shot escalation: fires once per incident, the first time it's
       // been open past escalate_after_sec, skipped entirely if a human
@@ -536,7 +595,7 @@ async function evaluateAlerts(deviceId, snapshot) {
         const escSeverity = rule.escalate_severity || 'critical';
         const escMsg = `ESCALATION: ${rule.name} on ${device.name} has been unresolved for ${formatDuration(openSec)} — ${details}`;
 
-        if (rule.notify_admins) await notifyAdmins(rule, deviceId, device.name, escSeverity, escMsg, now);
+        if (rule.notify_admins) await notifyAdmins(rule, deviceId, device.name, escSeverity, escMsg, now, state.last_log_id);
         webhook.fire('alert.escalated', {
           device_id: deviceId, device_name: device.name, rule_name: rule.name,
           metric: rule.metric, severity: escSeverity, details, message: escMsg,
@@ -555,7 +614,7 @@ async function evaluateAlerts(deviceId, snapshot) {
       // now instead of living in one process's memory.
       if ((now - (state.last_notified_at || 0)) >= (rule.cooldown_sec || 300)) {
         if (rule.notify_admins) {
-          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name} (still ongoing, open ${formatDuration(openSec)})`, now);
+          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name} (still ongoing, open ${formatDuration(openSec)})`, now, state.last_log_id);
         }
         const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
         webhook.fire(webhookEvent, {

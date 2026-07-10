@@ -273,6 +273,7 @@ const { backupSchedulesRouter, logExportSchedulesRouter } = require('./routes/sc
 app.use('/api/backup-schedules',     backupSchedulesRouter);
 app.use('/api/log-export-schedules', logExportSchedulesRouter);
 app.use('/api/digest', require('./routes/digest'));
+app.use('/api/push',   require('./routes/push'));
 
 // BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
 // by the terminal page (/api/terminal/open/:id, the SSE output stream, and
