@@ -7,6 +7,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute: run } = require('../db');
 const { requireAuth }          = require('../middleware/auth');
+const { requireOrgContext }    = require('../middleware/tenant');
 const { agentIngestLimiter, registerLimiter, sseStreamLimiter } = require('../middleware/rateLimiter');
 const { evaluateAlerts, pushNotification } = require('./alerts');
 const webhook = require('../services/webhook');
@@ -34,24 +35,62 @@ function applySnapshot(deviceId, snapshot) {
   if (entry.history.length > HISTORY_LEN) entry.history.shift();
 }
 
+// ── device_id -> org_id cache ──────────────────────────────────────────────────
+// BUG THIS FIXES: this whole file predates multi-tenancy and never filtered
+// anything by org. The in-memory `store`, the SSE broadcast fan-out, and the
+// GET routes below all treated every device as globally visible — so once a
+// device's org_id was fixed (see the agent-registration fix), its *metrics*
+// still leaked to every org's dashboard/monitoring page, live and historical
+// alike, because nothing here ever checked org_id at all (worse: the
+// `role !== 'admin'` checks meant instance-admins — who routinely manage
+// several client orgs — saw literally everyone's metrics unconditionally).
+//
+// This cache lets the hot ingest/broadcast path (agent posts every ~5s)
+// avoid a DB round trip per snapshot: agent ingest already has org_id from
+// agentAuth and primes the cache directly; anything else (poller-driven
+// device_status events, SSE connect) falls back to a lazy DB lookup that's
+// cached from then on. A cache entry of `null` still counts as "resolved"
+// (e.g. a device that got deleted mid-flight) so we don't hammer the DB for
+// it on every subsequent broadcast.
+const deviceOrgCache = new Map();
+
+function primeDeviceOrg(deviceId, orgId) {
+  deviceOrgCache.set(deviceId, orgId ?? null);
+}
+
+async function getDeviceOrgId(deviceId) {
+  if (deviceOrgCache.has(deviceId)) return deviceOrgCache.get(deviceId);
+  const row = await queryOne('SELECT org_id FROM devices WHERE id = ?', [deviceId]);
+  const orgId = row ? (row.org_id ?? null) : null;
+  deviceOrgCache.set(deviceId, orgId);
+  return orgId;
+}
+
 // ── SSE client registry (local to this worker only) ───────────────────────────
-// userId → Set<res>  — only send data the user is allowed to see
+// userId → Set<res>  — only send data the user is allowed to see.
+// Each `res` also carries `res._orgId` (the org that was active when the
+// browser connected) so broadcasts below can filter by it — see
+// sseBroadcastLocal/sseBroadcastDeviceStatus.
 const sseClients = new Map();
 
-function sseAdd(userId, res) {
+function sseAdd(userId, orgId, res) {
+  res._orgId = orgId;
   if (!sseClients.has(userId)) sseClients.set(userId, new Set());
   sseClients.get(userId).add(res);
 }
 function sseDel(userId, res) {
   sseClients.get(userId)?.delete(res);
 }
-function sseBroadcastLocal(deviceId, snapshot) {
+async function sseBroadcastLocal(deviceId, snapshot, knownOrgId = undefined) {
   // Fan out to browsers connected to THIS worker. Cross-worker fan-out is
   // handled by the bus subscription below, which calls this same function
   // on every worker once a snapshot is published.
+  const orgId = knownOrgId !== undefined ? knownOrgId : await getDeviceOrgId(deviceId);
+  if (orgId === null) return; // unknown/orphan device — fail closed, broadcast to nobody
   const payload = JSON.stringify({ deviceId, latest: snapshot });
   for (const [, clients] of sseClients) {
     for (const res of clients) {
+      if (res._orgId !== orgId) continue;
       try { res.write(`data: ${payload}\n\n`); } catch {}
     }
   }
@@ -61,33 +100,42 @@ function sseBroadcastLocal(deviceId, snapshot) {
 // Single subscription point: whether a snapshot originated on this worker or
 // another one, it flows through here so local store + local SSE clients stay
 // in sync everywhere.
-bus.subscribe('metrics', ({ deviceId, snapshot }) => {
+bus.subscribe('metrics', ({ deviceId, snapshot, orgId }) => {
   applySnapshot(deviceId, snapshot);
-  sseBroadcastLocal(deviceId, snapshot);
+  if (orgId !== undefined) primeDeviceOrg(deviceId, orgId);
+  sseBroadcastLocal(deviceId, snapshot, orgId).catch(() => {});
 }, { skipSelf: true });
 
 // Device status transitions (from the poller's TCP probes, or agent
 // heartbeats coming back online) — pushed as a distinct message `type` so
 // the frontend can tell it apart from a metrics snapshot and patch its
 // devices list instead of its metrics map.
-function sseBroadcastDeviceStatus(deviceId, status) {
+async function sseBroadcastDeviceStatus(deviceId, status, knownOrgId = undefined) {
+  const orgId = knownOrgId !== undefined ? knownOrgId : await getDeviceOrgId(deviceId);
+  if (orgId === null) return; // unknown/orphan device — fail closed
   const payload = JSON.stringify({ type: 'device_status', deviceId, status });
   for (const [, clients] of sseClients) {
     for (const res of clients) {
+      if (res._orgId !== orgId) continue;
       try { res.write(`data: ${payload}\n\n`); } catch {}
     }
   }
 }
-bus.subscribe('device_status', ({ deviceId, status }) => {
-  sseBroadcastDeviceStatus(deviceId, status);
+bus.subscribe('device_status', ({ deviceId, status, orgId }) => {
+  sseBroadcastDeviceStatus(deviceId, status, orgId).catch(() => {});
 }, { skipSelf: true });
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function genApiKey() { return 'nca_' + crypto.randomBytes(24).toString('hex'); }
 function hashKey(key) { return crypto.createHash('sha256').update(key).digest('hex'); }
 
-// SSE accepts token from Authorization header OR ?token= query param
-function extractUser(req) {
+// SSE accepts token from Authorization header OR ?token= query param.
+// Made async (was sync) because — unlike a normal request going through
+// requireAuth — the JWT payload itself doesn't carry active_org_id (it's
+// only ever resolved live from the DB; see middleware/auth.js). Without this
+// live lookup the SSE stream had no org context at all to filter by, which
+// is half of why metrics leaked across orgs in the first place.
+async function extractUser(req) {
   let token = null;
   const auth = req.headers['authorization'] || '';
   if (auth.startsWith('Bearer ')) token = auth.slice(7);
@@ -96,7 +144,12 @@ function extractUser(req) {
     token = url.searchParams.get('token');
   }
   if (!token) return null;
-  try { return jwt.verify(token, process.env.JWT_SECRET); } catch { return null; }
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const liveUser = await queryOne('SELECT id, role, enabled, active_org_id FROM users WHERE id = ?', [payload.id]);
+    if (!liveUser || !liveUser.enabled) return null;
+    return { ...payload, role: liveUser.role, activeOrgId: liveUser.active_org_id || null };
+  } catch { return null; }
 }
 
 // ── Agent auth ─────────────────────────────────────────────────────────────────
@@ -106,11 +159,12 @@ async function agentAuth(req, res, next) {
   const keyHash = hashKey(key);
   try {
     const row = await queryOne(
-      'SELECT id, name, ip_address, status FROM devices WHERE agent_key_hash = ?',
+      'SELECT id, name, ip_address, status, org_id FROM devices WHERE agent_key_hash = ?',
       [keyHash]
     );
     if (!row) return res.status(403).json({ error: 'Invalid API key' });
     req.agentDevice = row;
+    primeDeviceOrg(row.id, row.org_id); // hot path: avoid a lookup on every ingest
     next();
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 }
@@ -119,9 +173,19 @@ async function agentAuth(req, res, next) {
 // Browser connects once; server pushes every agent update in real time.
 // On connect: immediately sends the full current snapshot so graphs appear
 // without waiting for the next agent push.
-router.get('/stream', sseStreamLimiter, (req, res) => {
-  const user = extractUser(req);
+//
+// Org-filtered on both ends: the initial snapshot only includes devices
+// belonging to the connecting user's active org, and the res object is
+// tagged with that org so every subsequent live push (sseBroadcastLocal /
+// sseBroadcastDeviceStatus) skips it if a snapshot arrives for a different
+// org. If the user switches orgs client-side, the existing "switch org"
+// flow already forces a full page reload (see OrganizationsPage.jsx), which
+// reconnects this stream under the new org — so no separate re-tag path is
+// needed here.
+router.get('/stream', sseStreamLimiter, async (req, res) => {
+  const user = await extractUser(req);
   if (!user) { res.status(401).end(); return; }
+  if (!user.activeOrgId) { res.status(400).end(); return; }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -129,12 +193,14 @@ router.get('/stream', sseStreamLimiter, (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  sseAdd(user.id, res);
+  sseAdd(user.id, user.activeOrgId, res);
 
-  // Send full current snapshot immediately so graphs show on connect
+  // Send full current snapshot immediately so graphs show on connect —
+  // filtered to devices in this user's active org.
   const snapshot = {};
   for (const [id, entry] of store.entries()) {
-    snapshot[id] = { latest: entry.latest, history: entry.history };
+    const orgId = await getDeviceOrgId(id);
+    if (orgId === user.activeOrgId) snapshot[id] = { latest: entry.latest, history: entry.history };
   }
   try { res.write(`data: ${JSON.stringify({ type: 'snapshot', data: snapshot })}\n\n`); } catch {}
 
@@ -357,8 +423,8 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     run('UPDATE devices SET status=?, last_seen=? WHERE id=?', ['online', now, device.id])
       .catch(() => {});
     if (device.status && device.status !== 'online') {
-      sseBroadcastDeviceStatus(device.id, 'online');
-      bus.publish('device_status', { deviceId: device.id, status: 'online' });
+      sseBroadcastDeviceStatus(device.id, 'online', device.org_id).catch(() => {});
+      bus.publish('device_status', { deviceId: device.id, status: 'online', orgId: device.org_id });
       require('../services/webhook').fire('device.online', {
         device_id: device.id, device_name: device.name, severity: 'info',
         message: `${device.name} came back online`,
@@ -395,8 +461,8 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   // failure for the worker that's actually talking to the agent; the bus
   // publish below is now purely a "let other workers know too" nice-to-have.
   applySnapshot(device.id, snapshot);
-  sseBroadcastLocal(device.id, snapshot);
-  bus.publish('metrics', { deviceId: device.id, snapshot });
+  sseBroadcastLocal(device.id, snapshot, device.org_id).catch(() => {});
+  bus.publish('metrics', { deviceId: device.id, snapshot, orgId: device.org_id });
   recordHistoryBucket(device.id, snapshot);
 
   // Fire alert evaluation asynchronously
@@ -544,13 +610,21 @@ const RANGE_PRESETS = {
 // to decide which table(s) a given [fromTs,toTs] window needs to read from.
 const { COMPRESS_AFTER_DAYS } = require('../services/metricsRollup');
 
+// SECURITY FIX: this used to only check anything for non-admins, and even
+// then only checked group access — never org. An admin (who in this
+// multi-tenant app can be a member of several client orgs) got every
+// device's history/export with no org filter at all, and even the
+// non-admin path could match a device in the *wrong* org if a group_id
+// ever collided (defense in depth). Now everyone — admin included — must
+// have the device belong to req.orgId, and non-admins additionally need
+// explicit group access, same as before.
 async function assertMetricsAccess(req, res) {
+  const device = await queryOne('SELECT id, group_id FROM devices WHERE id = ? AND org_id = ?', [req.params.deviceId, req.orgId]);
+  if (!device) { res.status(404).json({ error: 'Device not found' }); return false; }
   if (req.user.role !== 'admin') {
     const access = await queryOne(
-      'SELECT 1 FROM devices d ' +
-      'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
-      'WHERE d.id = ?',
-      [req.user.id, req.params.deviceId]
+      'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+      [req.user.id, device.group_id]
     );
     if (!access) { res.status(403).json({ error: 'Access denied' }); return false; }
   }
@@ -639,7 +713,12 @@ async function fetchHistoryRows(deviceId, fromTs, toTs, bucketSeconds) {
 // per-device breakdown (avg/max over the whole window) rides along in the
 // same response so the frontend can render a legend/table without a second
 // round trip per device.
+// SECURITY FIX: same class of bug as assertMetricsAccess above — this used
+// to only gate non-admins, and never checked org at all. Now the group
+// must belong to req.orgId for anyone, admin included.
 async function assertGroupAccess(req, res) {
+  const group = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [req.params.groupId, req.orgId]);
+  if (!group) { res.status(404).json({ error: 'Group not found' }); return false; }
   if (req.user.role !== 'admin') {
     const access = await queryOne(
       'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
@@ -706,13 +785,13 @@ async function fetchPerDeviceSummary(deviceIds, fromTs, toTs) {
 }
 
 // GET /api/metrics/group/:groupId/history?range=1h|24h|7d|30d|90d|1y&from=&to=&bucket=
-router.get('/group/:groupId/history', requireAuth, async (req, res) => {
+router.get('/group/:groupId/history', requireAuth, requireOrgContext, async (req, res) => {
   try {
     if (!(await assertGroupAccess(req, res))) return;
-    const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ?', [req.params.groupId]);
+    const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ? AND org_id = ?', [req.params.groupId, req.orgId]);
     if (!group) return res.status(404).json({ error: 'Group not found' });
 
-    const devices = await query('SELECT id, name, status FROM devices WHERE group_id = ? ORDER BY name', [req.params.groupId]);
+    const devices = await query('SELECT id, name, status FROM devices WHERE group_id = ? AND org_id = ? ORDER BY name', [req.params.groupId, req.orgId]);
     const deviceIds = devices.map(d => d.id);
 
     const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
@@ -739,13 +818,13 @@ router.get('/group/:groupId/history', requireAuth, async (req, res) => {
 
 // GET /api/metrics/group/:groupId/history/export?range=&from=&to= — CSV of the
 // combined group series, same shape/columns as the per-device CSV export.
-router.get('/group/:groupId/history/export', requireAuth, async (req, res) => {
+router.get('/group/:groupId/history/export', requireAuth, requireOrgContext, async (req, res) => {
   try {
     if (!(await assertGroupAccess(req, res))) return;
-    const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ?', [req.params.groupId]);
+    const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ? AND org_id = ?', [req.params.groupId, req.orgId]);
     if (!group) return res.status(404).json({ error: 'Group not found' });
 
-    const deviceIds = (await query('SELECT id FROM devices WHERE group_id = ?', [req.params.groupId])).map(r => r.id);
+    const deviceIds = (await query('SELECT id FROM devices WHERE group_id = ? AND org_id = ?', [req.params.groupId, req.orgId])).map(r => r.id);
     const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
     const rows = await fetchGroupCombinedRows(deviceIds, fromTs, toTs, bucketSeconds);
 
@@ -770,40 +849,39 @@ router.get('/group/:groupId/history/export', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/', requireAuth, async (req, res) => {
+// SECURITY/CORRECTNESS FIX: this used to only restrict non-admins, and even
+// then via user_group_access with no org filter at all — an admin (who in
+// this multi-tenant app is very often a member of several client orgs) got
+// every org's live metrics unconditionally, and a non-admin could in theory
+// see another org's device if a group_id ever collided. Now the allowed-id
+// set is always derived from `org_id = req.orgId` first, and non-admins are
+// additionally narrowed to their accessible groups within that org.
+router.get('/', requireAuth, requireOrgContext, async (req, res) => {
   try {
     const result = {};
+    let orgDeviceRows;
     if (req.user.role !== 'admin') {
-      const allowed = await query(
+      orgDeviceRows = await query(
         'SELECT d.id FROM devices d ' +
-        'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ?',
-        [req.user.id]
+        'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
+        'WHERE d.org_id = ?',
+        [req.user.id, req.orgId]
       );
-      const allowedIds = new Set(allowed.map(r => r.id));
-      for (const [id, entry] of store.entries()) {
-        if (allowedIds.has(id)) result[id] = { latest: entry.latest, history: entry.history };
-      }
     } else {
-      for (const [id, entry] of store.entries()) {
-        result[id] = { latest: entry.latest, history: entry.history };
-      }
+      orgDeviceRows = await query('SELECT id FROM devices WHERE org_id = ?', [req.orgId]);
+    }
+    const allowedIds = new Set(orgDeviceRows.map(r => r.id));
+    for (const [id, entry] of store.entries()) {
+      if (allowedIds.has(id)) result[id] = { latest: entry.latest, history: entry.history };
     }
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/metrics/:deviceId ─────────────────────────────────────────────────
-router.get('/:deviceId', requireAuth, async (req, res) => {
+router.get('/:deviceId', requireAuth, requireOrgContext, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      const access = await queryOne(
-        'SELECT 1 FROM devices d ' +
-        'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
-        'WHERE d.id = ?',
-        [req.user.id, req.params.deviceId]
-      );
-      if (!access) return res.status(403).json({ error: 'Access denied' });
-    }
+    if (!(await assertMetricsAccess(req, res))) return;
     const entry = store.get(req.params.deviceId);
     if (!entry) return res.json({ latest: null, history: [] });
     res.json(entry);
@@ -814,7 +892,7 @@ router.get('/:deviceId', requireAuth, async (req, res) => {
 // Long-term, pre-aggregated history for the Monitoring History/comparison
 // page. Unlike GET /:deviceId (in-memory, ~25 min), this reads from the
 // durable metrics_history table and can go back as far as retention allows.
-router.get('/:deviceId/history', requireAuth, async (req, res) => {
+router.get('/:deviceId/history', requireAuth, requireOrgContext, async (req, res) => {
   try {
     if (!(await assertMetricsAccess(req, res))) return;
     const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);
@@ -827,10 +905,10 @@ router.get('/:deviceId/history', requireAuth, async (req, res) => {
 // CSV is the format used everywhere else this app exports tabular data (see
 // routes/audit.js) and the one every spreadsheet/BI tool (Excel, Sheets,
 // Grafana CSV panels, etc.) reads natively — so it's what's offered here too.
-router.get('/:deviceId/history/export', requireAuth, async (req, res) => {
+router.get('/:deviceId/history/export', requireAuth, requireOrgContext, async (req, res) => {
   try {
     if (!(await assertMetricsAccess(req, res))) return;
-    const device = await queryOne('SELECT name FROM devices WHERE id = ?', [req.params.deviceId]);
+    const device = await queryOne('SELECT name FROM devices WHERE id = ? AND org_id = ?', [req.params.deviceId, req.orgId]);
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
     const { fromTs, toTs, bucketSeconds } = resolveRangeQuery(req);

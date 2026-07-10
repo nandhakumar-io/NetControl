@@ -274,9 +274,15 @@ async function flushToDB(results, nowSec) {
   // opposed to an agent heartbeat, which already goes through the bus via
   // routes/metrics.js) would only show up after the frontend's next
   // fallback poll of GET /api/devices.
+  //
+  // orgId is included here (from the `devices` fetch above, which now
+  // selects org_id) so routes/metrics.js's SSE broadcast can filter this
+  // event to only the browsers watching that device's org, instead of
+  // fanning it out to every connected user regardless of tenant.
+  const orgById = new Map(devices.map(d => [d.id, d.org_id]));
   for (const r of results) {
     if (r.method === 'skip' || r.oldStatus === r.newStatus) continue;
-    bus.publish('device_status', { deviceId: r.id, status: r.newStatus });
+    bus.publish('device_status', { deviceId: r.id, status: r.newStatus, orgId: orgById.get(r.id) ?? null });
   }
 
   // ── Record transitions for the Device Changes timeline / compare feature ──
@@ -382,7 +388,7 @@ async function pollAll() {
   let devices;
   try {
     devices = await query(
-      'SELECT id, name, ip_address, os_type, status, last_seen, agent_key_hash FROM devices'
+      'SELECT id, name, ip_address, os_type, status, last_seen, agent_key_hash, org_id FROM devices'
     );
   } catch (e) {
     console.error('[Poller] DB fetch error:', e.message);

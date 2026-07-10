@@ -322,7 +322,7 @@ function ImportPanel({ groups, onImported }) {
               <span className="font-bold text-lg leading-none">{results.imported}</span> imported
             </span>
             {results.skipped > 0 && (
-              <span className="text-sm font-body text-slate-400 flex items-center gap-1.5">
+              <span className="text-sm font-body flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
                 <SkipForward size={14} />
                 <span className="font-bold text-lg leading-none">{results.skipped}</span> skipped (duplicates)
               </span>
@@ -503,8 +503,9 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
                   className={`px-4 py-1.5 rounded-lg text-xs font-body font-semibold transition-all flex items-center gap-1.5
                     ${tab === val
                       ? 'bg-brand-500/20 text-brand-400 border border-brand-500/30'
-                      : 'text-slate-500 hover:text-slate-300'
-                    }`}>
+                      : ''
+                    }`}
+                  style={tab !== val ? { color: 'var(--text-muted)' } : {}}>
                   {val === 'excel' && <FileSpreadsheet size={12} />}{lbl}
                 </button>
               ))}

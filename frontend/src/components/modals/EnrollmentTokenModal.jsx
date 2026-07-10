@@ -54,19 +54,19 @@ export default function EnrollmentTokenModal({ org, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
-      <div className="glass w-full max-w-lg rounded-2xl border border-white/10">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
-          <h2 className="font-display text-white text-sm flex items-center gap-2">
+      <div className="glass w-full max-w-lg rounded-2xl border" style={{ borderColor: 'var(--border-subtle)' }}>
+        <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: 'var(--border-subtle)' }}>
+          <h2 className="font-display text-sm flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
             <KeyRound size={16} className="text-brand-400" /> Agent Enrollment Token — {org.name}
           </h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300"><X size={16} /></button>
+          <button onClick={onClose} style={{ color: 'var(--text-muted)' }}><X size={16} /></button>
         </div>
 
         <div className="p-5 flex flex-col gap-4">
-          <p className="text-xs text-slate-500 leading-relaxed">
-            Give this token to the agent installer (as the <code className="text-slate-400">x-enrollment-token</code> header
-            on <code className="text-slate-400">POST /api/metrics/register</code>) so newly installed agents register
-            straight into <span className="text-slate-300">{org.name}</span> instead of another organization.
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            Give this token to the agent installer (as the <code style={{ color: 'var(--text-secondary)' }}>x-enrollment-token</code> header
+            on <code style={{ color: 'var(--text-secondary)' }}>POST /api/metrics/register</code>) so newly installed agents register
+            straight into <span style={{ color: 'var(--text-primary)' }}>{org.name}</span> instead of another organization.
           </p>
 
           {loading ? (

@@ -77,12 +77,12 @@ export default function TwoFactorModal({ open, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
-      <div className="glass w-full max-w-md rounded-2xl border border-white/10 overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
-          <h2 className="font-display text-white text-sm flex items-center gap-2">
+      <div className="glass w-full max-w-md rounded-2xl border overflow-hidden" style={{ borderColor: 'var(--border-subtle)' }}>
+        <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: 'var(--border-subtle)' }}>
+          <h2 className="font-display text-sm flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
             <ShieldCheck size={16} className="text-brand-400" /> Two-Factor Authentication
           </h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
+          <button onClick={onClose} style={{ color: 'var(--text-muted)' }}>
             <X size={16} />
           </button>
         </div>
@@ -92,7 +92,7 @@ export default function TwoFactorModal({ open, onClose }) {
             <div className="flex flex-col gap-4">
               {status.enabled ? (
                 <>
-                  <p className="text-sm text-slate-300 font-body">
+                  <p className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>
                     Two-factor authentication is <span className="text-accent-green">enabled</span> on your account.
                   </p>
                   <button className="btn-secondary w-full justify-center" onClick={() => setStep('disable')}>
@@ -101,7 +101,7 @@ export default function TwoFactorModal({ open, onClose }) {
                 </>
               ) : (
                 <>
-                  <p className="text-sm text-slate-400 font-body">
+                  <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
                     Add an authenticator app (Google Authenticator, Authy, 1Password, etc.) as a second sign-in factor.
                   </p>
                   <button className="btn-primary w-full justify-center" onClick={startSetup} disabled={loading}>
@@ -114,7 +114,7 @@ export default function TwoFactorModal({ open, onClose }) {
 
           {step === 'setup' && setupData && (
             <form onSubmit={confirmSetup} className="flex flex-col gap-4">
-              <p className="text-sm text-slate-400 font-body">Scan this QR code with your authenticator app:</p>
+              <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>Scan this QR code with your authenticator app:</p>
               <div className="flex justify-center bg-white rounded-lg p-3">
                 <img src={setupData.qrDataUrl} alt="2FA QR code" width={180} height={180} />
               </div>
@@ -146,10 +146,10 @@ export default function TwoFactorModal({ open, onClose }) {
 
           {step === 'backup-codes' && backupCodes && (
             <div className="flex flex-col gap-4">
-              <p className="text-sm text-slate-300 font-body">
+              <p className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>
                 Save these one-time backup codes somewhere safe. Each can be used once if you lose access to your authenticator app. They won't be shown again.
               </p>
-              <div className="grid grid-cols-2 gap-2 bg-black/20 rounded-lg p-3 font-mono text-xs text-slate-200">
+              <div className="grid grid-cols-2 gap-2 bg-black/20 rounded-lg p-3 font-mono text-xs" style={{ color: 'var(--text-primary)' }}>
                 {backupCodes.map(c => <div key={c}>{c}</div>)}
               </div>
               <button className="btn-secondary w-full justify-center" onClick={copyBackupCodes}>
@@ -163,7 +163,7 @@ export default function TwoFactorModal({ open, onClose }) {
 
           {step === 'disable' && (
             <form onSubmit={disable2FA} className="flex flex-col gap-4">
-              <p className="text-sm text-slate-400 font-body">Confirm your password and a current code to disable 2FA.</p>
+              <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>Confirm your password and a current code to disable 2FA.</p>
               <div>
                 <label className="label">Password</label>
                 <input type="password" className="input-field" value={password} onChange={e => setPassword(e.target.value)} autoFocus />

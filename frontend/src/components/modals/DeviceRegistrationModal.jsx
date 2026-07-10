@@ -1,6 +1,18 @@
 // components/modals/DeviceRegistrationModal.jsx
-// NEW: Modal for approving new agent device registrations
+// Modal for approving new agent device registrations
 // Shows when a new device registers and needs admin approval
+//
+// THEME FIX: this used to be hardcoded to dark-mode Tailwind classes
+// (bg-surface-1, text-slate-200/400/500, border-slate-600 — all static
+// hex colors from tailwind.config.js, NOT the app's theme-aware
+// `--bg-*`/`--text-*`/`--border-*` CSS custom properties defined in
+// index.css). Every other surface in the app (cards, other modals) uses
+// those CSS vars via inline `style={{ background: 'var(--bg-card)' }}`,
+// which is what actually flips with the `html.light` class the theme
+// toggle sets — the static Tailwind classes never do. Net effect: this
+// modal stayed dark even when the rest of the UI switched to light mode.
+// Fixed by switching every color to the CSS vars, matching the pattern
+// already used in ActionConfirmModal.jsx / BackupPage.jsx / etc.
 import React, { useState, useEffect } from 'react'
 import {
   Server, Network, HardDrive, Check, X, AlertCircle, 
@@ -96,9 +108,9 @@ export default function DeviceRegistrationModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div 
-        className="bg-surface-1 border rounded-xl shadow-2xl w-full max-w-md"
-        style={{ borderColor: 'var(--border-subtle)' }}
+      <div
+        className="rounded-xl shadow-2xl w-full max-w-md border"
+        style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)' }}
       >
         {/* Header */}
         <div className="px-6 py-4 border-b flex items-start gap-3"
@@ -112,14 +124,14 @@ export default function DeviceRegistrationModal({
           </div>
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-body font-semibold text-slate-200">
+              <h2 className="text-base font-body font-semibold" style={{ color: 'var(--text-primary)' }}>
                 New Device Registered
               </h2>
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-brand-500/15 text-brand-400 border border-brand-500/25">
                 Live
               </span>
             </div>
-            <p className="text-xs font-body text-slate-500 mt-0.5">
+            <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
               A new agent just checked in. Review and approve to add it to your network.
             </p>
           </div>
@@ -129,9 +141,9 @@ export default function DeviceRegistrationModal({
         <div className="px-6 py-4 space-y-4">
           {/* Device name — editable so the admin can rename before approving */}
           <div>
-            <label className="text-xs font-body font-semibold text-slate-400 block mb-1.5 flex items-center gap-1">
+            <label className="text-xs font-body font-semibold block mb-1.5 flex items-center gap-1" style={{ color: 'var(--text-secondary)' }}>
               Device Name
-              <Pencil size={10} className="text-slate-600" />
+              <Pencil size={10} style={{ color: 'var(--text-faint)' }} />
             </label>
             <input
               type="text"
@@ -139,17 +151,19 @@ export default function DeviceRegistrationModal({
               onChange={e => setEditedName(e.target.value)}
               maxLength={100}
               placeholder="Enter a device name…"
-              className="w-full px-3 py-2 rounded-lg bg-surface-3 border text-slate-200 text-sm font-mono focus:outline-none focus:ring-1 transition-colors"
+              className="w-full px-3 py-2 rounded-lg border text-sm font-mono focus:outline-none focus:ring-1 transition-colors"
               style={{
+                background: 'var(--bg-input)',
+                color: 'var(--text-primary)',
                 borderColor: nameInvalid ? '#f87171' : 'var(--border-subtle)',
               }}
             />
             {nameInvalid ? (
               <p className="text-[11px] text-accent-red mt-1">Name is required (max 100 characters)</p>
             ) : editedName.trim() !== device.device_name ? (
-              <p className="text-[11px] text-slate-500 mt-1">Renamed from agent-suggested "{device.device_name}"</p>
+              <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>Renamed from agent-suggested "{device.device_name}"</p>
             ) : (
-              <p className="text-[11px] text-slate-600 mt-1">Agent-suggested name — edit if you'd like</p>
+              <p className="text-[11px] mt-1" style={{ color: 'var(--text-faint)' }}>Agent-suggested name — edit if you'd like</p>
             )}
           </div>
 
@@ -157,24 +171,24 @@ export default function DeviceRegistrationModal({
           <div className="grid grid-cols-2 gap-3">
             {/* IP Address */}
             <div>
-              <label className="text-xs font-body font-semibold text-slate-400 block mb-1">
+              <label className="text-xs font-body font-semibold block mb-1" style={{ color: 'var(--text-secondary)' }}>
                 <Network size={11} className="inline mr-1" />
                 IP Address
               </label>
-              <div className="px-3 py-2 rounded-lg bg-surface-3 border text-slate-300 text-sm font-mono"
-                style={{ borderColor: 'var(--border-subtle)' }}>
+              <div className="px-3 py-2 rounded-lg border text-sm font-mono"
+                style={{ background: 'var(--bg-input)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}>
                 {device.ip_address || 'Unknown'}
               </div>
             </div>
 
             {/* MAC Address */}
             <div>
-              <label className="text-xs font-body font-semibold text-slate-400 block mb-1">
+              <label className="text-xs font-body font-semibold block mb-1" style={{ color: 'var(--text-secondary)' }}>
                 <HardDrive size={11} className="inline mr-1" />
                 MAC Address
               </label>
-              <div className="px-3 py-2 rounded-lg bg-surface-3 border text-slate-300 text-sm font-mono truncate"
-                style={{ borderColor: 'var(--border-subtle)' }}
+              <div className="px-3 py-2 rounded-lg border text-sm font-mono truncate"
+                style={{ background: 'var(--bg-input)', borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
                 title={device.mac_address}>
                 {device.mac_address || 'N/A'}
               </div>
@@ -182,12 +196,12 @@ export default function DeviceRegistrationModal({
 
             {/* OS Type */}
             <div>
-              <label className="text-xs font-body font-semibold text-slate-400 block mb-1">
+              <label className="text-xs font-body font-semibold block mb-1" style={{ color: 'var(--text-secondary)' }}>
                 <Server size={11} className="inline mr-1" />
                 OS Type
               </label>
-              <div className={`px-3 py-2 rounded-lg bg-surface-3 border text-sm font-mono flex items-center gap-1.5 ${device.os_type ? 'text-slate-300' : 'text-slate-600 italic'}`}
-                style={{ borderColor: 'var(--border-subtle)' }}>
+              <div className="px-3 py-2 rounded-lg border text-sm font-mono flex items-center gap-1.5"
+                style={{ background: 'var(--bg-input)', borderColor: 'var(--border-subtle)', color: device.os_type ? 'var(--text-primary)' : 'var(--text-faint)' }}>
                 {device.os_type === 'windows' ? (
                   <span className="inline-flex items-center gap-1 text-sky-400"><Server size={10} /> Windows</span>
                 ) : device.os_type === 'linux' ? (
@@ -198,20 +212,20 @@ export default function DeviceRegistrationModal({
 
             {/* Device ID */}
             <div>
-              <label className="text-xs font-body font-semibold text-slate-400 block mb-1">
+              <label className="text-xs font-body font-semibold block mb-1" style={{ color: 'var(--text-secondary)' }}>
                 Device ID
               </label>
               <button
                 onClick={handleCopyDeviceId}
-                className="w-full px-3 py-2 rounded-lg bg-surface-3 border text-slate-400 text-xs font-mono text-left hover:bg-surface-2 transition-colors flex items-center justify-between group"
-                style={{ borderColor: 'var(--border-subtle)' }}
+                className="w-full px-3 py-2 rounded-lg border text-xs font-mono text-left transition-colors flex items-center justify-between group"
+                style={{ background: 'var(--bg-input)', borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}
                 title="Click to copy"
               >
                 <span className="truncate">{device.device_id?.slice(0, 12)}…</span>
                 {copied ? (
                   <CheckIcon size={12} className="text-accent-green shrink-0" />
                 ) : (
-                  <Copy size={12} className="text-slate-600 group-hover:text-slate-400 shrink-0" />
+                  <Copy size={12} style={{ color: 'var(--text-faint)' }} className="group-hover:opacity-70 shrink-0" />
                 )}
               </button>
             </div>
@@ -219,7 +233,7 @@ export default function DeviceRegistrationModal({
 
           {/* Info note */}
           <div className="bg-brand-500/5 border border-brand-500/20 rounded-lg p-3">
-            <p className="text-xs font-body text-slate-400">
+            <p className="text-xs font-body" style={{ color: 'var(--text-secondary)' }}>
               <span className="font-semibold text-brand-400">Note:</span> After approval, you can configure SSH credentials in the Devices page for remote access.
             </p>
           </div>
@@ -231,7 +245,8 @@ export default function DeviceRegistrationModal({
           <button
             onClick={handleReject}
             disabled={approving || rejecting}
-            className="flex-1 px-4 py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-body transition-all hover:border-accent-red hover:text-accent-red hover:bg-accent-red/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            className="flex-1 px-4 py-2 rounded-lg border text-sm font-body transition-all hover:border-accent-red hover:text-accent-red hover:bg-accent-red/5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            style={{ borderColor: 'var(--border-mid)', color: 'var(--text-secondary)' }}
           >
             {rejecting ? (
               <>

@@ -72,17 +72,17 @@ export default function ScheduleModal({ open, onClose, onSaved, schedule, device
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       <div className="relative z-10 w-full max-w-lg animate-slide-up" onClick={e => e.stopPropagation()}>
-        <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+        <div className="glass rounded-2xl border overflow-hidden" style={{ borderColor: 'var(--border-subtle)' }}>
           <div className="h-0.5 bg-accent-purple opacity-60" />
 
-          <div className="flex items-center justify-between px-6 py-5 border-b border-white/6">
+          <div className="flex items-center justify-between px-6 py-5 border-b" style={{ borderColor: 'var(--border-subtle)' }}>
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-lg bg-accent-purple/15 border border-accent-purple/25 flex items-center justify-center">
                 <Clock size={16} className="text-accent-purple" />
               </div>
-              <h3 className="font-display text-white">{schedule ? 'Edit Schedule' : 'New Schedule'}</h3>
+              <h3 className="font-display" style={{ color: 'var(--text-primary)' }}>{schedule ? 'Edit Schedule' : 'New Schedule'}</h3>
             </div>
-            <button onClick={onClose} className="text-slate-500 hover:text-slate-300 p-1"><X size={16} /></button>
+            <button onClick={onClose} className="p-1" style={{ color: 'var(--text-muted)' }}><X size={16} /></button>
           </div>
 
           <div className="p-6 grid grid-cols-2 gap-4 max-h-[70vh] overflow-y-auto">
@@ -127,8 +127,10 @@ export default function ScheduleModal({ open, onClose, onSaved, schedule, device
                     className={`text-xs py-2 px-2 rounded-lg font-body border transition-all ${
                       (p.value !== 'custom' && form.cron_expression === p.value) || (p.value === 'custom' && customCron)
                         ? 'bg-accent-purple/15 border-accent-purple/40 text-accent-purple'
-                        : 'bg-surface-3 border-white/8 text-slate-400 hover:text-slate-200'
+                        : ''
                     }`}
+                    style={!((p.value !== 'custom' && form.cron_expression === p.value) || (p.value === 'custom' && customCron))
+                      ? { background: 'var(--bg-surface-3)', borderColor: 'var(--border-mid)', color: 'var(--text-muted)' } : {}}
                   >
                     {p.label}
                   </button>
@@ -141,12 +143,12 @@ export default function ScheduleModal({ open, onClose, onSaved, schedule, device
                 <label className="label">Cron Expression</label>
                 <input className="input-field" placeholder="0 8 * * 1-5"
                   value={form.cron_expression} onChange={e => set('cron_expression', e.target.value)} />
-                <p className="text-xs text-slate-500 mt-1 font-mono">minute hour day month weekday</p>
+                <p className="text-xs mt-1 font-mono" style={{ color: 'var(--text-muted)' }}>minute hour day month weekday</p>
               </div>
             )}
 
             {!customCron && form.cron_expression && (
-              <div className="col-span-2 px-3 py-2 rounded-lg bg-surface-3 border border-white/6">
+              <div className="col-span-2 px-3 py-2 rounded-lg border" style={{ background: 'var(--bg-surface-3)', borderColor: 'var(--border-subtle)' }}>
                 <p className="text-xs font-mono text-accent-purple">{form.cron_expression}</p>
               </div>
             )}
@@ -157,8 +159,8 @@ export default function ScheduleModal({ open, onClose, onSaved, schedule, device
                 value={form.notes} onChange={e => set('notes', e.target.value)} />
             </div>
 
-            <div className="col-span-2 flex items-center justify-between px-3 py-2.5 rounded-lg bg-surface-3 border border-white/6">
-              <span className="text-sm font-body text-slate-300">Enable schedule immediately</span>
+            <div className="col-span-2 flex items-center justify-between px-3 py-2.5 rounded-lg border" style={{ background: 'var(--bg-surface-3)', borderColor: 'var(--border-subtle)' }}>
+              <span className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>Enable schedule immediately</span>
               <button
                 onClick={() => set('enabled', !form.enabled)}
                 className={`w-10 h-5 rounded-full transition-all duration-200 relative ${form.enabled ? 'bg-accent-purple' : 'bg-surface-5'}`}
