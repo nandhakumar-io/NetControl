@@ -825,8 +825,28 @@ run()
     }
     console.log('\n✅ All done.\n');
   })
-  .then(() => process.exit(0))  // Always exit — don't let pool timers hang node
+  .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node
   .catch(err => {
-    console.error('\n❌ Migration failed:', err.message, '\n');
-    process.exit(1);
+    // Log the full stack, not just .message — some driver/network errors
+    // (auth failures, connection resets) carry most of the useful detail
+    // in .code/.errno rather than .message.
+    console.error('\n❌ Migration failed:', err && err.stack ? err.stack : err, '\n');
+    exitWhenFlushed(1);
   });
+
+// process.exit() is synchronous and does NOT wait for pending writes to
+// stdout/stderr to actually reach the OS. When stdout is a TTY that's fine
+// (writes are synchronous), but under Docker stdout is a pipe, where Node's
+// writes are asynchronous — so process.exit() can (and did, here) truncate
+// or entirely drop buffered console.log/console.error output, including
+// the error message that would explain *why* the migration failed. Wait
+// for both streams to drain before exiting.
+function exitWhenFlushed(code) {
+  process.exitCode = code;
+  let pending = 2;
+  const done = () => { if (--pending === 0) process.exit(code); };
+  if (process.stdout.writableLength === 0) done(); else process.stdout.once('drain', done);
+  if (process.stderr.writableLength === 0) done(); else process.stderr.once('drain', done);
+  // Safety net in case neither stream ever fires 'drain' (e.g. already flushed)
+  setTimeout(() => process.exit(code), 2000).unref();
+}

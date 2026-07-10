@@ -22,6 +22,7 @@ async function getConn() {
     user:     process.env.DB_USER     || 'netcontrol',
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME     || 'netcontrol',
+    multipleStatements: true,
     timezone: '+00:00',
   });
 }
