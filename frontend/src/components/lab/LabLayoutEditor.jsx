@@ -9,6 +9,7 @@
 import React, { useState, useMemo } from 'react'
 import {
   X, Save, Plus, Trash2, Minus, LayoutGrid, UserRound, MonitorX, Loader2, Columns3,
+  Wand2, GripVertical,
 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
@@ -132,6 +133,87 @@ export default function LabLayoutEditor({ group, devices, onClose, onSaved }) {
     setSeatMap(m => { const next = { ...m }; delete next[seatKey(row, col)]; return next })
   }
 
+  // ── Drag and drop ─────────────────────────────────────────────────────
+  // Two draggable sources: an unseated chip, or an already-seated device
+  // (dragged straight off its seat). Two drop targets: a seat cell (assign,
+  // or swap if the target seat is already occupied), or the "Not yet
+  // seated" tray (unseats whatever was dragged in). Click-to-assign via
+  // the picker modal still works unchanged — drag is additive, not a
+  // replacement, since touch devices don't get HTML5 DnD for free.
+  const [dragPayload, setDragPayload] = useState(null) // { type: 'seat'|'unseated', row?, col?, deviceId }
+  const [dragOverKey, setDragOverKey] = useState(null) // seatKey currently hovered, or 'tray'
+
+  const startDragFromSeat = (row, col, deviceId) => (e) => {
+    setDragPayload({ type: 'seat', row, col, deviceId })
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', deviceId) // Firefox needs real data set to allow the drag
+  }
+  const startDragFromTray = (deviceId) => (e) => {
+    setDragPayload({ type: 'unseated', deviceId })
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', deviceId)
+  }
+  const endDrag = () => { setDragPayload(null); setDragOverKey(null) }
+
+  const allowDrop = (key) => (e) => { e.preventDefault(); setDragOverKey(key) }
+  const clearDragOver = (key) => () => { setDragOverKey(prev => prev === key ? null : prev) }
+
+  const dropOnSeat = (row, col) => (e) => {
+    e.preventDefault()
+    const payload = dragPayload
+    endDrag()
+    if (!payload) return
+    const targetKey = seatKey(row, col)
+
+    setSeatMap(m => {
+      const next = { ...m }
+      if (payload.type === 'seat') {
+        const sourceKey = seatKey(payload.row, payload.col)
+        if (sourceKey === targetKey) return m
+        const displaced = next[targetKey] // device currently sitting in the target seat, if any
+        delete next[sourceKey]
+        next[targetKey] = payload.deviceId
+        if (displaced) next[sourceKey] = displaced // true swap — the displaced device takes the vacated seat
+      } else {
+        next[targetKey] = payload.deviceId // overwrite is enough: any previous occupant just falls out of the map's values and shows up in "Not yet seated" again
+      }
+      return next
+    })
+  }
+
+  const dropOnTray = (e) => {
+    e.preventDefault()
+    const payload = dragPayload
+    endDrag()
+    if (!payload || payload.type !== 'seat') return // dragging an already-unseated chip onto the tray is a no-op
+    clearSeat(payload.row, payload.col)
+  }
+
+  // Bonus: seat every unseated device into the next empty seats in reading
+  // order (row by row, left to right) — handy for quickly populating a
+  // freshly-resized grid instead of dragging each device one at a time.
+  const autoFill = () => {
+    const emptySeats = []
+    rows.forEach((row, rowIdx) => {
+      let running = 0
+      row.blocks.forEach(block => {
+        for (let i = 0; i < block.cols; i++) {
+          const col = running + i
+          if (!seatMap[seatKey(rowIdx, col)]) emptySeats.push([rowIdx, col])
+        }
+        running += block.cols
+      })
+    })
+    if (!emptySeats.length || !unseated.length) return
+    setSeatMap(m => {
+      const next = { ...m }
+      unseated.slice(0, emptySeats.length).forEach((d, i) => {
+        next[seatKey(emptySeats[i][0], emptySeats[i][1])] = d.id
+      })
+      return next
+    })
+  }
+
   // ── Save ──────────────────────────────────────────────────────────────
   const save = async () => {
     setSaving(true)
@@ -166,11 +248,19 @@ export default function LabLayoutEditor({ group, devices, onClose, onSaved }) {
               Lab Layout — {group.name}
             </h3>
             <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              {Object.keys(seatMap).length} seated · {unseated.length} unseated
+              {Object.keys(seatMap).length} seated · {unseated.length} unseated · drag a device onto a seat, or click an empty one
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {unseated.length > 0 && (
+            <button onClick={autoFill}
+              title="Seat every unseated device into the next empty seats, row by row"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all"
+              style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}>
+              <Wand2 size={13} /> Auto-fill
+            </button>
+          )}
           <button onClick={save} disabled={saving}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all disabled:opacity-50"
             style={{ background: '#a855f7', color: '#fff' }}>
@@ -205,12 +295,23 @@ export default function LabLayoutEditor({ group, devices, onClose, onSaved }) {
           {rows.map((row, rowIdx) => {
             let running = 0 // running seat-column offset across blocks, for global col indexing
             return (
-              <div key={rowIdx} className="rounded-xl p-4" style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)' }}>
+              <div key={rowIdx} className="rounded-xl p-4 transition-all" style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)' }}>
                 {/* Row toolbar */}
                 <div className="flex flex-wrap items-center gap-3 mb-3">
                   <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-faint)' }}>
                     Row {rowIdx + 1}
                   </span>
+                  {(() => {
+                    const totalCols = row.blocks.reduce((s, b) => s + b.cols, 0)
+                    let seatedInRow = 0
+                    for (let c = 0; c < totalCols; c++) if (seatMap[seatKey(rowIdx, c)]) seatedInRow++
+                    return (
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                        style={{ background: 'var(--bg-surface-2)', color: seatedInRow ? '#c084fc' : 'var(--text-faint)' }}>
+                        {seatedInRow}/{totalCols}
+                      </span>
+                    )
+                  })()}
                   <label className="flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
                     Seat gap
                     <input type="number" min={0} max={200} value={row.gap}
@@ -275,19 +376,35 @@ export default function LabLayoutEditor({ group, devices, onClose, onSaved }) {
                         <div className="flex" style={{ gap: `${row.gap}px` }}>
                           {Array.from({ length: block.cols }).map((_, localIdx) => {
                             const col = startCol + localIdx
-                            const deviceId = seatMap[seatKey(rowIdx, col)]
+                            const key = seatKey(rowIdx, col)
+                            const deviceId = seatMap[key]
                             const device = deviceId ? deviceById[deviceId] : null
                             const online = device?.status === 'online'
+                            const isDragOver = dragOverKey === key
+                            const isDraggingThis = dragPayload?.type === 'seat' && dragPayload.row === rowIdx && dragPayload.col === col
                             return (
                               <button key={col}
+                                draggable={!!device}
+                                onDragStart={device ? startDragFromSeat(rowIdx, col, deviceId) : undefined}
+                                onDragEnd={endDrag}
+                                onDragOver={allowDrop(key)}
+                                onDragLeave={clearDragOver(key)}
+                                onDrop={dropOnSeat(rowIdx, col)}
                                 onClick={() => device ? clearSeat(rowIdx, col) : setPickerSeat({ row: rowIdx, col })}
-                                title={device ? `${device.name} — click to unseat` : `Row ${rowIdx + 1}, Seat ${col + 1} — click to assign`}
-                                className="w-11 h-11 rounded-t-lg flex flex-col items-center justify-center text-[9px] font-mono font-semibold transition-all shrink-0"
+                                title={device ? `${device.name} — click to unseat, or drag onto another seat` : `Row ${rowIdx + 1}, Seat ${col + 1} — click to assign, or drag a device here`}
+                                className="relative w-11 h-11 rounded-t-lg flex flex-col items-center justify-center text-[9px] font-mono font-semibold transition-all shrink-0"
                                 style={{
-                                  background: device ? (online ? 'rgba(34,197,94,0.12)' : 'rgba(148,163,184,0.12)') : 'var(--bg-surface-2)',
-                                  border: `1.5px solid ${device ? (online ? 'rgba(34,197,94,0.4)' : 'var(--border-mid)') : 'var(--border-subtle)'}`,
+                                  background: isDragOver
+                                    ? 'rgba(168,85,247,0.22)'
+                                    : device ? (online ? 'rgba(34,197,94,0.12)' : 'rgba(148,163,184,0.12)') : 'var(--bg-surface-2)',
+                                  border: `1.5px ${isDragOver ? 'dashed' : 'solid'} ${isDragOver
+                                    ? '#a855f7'
+                                    : device ? (online ? 'rgba(34,197,94,0.4)' : 'var(--border-mid)') : 'var(--border-subtle)'}`,
                                   borderBottom: device ? `3px solid ${online ? '#22c55e' : '#64748b'}` : '3px solid var(--border-subtle)',
                                   color: device ? (online ? '#22c55e' : 'var(--text-muted)') : 'var(--text-faint)',
+                                  opacity: isDraggingThis ? 0.35 : 1,
+                                  cursor: device ? 'grab' : 'pointer',
+                                  transform: isDragOver ? 'scale(1.08)' : 'scale(1)',
                                 }}>
                                 {device
                                   ? <span className="truncate max-w-[38px] px-0.5">{device.name.slice(0, 6)}</span>
@@ -306,20 +423,38 @@ export default function LabLayoutEditor({ group, devices, onClose, onSaved }) {
           })}
         </div>
 
-        {/* Unseated devices */}
+        {/* Unseated devices — also a drop zone: drag a seated device here to unseat it */}
         {unseated.length > 0 && (
-          <div>
+          <div
+            onDragOver={allowDrop('tray')}
+            onDragLeave={clearDragOver('tray')}
+            onDrop={dropOnTray}
+            className="rounded-xl p-3 transition-all"
+            style={{
+              background: dragOverKey === 'tray' ? 'rgba(168,85,247,0.08)' : 'transparent',
+              border: `1.5px dashed ${dragOverKey === 'tray' ? '#a855f7' : 'transparent'}`,
+            }}>
             <div className="flex items-center gap-2 mb-2">
               <MonitorX size={12} style={{ color: 'var(--text-faint)' }} />
               <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-faint)' }}>
                 Not yet seated
               </span>
+              <span className="text-[10px]" style={{ color: 'var(--text-faint)' }}>— drag onto a seat, or drop a seat's device here to unseat it</span>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {unseated.map(d => (
-                <span key={d.id} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-mono"
-                  style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${d.status === 'online' ? 'bg-accent-green' : 'bg-slate-600'}`} />
+                <span key={d.id}
+                  draggable
+                  onDragStart={startDragFromTray(d.id)}
+                  onDragEnd={endDrag}
+                  className="inline-flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-lg text-[10px] font-mono transition-all"
+                  style={{
+                    background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)',
+                    cursor: 'grab',
+                    opacity: dragPayload?.type === 'unseated' && dragPayload.deviceId === d.id ? 0.35 : 1,
+                  }}>
+                  <GripVertical size={10} style={{ color: 'var(--text-faint)' }} />
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${d.status === 'online' ? 'bg-accent-green' : 'bg-slate-600'}`} />
                   {d.name}
                 </span>
               ))}
