@@ -142,7 +142,7 @@ async function migrateOrgs() {
 
     // ── org_id columns on existing tenant-scoped tables ─────────────────────
     await addColumnIfMissing(conn, 'devices',     'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_devices_org (org_id)');
-    await addColumnIfMissing(conn, '`groups`',    'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_groups_org (org_id)');
+    await addColumnIfMissing(conn, 'groups',      'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_groups_org (org_id)');
     await addColumnIfMissing(conn, 'schedules',   'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_schedules_org (org_id)');
     await addColumnIfMissing(conn, 'audit_log',   'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_audit_org (org_id)');
     if (await tableExists(conn, 'alert_rules')) {
