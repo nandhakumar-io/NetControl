@@ -15,9 +15,12 @@ const audit = require('../services/audit');
 const router = express.Router();
 router.use(requireAuth, requireOrgContext);
 
-// Reuses the same manage_process_policies-style gate as other "this can run
-// arbitrary commands on end-user machines" features — admin only by default.
-const requireManageRunbooks = requirePermission(4096);
+// Its own permission bit — deliberately NOT the same as
+// manage_process_policies (4096). Runbooks let an alert automatically run
+// arbitrary shell/PowerShell commands on a device, unattended; that's a
+// meaningfully bigger blast radius than process-policy management, so
+// granting one should never silently grant the other.
+const requireManageRunbooks = requirePermission(32768);
 
 async function loadDevice(id) {
   const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);

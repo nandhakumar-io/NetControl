@@ -138,4 +138,4 @@ router.delete('/:id', requireManageGroups, param('id').isUUID(), async (req, res
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-module.exports = router;1
+module.exports = router;

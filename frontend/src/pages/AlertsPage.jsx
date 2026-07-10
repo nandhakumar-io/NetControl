@@ -5,12 +5,13 @@ import {
   AlertTriangle, CheckCircle2, Info, Cpu, HardDrive,
   WifiOff, Clock, RefreshCw, Power, RotateCcw, Activity,
   ToggleLeft, ToggleRight, List, Filter, ChevronDown,
-  Shield, TrendingUp, Zap, Search, Calendar, MemoryStick
+  Shield, TrendingUp, Zap, Search, Calendar, MemoryStick, Wrench
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import { useThemeStore } from '../store/themeStore'
 import PageHeader from '../components/ui/PageHeader'
+import { Link } from 'react-router-dom'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const METRICS = [
@@ -38,6 +39,7 @@ const EMPTY = {
   name:'', metric:'cpu', operator:'gt', threshold:90,
   severity:'warning', device_id:null, actions:['notify'],
   notify_admins:true, cooldown_sec:300, enabled:true,
+  runbook_action_ids: [],
 }
 
 // ── Tiny helpers ──────────────────────────────────────────────────────────────
@@ -82,13 +84,19 @@ function Toggle({ on, onChange }) {
 function RuleModal({ open, onClose, onSaved, rule, devices }) {
   const [form, setForm]   = useState(EMPTY)
   const [saving, setSaving] = useState(false)
+  const [runbooks, setRunbooks] = useState([])
 
   useEffect(() => {
-    if (open) setForm(rule ? {...EMPTY,...rule, actions:rule.actions||['notify']} : EMPTY)
+    if (open) setForm(rule ? {...EMPTY,...rule, actions:rule.actions||['notify'], runbook_action_ids: rule.runbook_action_ids || []} : EMPTY)
   }, [open, rule])
+
+  useEffect(() => {
+    if (open) api.get('/runbooks').then(({ data }) => setRunbooks(data)).catch(() => setRunbooks([]))
+  }, [open])
 
   const set = (k,v) => setForm(f=>({...f,[k]:v}))
   const toggleAct = (a) => setForm(f=>({...f, actions: f.actions.includes(a)?f.actions.filter(x=>x!==a):[...f.actions,a]}))
+  const toggleRunbook = (id) => setForm(f=>({...f, runbook_action_ids: f.runbook_action_ids.includes(id)?f.runbook_action_ids.filter(x=>x!==id):[...f.runbook_action_ids,id]}))
 
   const save = async () => {
     if (!form.name.trim()) return toast.error('Name is required')
@@ -222,6 +230,34 @@ function RuleModal({ open, onClose, onSaved, rule, devices }) {
                   )
                 })}
               </div>
+            </div>
+
+            {/* Runbooks — reusable auto-remediation scripts, in addition to
+                the built-in shutdown/restart actions above. Empty state
+                links to the Runbooks page since there's nothing to pick
+                from until at least one exists. */}
+            <div>
+              <label className={lbl}>Runbooks on Trigger</label>
+              {runbooks.length === 0 ? (
+                <p className="text-xs text-slate-500 mt-1">
+                  No runbooks yet. <Link to="/runbooks" className="text-brand-400 hover:underline">Create one</Link> to run custom remediation commands automatically.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {runbooks.map(rb => {
+                    const on = form.runbook_action_ids.includes(rb.id)
+                    return (
+                      <button key={rb.id} type="button" onClick={()=>toggleRunbook(rb.id)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all"
+                        style={on
+                          ? {background:'rgba(124,92,245,0.12)',borderColor:'rgba(167,139,250,0.35)',color:'#c4b5fd'}
+                          : {background:'transparent',borderColor:'var(--border-subtle)',color:'var(--text-muted)'}}>
+                        <Wrench size={11} /> {rb.name}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Options */}
@@ -488,6 +524,12 @@ export default function AlertsPage() {
                             </span>
                           )
                         })}
+                        {(rule.runbook_action_ids||[]).length > 0 && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium"
+                            style={{ background: 'rgba(124,92,245,0.08)', border: '1px solid rgba(167,139,250,0.2)', color: '#c4b5fd' }}>
+                            <Wrench size={9} /> {rule.runbook_action_ids.length} runbook{rule.runbook_action_ids.length !== 1 ? 's' : ''}
+                          </span>
+                        )}
                       </div>
                     </div>
 

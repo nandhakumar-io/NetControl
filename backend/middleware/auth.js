@@ -156,6 +156,13 @@ function requireRole(...roles) {
  *                                reasoning as discover_network/compliance:
  *                                this reads arbitrary files under the
  *                                sanctioned tree and writes to disk)
+ *   32768 - manage_runbooks    (create/edit/test auto-remediation runbooks
+ *                                that alert rules can trigger to run
+ *                                arbitrary commands on a device UNATTENDED
+ *                                — admin only by convention; deliberately
+ *                                its own bit rather than reusing
+ *                                manage_process_policies, since granting one
+ *                                should not silently grant the other)
  *
  * Admins always pass; operators pass bits 1|4|8|32; viewers pass 1|8|32|128.
  */

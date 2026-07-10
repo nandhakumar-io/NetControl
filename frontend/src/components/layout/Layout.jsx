@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck,
-  ShieldBan, Archive, FileBarChart2,
+  ShieldBan, Archive, FileBarChart2, Wrench, Building2,
   ChevronRight as ArrowIcon
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
@@ -13,6 +13,7 @@ import { usePermissions } from '../../hooks/usePermissions'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import TwoFactorModal from '../modals/TwoFactorModal'
+import OrgSwitcher from './OrgSwitcher'
 
 // ── Notification bell — SSE listener only, no nav ─────────────────────────────
 // This component handles LIVE notifications (toasts + badge count).
@@ -186,6 +187,7 @@ export default function Layout() {
       label: null, // ungrouped, always-visible top item
       items: [
         { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', show: true },
+        { to: '/organizations', icon: Building2, label: 'Organizations', show: true },
       ],
     },
     {
@@ -210,6 +212,7 @@ export default function Layout() {
       items: [
         { to: '/schedules',        icon: Clock,     label: 'Schedules',     show: can(32) },
         { to: '/process-policies', icon: ShieldBan, label: 'Process Rules', show: can(4096) },
+        { to: '/runbooks',         icon: Wrench,    label: 'Runbooks',      show: can(1) },
         { to: '/backups',          icon: Archive,   label: 'Backups',       show: can(8192) },
       ],
     },
@@ -367,6 +370,11 @@ export default function Layout() {
 
           {/* Notification bell — live alerts badge, dropdown for quick view */}
           <NotificationBell collapsed={collapsed} isLight={isLight} />
+
+          {/* Organization switcher — multi-tenant "switch client" dropdown.
+              Backend (routes/orgs.js) has supported this since multi-tenancy
+              was added; this was the only piece missing. */}
+          <OrgSwitcher collapsed={collapsed} isLight={isLight} />
 
           {/* Theme toggle */}
           <button
