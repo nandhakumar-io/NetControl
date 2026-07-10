@@ -61,6 +61,14 @@ async function addColumnIfMissing(conn, table, col, ddl) {
   }
 }
 
+async function indexExists(conn, table, indexName) {
+  const [r] = await conn.query(
+    `SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? LIMIT 1`,
+    [table, indexName]
+  );
+  return r.length > 0;
+}
+
 async function migrateOrgs() {
   const conn = await getConn();
   try {
@@ -143,6 +151,26 @@ async function migrateOrgs() {
     // ── org_id columns on existing tenant-scoped tables ─────────────────────
     await addColumnIfMissing(conn, 'devices',     'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_devices_org (org_id)');
     await addColumnIfMissing(conn, 'groups',      'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_groups_org (org_id)');
+
+    // BUG FIX: `groups.name` was created (see migrate.js) as a plain
+    // column-level UNIQUE — i.e. globally unique across ALL orgs, not just
+    // within one. Before multi-tenancy this was correct (there was only
+    // ever one tenant); after org_id was added above, it means Org A can
+    // never create a group named the same as one Org B already has — and,
+    // worse, an orphaned/leftover group from a deleted org (see the org
+    // DELETE cascade fix) permanently blocks that name for every other org
+    // forever, surfacing as a confusing "Group name already exists" on a
+    // completely fresh org. Drop the old global index, replace it with a
+    // composite UNIQUE(org_id, name) so uniqueness is scoped per-tenant,
+    // matching how every other org-scoped table already behaves.
+    if (await indexExists(conn, 'groups', 'name')) {
+      await conn.query('ALTER TABLE `groups` DROP INDEX `name`');
+      console.log('  - groups: dropped global UNIQUE(name)');
+    }
+    if (!(await indexExists(conn, 'groups', 'uq_groups_org_name'))) {
+      await conn.query('ALTER TABLE `groups` ADD UNIQUE INDEX uq_groups_org_name (org_id, name)');
+      console.log('  + groups: added UNIQUE(org_id, name)');
+    }
     await addColumnIfMissing(conn, 'schedules',   'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_schedules_org (org_id)');
     await addColumnIfMissing(conn, 'audit_log',   'org_id', 'org_id CHAR(36) DEFAULT NULL, ADD INDEX idx_audit_org (org_id)');
     if (await tableExists(conn, 'alert_rules')) {

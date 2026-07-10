@@ -438,10 +438,21 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
         delete payload.winrm_username
         delete payload.winrm_password
       } else {
-        payload.ssh_username = payload.winrm_username
-        if (payload.ssh_password === undefined && payload.winrm_password)
-          payload.ssh_password = payload.winrm_password
+        // BUG FIX: this used to write the WinRM creds into ssh_username/
+        // ssh_password — the wrong columns. The backend stores Windows/RPC
+        // credentials in rpc_username/rpc_password (see routes/devices.js);
+        // ssh_username/ssh_password are Linux-only. Devices added or edited
+        // as Windows through this form therefore had their real WinRM
+        // credentials silently discarded — rpc_username/rpc_password stayed
+        // NULL, while the typed-in values sat unused under ssh_* — breaking
+        // anything that runs Windows remote actions using those creds.
+        payload.rpc_username = payload.winrm_username
+        if (payload.winrm_password) payload.rpc_password = payload.winrm_password
+        delete payload.ssh_username
+        delete payload.ssh_password
         delete payload.ssh_key
+        delete payload.winrm_username
+        delete payload.winrm_password
       }
 
       if (device) {

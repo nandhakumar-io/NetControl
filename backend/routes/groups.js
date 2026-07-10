@@ -54,7 +54,7 @@ router.get('/:id/devices', param('id').isUUID(), async (req, res) => {
       if (!access) return res.status(403).json({ error: 'Access denied to this group' });
     }
     const devices = await query(
-      'SELECT id, name, ip_address, mac_address, os_type, group_id, status, last_seen, created_at FROM devices WHERE group_id = ? AND org_id = ? ORDER BY name',
+      'SELECT id, name, ip_address, mac_address, os_type, group_id, status, last_seen, created_at, seat_row, seat_col FROM devices WHERE group_id = ? AND org_id = ? ORDER BY name',
       [req.params.id, req.orgId]
     );
     res.json(devices);
@@ -137,5 +137,107 @@ router.delete('/:id', requireManageGroups, param('id').isUUID(), async (req, res
     res.json({ message: 'Group deleted' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// PUT /api/groups/:id/layout — save a "lab" group's theater-style seat
+// layout (per-row column counts + gaps) and which device sits in which
+// seat. Re-saving always replaces the full layout + seat assignments for
+// this group in one transaction-like pass, rather than patching — the
+// editor always sends its complete current state, so partial updates would
+// just be a source of drift between what's shown and what's stored.
+router.put('/:id/layout',
+  requireManageGroups,
+  param('id').isUUID(),
+  async (req, res) => {
+    if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+    try {
+      const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+      if (!group) return res.status(404).json({ error: 'Group not found' });
+
+      const { isLab = true, rowGap = 24, rows = [], seats = [] } = req.body;
+
+      // ── Validate layout shape ─────────────────────────────────────────
+      // Each row is made of one or more BLOCKS (theater-style sections),
+      // e.g. "left block: 6 seats | aisle | center block: 10 seats | aisle
+      // | right block: 6 seats". `col` in a seat assignment is still just
+      // the flat 0-based seat index reading left-to-right across the whole
+      // row (blocks only affect visual grouping/gaps), so storage and the
+      // seat-bounds check below don't need to know about block boundaries
+      // — only the row's total seat count.
+      if (!Array.isArray(rows) || rows.length > 50)
+        return res.status(400).json({ error: 'rows must be an array of at most 50 rows' });
+      for (const r of rows) {
+        if (!Array.isArray(r?.blocks) || r.blocks.length < 1 || r.blocks.length > 20)
+          return res.status(400).json({ error: 'each row must have between 1 and 20 blocks' });
+        for (const b of r.blocks) {
+          const cols = Number(b?.cols);
+          if (!Number.isInteger(cols) || cols < 1 || cols > 100)
+            return res.status(400).json({ error: 'each block.cols must be an integer between 1 and 100' });
+        }
+        const gap = Number(r?.gap), blockGap = Number(r?.blockGap);
+        if (!Number.isFinite(gap) || gap < 0 || gap > 200)
+          return res.status(400).json({ error: 'each row.gap (within-block seat gap) must be between 0 and 200' });
+        if (!Number.isFinite(blockGap) || blockGap < 0 || blockGap > 400)
+          return res.status(400).json({ error: 'each row.blockGap (aisle gap) must be between 0 and 400' });
+      }
+      const rowGapNum = Number(rowGap);
+      if (!Number.isFinite(rowGapNum) || rowGapNum < 0 || rowGapNum > 200)
+        return res.status(400).json({ error: 'rowGap must be between 0 and 200' });
+
+      const rowTotalCols = (r) => r.blocks.reduce((sum, b) => sum + Number(b.cols), 0);
+
+      // ── Validate seat assignments against the row/col bounds above and
+      //    against real devices that actually belong to this group ───────
+      if (!Array.isArray(seats)) return res.status(400).json({ error: 'seats must be an array' });
+      const seen = new Set();
+      for (const s of seats) {
+        const row = Number(s?.row), col = Number(s?.col);
+        if (!Number.isInteger(row) || row < 0 || row >= rows.length)
+          return res.status(400).json({ error: `seat row ${s?.row} is out of range for this layout` });
+        if (!Number.isInteger(col) || col < 0 || col >= rowTotalCols(rows[row]))
+          return res.status(400).json({ error: `seat col ${s?.col} is out of range for row ${row}` });
+        if (!s?.deviceId) return res.status(400).json({ error: 'each seat needs a deviceId' });
+        const key = `${row}:${col}`;
+        if (seen.has(key)) return res.status(400).json({ error: `seat ${key} is assigned more than once` });
+        seen.add(key);
+      }
+      if (seats.length) {
+        const deviceIds = seats.map(s => s.deviceId);
+        const placeholders = deviceIds.map(() => '?').join(',');
+        const owned = await query(
+          `SELECT id FROM devices WHERE id IN (${placeholders}) AND group_id = ? AND org_id = ?`,
+          [...deviceIds, req.params.id, req.orgId]
+        );
+        if (owned.length !== new Set(deviceIds).size)
+          return res.status(400).json({ error: 'one or more seats reference a device not in this group' });
+      }
+
+      await execute(
+        'UPDATE `groups` SET is_lab = ?, layout_config = ? WHERE id = ? AND org_id = ?',
+        [isLab ? 1 : 0, JSON.stringify({ rowGap: rowGapNum, rows }), req.params.id, req.orgId]
+      );
+
+      // Clear every existing seat in this group, then re-apply exactly what
+      // was submitted — see comment above on why this is a full replace.
+      await execute('UPDATE devices SET seat_row = NULL, seat_col = NULL WHERE group_id = ? AND org_id = ?',
+        [req.params.id, req.orgId]);
+      for (const s of seats) {
+        await execute('UPDATE devices SET seat_row = ?, seat_col = ? WHERE id = ? AND group_id = ? AND org_id = ?',
+          [s.row, s.col, s.deviceId, req.params.id, req.orgId]);
+      }
+
+      await audit.log({ userId: req.user.id, username: req.user.username,
+        action: 'update_group_layout', targetType: 'group', targetId: req.params.id,
+        targetName: group.name, ipSource: req.realIp, result: 'success',
+        details: `${rows.length} row(s), ${seats.length} seat(s) assigned` });
+
+      const updatedGroup = await queryOne('SELECT * FROM `groups` WHERE id = ?', [req.params.id]);
+      const devices = await query(
+        'SELECT id, name, ip_address, mac_address, os_type, group_id, status, last_seen, created_at, seat_row, seat_col FROM devices WHERE group_id = ? AND org_id = ? ORDER BY name',
+        [req.params.id, req.orgId]
+      );
+      res.json({ group: updatedGroup, devices });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
 
 module.exports = router;

@@ -2,12 +2,14 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Layers, Plus, Pencil, Trash2, Monitor, Zap, Power,
   RotateCcw, X, Loader2, ChevronDown, ChevronRight,
-  Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon
+  Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon, LayoutGrid
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
+import LabLayoutEditor from '../components/lab/LabLayoutEditor'
+import LabConsole from '../components/lab/LabConsole'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
 
@@ -115,7 +117,7 @@ function DeviceChip({ device }) {
 }
 
 // ── Group card ────────────────────────────────────────────────────────────────
-function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
+function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labActive, isLight }) {
   const [expanded, setExpanded] = useState(false)
   const online  = devices.filter(d => d.status === 'online').length
   const offline = devices.length - online
@@ -125,10 +127,13 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
 
   return (
     <div className="rounded-2xl overflow-hidden transition-all duration-200"
+      onDoubleClick={() => onOpenLab(group)}
+      title="Double-click to open Lab Console"
       style={{
         background: 'var(--bg-surface-2)',
-        border: `1px solid ${online > 0 ? 'rgba(34,197,94,0.15)' : 'var(--border-subtle)'}`,
+        border: `1px solid ${labActive ? 'rgba(168,85,247,0.4)' : online > 0 ? 'rgba(34,197,94,0.15)' : 'var(--border-subtle)'}`,
         boxShadow: 'var(--shadow-card)',
+        cursor: 'pointer',
       }}>
 
       {/* Health bar */}
@@ -146,9 +151,17 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
               <Layers size={18} className="text-accent-purple" />
             </div>
             <div className="min-w-0">
-              <h3 className="font-display text-sm font-bold truncate" style={{ color: 'var(--text-primary)' }}>
-                {group.name}
-              </h3>
+              <div className="flex items-center gap-1.5">
+                <h3 className="font-display text-sm font-bold truncate" style={{ color: 'var(--text-primary)' }}>
+                  {group.name}
+                </h3>
+                {!!group.is_lab && (
+                  <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                    style={{ background: 'rgba(168,85,247,0.15)', color: '#c084fc' }}>
+                    Lab
+                  </span>
+                )}
+              </div>
               {group.description && (
                 <p className="text-[11px] mt-0.5 truncate max-w-[200px]" style={{ color: 'var(--text-muted)' }}>
                   {group.description}
@@ -157,7 +170,14 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
             </div>
           </div>
 
-          <div className="flex gap-1 shrink-0">
+          <div className="flex gap-1 shrink-0" onDoubleClick={e => e.stopPropagation()}>
+            <button onClick={() => onOpenLab(group)} title="Lab seat layout"
+              className="p-1.5 rounded-lg transition-all"
+              style={{ color: labActive ? '#c084fc' : 'var(--text-muted)', background: labActive ? 'rgba(168,85,247,0.15)' : 'transparent' }}
+              onMouseEnter={e => { if (!labActive) { e.currentTarget.style.color = isLight ? '#6c5ce7' : '#a78bfa'; e.currentTarget.style.background = isLight ? 'rgba(108,92,231,0.1)' : 'rgba(167,139,250,0.1)' } }}
+              onMouseLeave={e => { if (!labActive) { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent' } }}>
+              <LayoutGrid size={13} />
+            </button>
             <button onClick={() => onEdit(group)} title="Edit group"
               className="p-1.5 rounded-lg transition-all"
               style={{ color: 'var(--text-muted)' }}
@@ -192,7 +212,7 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
 
         {/* Device chips */}
         {devices.length > 0 && (
-          <div className="mb-4">
+          <div className="mb-4" onDoubleClick={e => e.stopPropagation()}>
             <div className="flex flex-wrap gap-1.5">
               {devices.slice(0, expanded ? undefined : 5).map(d => <DeviceChip key={d.id} device={d} />)}
               {!expanded && devices.length > 5 && (
@@ -221,7 +241,7 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, isLight }) {
         )}
 
         {/* Action buttons */}
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-3 gap-2" onDoubleClick={e => e.stopPropagation()}>
           {[
             { type: 'wake',     label: 'Wake All',  icon: <Zap size={12} />,       color: '#22c55e', bg: 'rgba(34,197,94,0.08)',   border: 'rgba(34,197,94,0.2)',   hbg: 'rgba(34,197,94,0.18)'  },
             { type: 'shutdown', label: 'Shut Down', icon: <Power size={12} />,     color: '#f87171', bg: 'rgba(239,68,68,0.08)',   border: 'rgba(239,68,68,0.2)',   hbg: 'rgba(239,68,68,0.18)'  },
@@ -254,6 +274,13 @@ export default function GroupsPage() {
   const [deleteTarget,  setDeleteTarget]  = useState(null)
   const [actionModal,   setActionModal]   = useState(null)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
+  const [activeLabId,   setActiveLabId]   = useState(null)
+  // BUG FIX: this used to only ever mount LabLayoutEditor — there was no
+  // way to actually USE a saved layout to select/act on devices by row or
+  // block, only to keep re-editing it. 'console' (default, once a layout
+  // exists) is the new read-only control view; 'editor' is the existing
+  // design view, reachable via its "Edit Layout" button.
+  const [labMode,       setLabMode]       = useState('console') // 'console' | 'editor'
   const isLight = useThemeStore(s => s.theme === 'light')
   const { isAdmin } = usePermissions()
 
@@ -269,6 +296,18 @@ export default function GroupsPage() {
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // Auto-refresh device/group status in the background — same 5s cadence
+  // as DevicesPage — so a Lab Console left open shows seats flip
+  // online/offline live instead of only on manual refresh. Paused while a
+  // layout is actively being edited (labMode === 'editor') so an in-progress
+  // drag/row-count edit never gets clobbered by a background refetch; the
+  // read-only console has nothing to lose from refreshing under it.
+  useEffect(() => {
+    if (labMode === 'editor' && activeLabId) return
+    const t = setInterval(() => { fetchAll(true) }, 5000)
+    return () => clearInterval(t)
+  }, [fetchAll, labMode, activeLabId])
 
   const handleDelete = async () => {
     try {
@@ -298,6 +337,22 @@ export default function GroupsPage() {
   }
 
   const getGroupDevices = useCallback((id) => devices.filter(d => d.group_id === id), [devices])
+
+  const handleOpenLab = (group) => {
+    if (activeLabId === group.id) { setActiveLabId(null); return }
+    const cfg = group.layout_config
+    const hasLayout = group.is_lab && cfg && Array.isArray(cfg.rows) && cfg.rows.length > 0
+    setLabMode(hasLayout ? 'console' : 'editor')
+    setActiveLabId(group.id)
+  }
+
+  const handleLabSaved = (updatedGroup, updatedDevices) => {
+    setGroups(gs => gs.map(g => g.id === updatedGroup.id ? updatedGroup : g))
+    setDevices(ds => {
+      const updatedIds = new Set(updatedDevices.map(d => d.id))
+      return ds.map(d => updatedIds.has(d.id) ? updatedDevices.find(u => u.id === d.id) : d)
+    })
+  }
 
   // Filtered groups
   const filteredGroups = useMemo(() => {
@@ -426,11 +481,38 @@ export default function GroupsPage() {
               onEdit={setGroupModal}
               onDelete={setDeleteTarget}
               onAction={setActionModal}
+              onOpenLab={handleOpenLab}
+              labActive={activeLabId === group.id}
               isLight={isLight}
             />
           ))}
         </div>
       )}
+
+      {/* Lab seat layout — expands below the grid for the selected group */}
+      {activeLabId && (() => {
+        const labGroup = groups.find(g => g.id === activeLabId)
+        if (!labGroup) return null
+        if (labMode === 'console') {
+          return (
+            <LabConsole
+              group={labGroup}
+              devices={getGroupDevices(labGroup.id)}
+              onClose={() => setActiveLabId(null)}
+              onEditLayout={() => setLabMode('editor')}
+              isLight={isLight}
+            />
+          )
+        }
+        return (
+          <LabLayoutEditor
+            group={labGroup}
+            devices={getGroupDevices(labGroup.id)}
+            onClose={() => setActiveLabId(null)}
+            onSaved={(...args) => { handleLabSaved(...args); setLabMode('console') }}
+          />
+        )
+      })()}
 
       {/* Unassigned devices */}
       {unassigned.length > 0 && (

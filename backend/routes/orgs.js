@@ -5,7 +5,7 @@
 // keeping every client's data completely isolated from the others.
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { query, queryOne, execute } = require('../db');
+const { query, queryOne, execute, getPool } = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { requireOrgContext, requireOrgRole } = require('../middleware/tenant');
 const audit = require('../services/audit');
@@ -153,11 +153,57 @@ router.put('/:id', requireOrgContext, requireOrgRole('admin'), async (req, res) 
 });
 
 // ── DELETE /api/orgs/:id — instance-admin only, hard delete (cascades) ──────
+// BUG FIX: this used to ONLY delete the `organizations` row. The comment
+// above always claimed "(cascades)", but nothing actually did — org_id was
+// added to devices/groups/schedules/etc. as a plain `ALTER TABLE ADD COLUMN`
+// (see migrate-orgs.js), with no FK constraint, unlike org_members which
+// has a real `ON DELETE CASCADE` FK. So deleting an org left every group,
+// device, schedule, backup, etc. that belonged to it sitting in the DB with
+// a now-dangling org_id — invisible to every org-scoped query (so they
+// looked "gone" from the UI) but still fully present and still enforcing
+// their constraints, e.g. groups.name's UNIQUE index (see groups table
+// migration) blocking a NEW org from ever creating a group with the same
+// name, and orphaned group_id references on devices making bulk-imported
+// devices land in a group nothing could ever list again.
 router.delete('/:id', requireRole('admin'), async (req, res) => {
+  const orgId = req.params.id;
+  const conn = await getPool().getConnection();
   try {
-    await execute('DELETE FROM organizations WHERE id = ?', [req.params.id]);
+    const [existing] = await conn.execute('SELECT id FROM organizations WHERE id = ?', [orgId]);
+    if (!existing.length) { conn.release(); return res.status(404).json({ error: 'Organization not found' }); }
+
+    await conn.beginTransaction();
+
+    // Every table that got an org_id column per migrate-orgs.js. Some are
+    // conditional on optional features being installed, so check presence
+    // first rather than assuming they all exist.
+    const ORG_SCOPED_TABLES = [
+      'schedules', 'discovery_scans', 'process_policies',
+      'backup_schedules', 'log_export_schedules', 'backups',
+      'backup_destinations', 'alert_rules', 'audit_log',
+      'devices', 'groups',
+    ];
+    const [tableRows] = await conn.query(
+      'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?)',
+      [ORG_SCOPED_TABLES]
+    );
+    const present = new Set(tableRows.map(r => r.TABLE_NAME));
+
+    for (const table of ORG_SCOPED_TABLES) {
+      if (present.has(table)) {
+        await conn.execute(`DELETE FROM \`${table}\` WHERE org_id = ?`, [orgId]);
+      }
+    }
+
+    await conn.execute('DELETE FROM organizations WHERE id = ?', [orgId]);
+    await conn.commit();
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    try { await conn.rollback(); } catch {}
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
+  }
 });
 
 module.exports = router;

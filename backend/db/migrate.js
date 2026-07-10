@@ -802,6 +802,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  devices.hostname:', e.message);
     }
+    try {
+      const { migrateLabLayout } = require('./migrate-lab-layout');
+      await migrateLabLayout();
+      console.log('  ✓ lab_layout (theater-style seat layout for lab groups)');
+    } catch (e) {
+      console.warn('  ⚠  lab_layout:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => process.exit(0))  // Always exit — don't let pool timers hang node

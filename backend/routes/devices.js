@@ -279,8 +279,8 @@ router.post('/bulk-import',
         await execute(
           `INSERT INTO devices
              (id, name, ip_address, mac_address, os_type, group_id,
-              ssh_username, ssh_password, ssh_key, rpc_username, rpc_password)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              ssh_username, ssh_password, ssh_key, rpc_username, rpc_password, org_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             id,
             name,
@@ -293,6 +293,7 @@ router.post('/bulk-import',
             row.ssh_key       ? encrypt(String(row.ssh_key))      : null,
             row.rpc_username  ? String(row.rpc_username).trim()   : null,
             row.rpc_password  ? encrypt(String(row.rpc_password)) : null,
+            req.orgId,
           ]
         );
         results.push({ name, status: 'imported' });
