@@ -179,8 +179,8 @@ async function migrateOrgs() {
     //    is currently pointed at ────────────────────────────────────────────
     await addColumnIfMissing(conn, 'users', 'active_org_id', 'active_org_id CHAR(36) DEFAULT NULL');
 
-    // ── Backfill: create a Default Organization and attach every existing
-    //    row + user to it, so upgrading never orphans existing data ────────
+    // ── Backfill: create a Default Organization (once) and attach every
+    //    existing DATA row to it if it's still orgless ─────────────────────
     const [existingOrgs] = await conn.query('SELECT id FROM organizations LIMIT 1');
     let defaultOrgId;
     if (existingOrgs.length === 0) {
@@ -197,34 +197,64 @@ async function migrateOrgs() {
       if (await tableExists(conn, 'alert_rules')) {
         await conn.query('UPDATE alert_rules SET org_id = ? WHERE org_id IS NULL', [defaultOrgId]);
       }
-      for (const t of ['backups', 'backup_destinations', 'discovery_scans', 'process_policies', 'backup_schedules', 'log_export_schedules']) {
-        if (await tableExists(conn, t)) {
-          await conn.query(`UPDATE \`${t}\` SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId]);
-        }
-      }
-      await conn.query('UPDATE users SET active_org_id = ? WHERE active_org_id IS NULL', [defaultOrgId]);
+    } else {
+      defaultOrgId = existingOrgs[0].id;
+    }
 
-      const [users] = await conn.query('SELECT id, role FROM users');
-      for (const u of users) {
+    // Every-run backfill for data tables (unchanged behavior — covers tables
+    // that may not have existed yet the first time this ran).
+    for (const t of ['backups', 'backup_destinations', 'discovery_scans', 'process_policies', 'backup_schedules', 'log_export_schedules']) {
+      if (await tableExists(conn, t)) {
+        await conn.query(`UPDATE \`${t}\` SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId]);
+      }
+    }
+
+    // ── User <-> org backfill — SELF-HEALING, runs on EVERY migrate call ────
+    // This used to run only inside the `existingOrgs.length === 0` branch —
+    // meaning it fired exactly once, ever, on whichever install happened to
+    // be the very first to pick up this migration. Any user created after
+    // that moment (a fresh admin from re-running db/setup.js after wiping
+    // the DB, a new operator/viewer added via POST /api/users, a restored
+    // backup missing org_members rows) was silently left with no
+    // organization membership at all — and middleware/tenant.js's
+    // requireOrgContext hard-blocks every device/group/schedule/etc. request
+    // with 400 NO_ACTIVE_ORG for such a user, with no way to self-recover
+    // short of an admin manually fixing the DB.
+    //
+    // Fix: find every user who currently has zero rows in org_members (not
+    // just users that existed the first time this migration ever ran), add
+    // each to the default org, and set active_org_id if they don't already
+    // have one. Safe to run every time — INSERT IGNORE + the NOT IN
+    // subquery mean a user already in an org is left untouched.
+    const [orphanedUsers] = await conn.query(`
+      SELECT u.id, u.role FROM users u
+      WHERE NOT EXISTS (SELECT 1 FROM org_members m WHERE m.user_id = u.id)
+    `);
+    if (orphanedUsers.length > 0) {
+      for (const u of orphanedUsers) {
         await conn.query(
           `INSERT IGNORE INTO org_members (id, org_id, user_id, org_role, created_at)
            VALUES (?, ?, ?, ?, UNIX_TIMESTAMP())`,
           [uuidv4(), defaultOrgId, u.id, u.role === 'admin' ? 'admin' : u.role]
         );
       }
-      console.log(`  + ${users.length} existing user(s) added as members of Default Organization`);
-    } else {
-      defaultOrgId = existingOrgs[0].id;
-      // Re-running against an install that already has organizations but is
-      // just now picking up these newer tables/columns — backfill any rows
-      // still sitting at org_id IS NULL into the same default org so nothing
-      // becomes invisible under the new org-scoped queries.
-      for (const t of ['backups', 'backup_destinations', 'discovery_scans', 'process_policies', 'backup_schedules', 'log_export_schedules']) {
-        if (await tableExists(conn, t)) {
-          await conn.query(`UPDATE \`${t}\` SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId]);
-        }
-      }
+      await conn.query(
+        `UPDATE users SET active_org_id = ? WHERE active_org_id IS NULL AND id IN (${orphanedUsers.map(() => '?').join(',')})`,
+        [defaultOrgId, ...orphanedUsers.map(u => u.id)]
+      );
+      console.log(`  + ${orphanedUsers.length} user(s) with no organization membership added to Default Organization`);
     }
+
+    // Belt-and-suspenders: a user CAN be in org_members yet still have a
+    // null active_org_id (e.g. their one membership row was inserted by some
+    // other path that didn't set it) — that alone is enough to trigger
+    // NO_ACTIVE_ORG, so heal that independently of the orphan check above.
+    await conn.query(`
+      UPDATE users u
+      JOIN org_members m ON m.user_id = u.id
+      SET u.active_org_id = m.org_id
+      WHERE u.active_org_id IS NULL
+    `);
 
     console.log('✅ Org / multi-tenant migration complete.');
     return defaultOrgId;

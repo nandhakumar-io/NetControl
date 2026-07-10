@@ -287,6 +287,35 @@ router.post('/',
         [id, lower, hash, hasPassword, email, displayName || null, role, permissions || 0]
       );
 
+      // Add the new user to an organization immediately — without this,
+      // middleware/tenant.js's requireOrgContext hard-blocks every
+      // device/group/schedule/etc. request with 400 NO_ACTIVE_ORG the
+      // moment they log in, since nothing else ever grants org membership
+      // for a user created this way. Prefer the creating admin's own active
+      // org (the obvious intent: "add this person to the org I'm looking
+      // at"); fall back to whatever org exists if the creator somehow has
+      // none themselves, so a brand-new instance never produces an
+      // unusable account.
+      try {
+        let orgId = req.orgId || req.user.activeOrgId || null;
+        if (!orgId) {
+          const anyOrg = await queryOne('SELECT id FROM organizations ORDER BY created_at LIMIT 1');
+          orgId = anyOrg?.id || null;
+        }
+        if (orgId) {
+          await execute(
+            `INSERT IGNORE INTO org_members (id, org_id, user_id, org_role, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [uuidv4(), orgId, id, role === 'admin' ? 'admin' : role, Math.floor(Date.now() / 1000)]
+          );
+          await execute('UPDATE users SET active_org_id = ? WHERE id = ? AND active_org_id IS NULL', [orgId, id]);
+        }
+      } catch (orgErr) {
+        // Never fail user creation over this — surface it loudly instead so
+        // it gets noticed and fixed rather than silently producing another
+        // orphaned account.
+        console.error(`[users] Failed to add new user ${lower} to an organization:`, orgErr.message);
+      }
+
       await audit.log({
         userId: req.user.id, username: req.user.username,
         action: 'create_user', targetType: 'user', targetId: id,
