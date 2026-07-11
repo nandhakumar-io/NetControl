@@ -209,7 +209,7 @@ async function pollDevice(device, nowSec, freshMap = null) {
 }
 
 // ── Bulk flush status changes to DB ──────────────────────────────────────────
-async function flushToDB(results, nowSec) {
+async function flushToDB(results, nowSec, devices) {
   // BUG FIX: previously ANY device reported 'online' this cycle — including
   // ones fast-pathed as online purely because they were still inside the
   // agent grace window — had last_seen stamped to nowSec here. That created
@@ -442,7 +442,7 @@ async function pollAll() {
     else { errors++; console.error(`[Poller] ${devices[i].name}:`, settled[i].reason?.message); }
   }
 
-  await flushToDB(results, nowSec);
+  await flushToDB(results, nowSec, devices);
 
   // Stats log
   const counts = results.reduce((a, r) => {
