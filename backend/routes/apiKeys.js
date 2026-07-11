@@ -17,7 +17,7 @@ const crypto  = require('crypto');
 const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
-const { requireAuth, API_KEY_PREFIX, hashApiKey } = require('../middleware/auth');
+const { requireAuth, API_KEY_PREFIX, hashApiKey, ROLE_PERMISSIONS } = require('../middleware/auth');
 const audit = require('../services/audit');
 
 const router = express.Router();
@@ -57,7 +57,22 @@ router.post('/',
     if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
 
     try {
-      const callerPerms = req.user.permissions ?? 0xFFFF; // built-in roles resolve via requirePermission's static map elsewhere; here we only have the JWT/key claim
+      // SECURITY/BUG FIX: this used to read req.user.permissions directly,
+      // but that DB column only holds meaningful bits for role='custom' —
+      // built-in roles (admin/operator/viewer) get their real permission
+      // bits from the static ROLE_PERMISSIONS map in middleware/auth.js
+      // (see requirePermission()), and typically have permissions=0 in the
+      // DB since it's unused for them. Reading the column directly meant
+      // every key created by a normal admin/operator/viewer account came
+      // out scoped to 0 — a silently useless key. The `?? 0xFFFF` fallback
+      // was also a landmine: if req.user.permissions were ever undefined
+      // on some other auth path, it would mint a FULL-permission key
+      // regardless of the creator's actual role. Resolve permissions the
+      // same way requirePermission() does, and fail closed (0) rather than
+      // open (0xFFFF) if nothing resolves.
+      const callerPerms = ROLE_PERMISSIONS[req.user.role] !== undefined
+        ? ROLE_PERMISSIONS[req.user.role]
+        : (req.user.permissions || 0);
       const requested = req.body.permissions !== undefined && req.body.permissions !== null
         ? parseInt(req.body.permissions)
         : callerPerms;

@@ -823,6 +823,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  push_subscriptions:', e.message);
     }
+    try {
+      const { migrateSshHostKeys } = require('./migrate-ssh-host-keys');
+      await migrateSshHostKeys();
+      console.log('  ✓ devices.ssh_host_key_fingerprint (TOFU host key pinning — was accepting any host key)');
+    } catch (e) {
+      console.warn('  ⚠  devices.ssh_host_key_fingerprint:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

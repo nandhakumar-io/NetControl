@@ -15,6 +15,7 @@
 
 const { Client } = require('ssh2');
 const path = require('path');
+const { tofuVerifier } = require('./sshHostKeys');
 
 const SCP_TIMEOUT  = 25000;
 const CONCURRENCY  = 10;
@@ -196,6 +197,12 @@ function scpPushOne(device, fileBuffer, remotePath, mode = 0o644) {
       username,
       readyTimeout: SCP_TIMEOUT,
       keepaliveInterval: 5000,
+      // SECURITY FIX: this file previously set no hostVerifier at all —
+      // ssh2 performs no host-key verification unless one is provided, so
+      // every file push silently accepted any host key with no pinning or
+      // warning whatsoever, same MITM exposure as the other SSH call sites
+      // (see services/sshHostKeys.js). Now pins on first connect.
+      hostVerifier: tofuVerifier(device),
     };
 
     if (privateKey) {

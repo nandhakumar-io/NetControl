@@ -215,7 +215,7 @@ router.get('/bans', async (req, res) => {
     const includeExpired = req.query.all === '1';
     const bans = await bf.listBans(includeExpired);
     // Also include in-progress attempt counts (not yet banned)
-    const watching = bf.getAttemptCounts();
+    const watching = await bf.getAttemptCounts();
     res.json({ bans, watching });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

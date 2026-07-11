@@ -1,6 +1,7 @@
 // services/ssh.js — SSH command execution for Linux machines
 const { Client } = require('ssh2');
 const { decrypt } = require('./crypto'); // ✅ ADDED
+const { tofuVerifier } = require('./sshHostKeys');
 
 const SSH_TIMEOUT = 10000; // 10 second connection timeout
 
@@ -8,7 +9,7 @@ const SSH_TIMEOUT = 10000; // 10 second connection timeout
  * Execute a command on a remote Linux host via SSH.
  * Supports both password and private key auth.
  */
-function sshExec(host, port, username, { password, privateKey }, command) {
+function sshExec(device, host, port, username, { password, privateKey }, command) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     let stdout = '';
@@ -61,14 +62,12 @@ function sshExec(host, port, username, { password, privateKey }, command) {
       port: Number(port) || 22,
       username,
       readyTimeout: SSH_TIMEOUT,
-      // BUG FIX: ssh2 performs strict host-key verification by default.
-      // When the server's host key isn't already trusted (i.e. not in a
-      // known_hosts file — which doesn't exist in this server process),
-      // ssh2 rejects the connection silently, exactly like the "yes/no"
-      // prompt you see in a terminal SSH client.
-      // Fix: accept all host keys unconditionally. This is the standard
-      // approach for programmatic SSH clients that manage their own auth.
-      hostVerifier: () => true,
+      // SECURITY FIX: was `hostVerifier: () => true`, accepting ANY host
+      // key unconditionally — a silent man-in-the-middle opportunity with
+      // no known_hosts equivalent to ever catch it. Pin-on-first-connect
+      // instead (see services/sshHostKeys.js): trusts the key the first
+      // time, then requires it to match on every connection after that.
+      hostVerifier: tofuVerifier(device),
       algorithms: {
         kex: [
           'ecdh-sha2-nistp256',
@@ -133,23 +132,23 @@ function getCred(device) {
 
 async function shutdown(device) {
   const cred = getCred(device);
-  return sshExec(device.ip_address, device.ssh_port, device.ssh_username, cred, 'shutdown -h now');
+  return sshExec(device, device.ip_address, device.ssh_port, device.ssh_username, cred, 'shutdown -h now');
 }
 
 async function restart(device) {
   const cred = getCred(device);
-  return sshExec(device.ip_address, device.ssh_port, device.ssh_username, cred, 'shutdown -r now');
+  return sshExec(device, device.ip_address, device.ssh_port, device.ssh_username, cred, 'shutdown -r now');
 }
 
 async function execCommand(device, command) {
   const cred = getCred(device);
-  return sshExec(device.ip_address, device.ssh_port, device.ssh_username, cred, command);
+  return sshExec(device, device.ip_address, device.ssh_port, device.ssh_username, cred, command);
 }
 
 async function checkOnline(device) {
   try {
     const cred = getCred(device);
-    await sshExec(device.ip_address, device.ssh_port, device.ssh_username, cred, 'echo ok');
+    await sshExec(device, device.ip_address, device.ssh_port, device.ssh_username, cred, 'echo ok');
     return true;
   } catch {
     return false;

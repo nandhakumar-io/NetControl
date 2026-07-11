@@ -2,7 +2,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { query, queryOne } = require('../db');
-const { requireAuth, requireActionPin } = require('../middleware/auth');
+const { requireAuth, requireActionPin, requireRole } = require('../middleware/auth');
 const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { actionLimiter } = require('../middleware/rateLimiter');
 const { decrypt } = require('../services/crypto');
@@ -13,7 +13,15 @@ const audit = require('../services/audit');
 const webhook = require('../services/webhook');
 
 const router = express.Router();
-router.use(requireAuth, actionLimiter);
+// SECURITY FIX: requireActionPin checks a single PIN shared by everyone in
+// the org — it's a "confirm you meant to do this" step, not an access
+// control boundary. Without a role check here, any authenticated user who
+// knew the PIN and had ANY user_group_access grant (including a viewer,
+// which this app doesn't otherwise treat as a hard boundary against) could
+// wake/shutdown/restart devices or run arbitrary shell commands via /exec.
+// Restrict the whole router to admin/operator; requireOrgContext/group
+// checks below still further narrow *which* devices within that role.
+router.use(requireAuth, requireRole('admin', 'operator'), actionLimiter);
 
 async function loadDevice(id) {
   const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);

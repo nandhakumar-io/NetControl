@@ -397,6 +397,29 @@ router.delete('/:id', requireRole('admin'), param('id').isUUID(), async (req, re
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POST /api/devices/:id/reset-host-key ───────────────────────────────────────
+// Clears the pinned SSH host key fingerprint (services/sshHostKeys.js TOFU
+// pinning) so the next connection re-pins whatever key it sees. Needed
+// after a legitimate device reimage, OS reinstall, or hardware swap — any
+// of which rotate the host key and would otherwise cause every SSH action
+// on this device to be refused as a possible MITM. Admin-only and audited,
+// since clearing the pin does briefly re-open the TOFU trust window.
+router.post('/:id/reset-host-key', requireRole('admin'), param('id').isUUID(), async (req, res) => {
+  if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const device = await queryOne('SELECT id, name FROM devices WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    await execute('UPDATE devices SET ssh_host_key_fingerprint = NULL WHERE id = ?', [req.params.id]);
+    await audit.log({
+      userId: req.user.id, username: req.user.username,
+      action: 'reset_ssh_host_key', targetType: 'device', targetId: req.params.id,
+      targetName: device.name, ipSource: req.realIp, result: 'success',
+      details: 'Pinned SSH host key cleared — will re-pin on next connection',
+    });
+    res.json({ message: 'Host key pin cleared — the next SSH connection will trust and re-pin whatever key it sees.' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── POST /api/devices/poll-all ───────────────────────────────────────────────
 router.post('/poll-all', async (req, res) => {
   try {

@@ -28,7 +28,7 @@ const USER_FIELDS = `id, username, email, display_name, role, permissions, enabl
 // rotate their own password without admin involvement.
 router.post('/me/change-password',
   body('currentPassword').notEmpty(),
-  body('newPassword').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -241,7 +241,7 @@ router.post('/',
   [
     body('username').trim().notEmpty().isLength({ min: 3, max: 50 })
       .matches(/^[a-zA-Z0-9_.-]+$/).withMessage('Username may only contain letters, numbers, _ . -'),
-    body('password').optional({ nullable: true }).isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('password').optional({ nullable: true }).isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     body('email').optional({ nullable: true }).trim().isEmail().withMessage('Invalid email address').isLength({ max: 255 }),
     body('displayName').optional({ nullable: true }).trim().isLength({ max: 100 }),
     body('role').isIn(['admin', 'operator', 'viewer', 'custom']),
@@ -341,7 +341,7 @@ router.put('/:id',
   [
     body('username').optional().trim().notEmpty().isLength({ min: 3, max: 50 })
       .matches(/^[a-zA-Z0-9_.-]+$/),
-    body('password').optional().isLength({ min: 6 }),
+    body('password').optional().isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     body('email').optional({ nullable: true }).trim().isEmail().withMessage('Invalid email address').isLength({ max: 255 }),
     body('displayName').optional({ nullable: true }).trim().isLength({ max: 100 }),
     body('role').optional().isIn(['admin', 'operator', 'viewer', 'custom']),

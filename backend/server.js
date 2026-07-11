@@ -165,18 +165,25 @@ app.use(cookieParser());
 app.set('trust proxy', Number.isInteger(parseInt(process.env.TRUST_PROXY_HOPS)) ? parseInt(process.env.TRUST_PROXY_HOPS) : 2);
 
 // ── Real IP ───────────────────────────────────────────────────────────────────
-// SECURITY FIX: x-forwarded-for can be spoofed by clients.
-// Only use it when NODE_ENV=production (i.e. actually behind a reverse proxy).
-// In development, use req.ip directly to avoid spoofed IP bypass of rate limits.
+// SECURITY FIX: this used to take X-Forwarded-For.split(',')[0] — the
+// LEFTMOST entry. XFF is built up left-to-right as a request passes through
+// proxies (each hop appends its peer's address), so the leftmost entry is
+// whatever the ORIGINAL CLIENT put there, which is fully attacker-controlled.
+// A request could carry `X-Forwarded-For: 1.2.3.4` from the client itself,
+// and nginx would append the real hop after it — taking [0] used the spoofed
+// value, not the trusted one. That silently defeated IP-based brute-force
+// banning (rotate the header, never get banned), the IP allowlist (spoof an
+// allowed address), and poisoned the audit log's recorded source IP.
+// `req.ip` (set by Express) already does this correctly: with `trust proxy`
+// set to the exact number of real proxy hops (above), it walks in from the
+// RIGHT side of the XFF chain by that many hops, which is the only part of
+// the header proxies — not clients — can write. Use that instead of
+// re-parsing the header ourselves.
 app.use((req, _res, next) => {
-  if (process.env.NODE_ENV === 'production') {
-    const fwd = req.headers['x-forwarded-for'];
-    req.realIp = fwd ? String(fwd).split(',')[0].trim() : (req.ip || 'unknown');
-  } else {
-    req.realIp = req.ip || 'unknown';
-  }
+  req.realIp = req.ip || 'unknown';
   next();
 });
+
 
 // ── Soft identity peek (rate-limiting only) ──────────────────────────────────
 // apiLimiter's keyGenerator wants req.user.id so each signed-in user gets

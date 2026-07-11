@@ -29,6 +29,7 @@ const jwt                 = require('jsonwebtoken');
 const { queryOne }        = require('../db');
 const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { decrypt }         = require('./crypto');
+const { tofuVerifier }    = require('./sshHostKeys');
 require('dotenv').config();
 
 // SECURITY FIX: Verify token and check user is still enabled + has device access
@@ -126,11 +127,11 @@ function sshConnect(device, cols, rows) {
       readyTimeout:       15000,
       keepaliveInterval:  10000,
       keepaliveCountMax:  3,
-      // BUG FIX: Accept all host keys — ssh2 rejects connections when the
-      // host key is unknown (no known_hosts in this process), silently
-      // failing with the same error you see as a "yes/no" prompt in a
-      // terminal. hostVerifier: () => true disables that check.
-      hostVerifier: () => true,
+      // SECURITY FIX: see services/sshHostKeys.js — was accepting any host
+      // key unconditionally (hostVerifier: () => true), a silent MITM
+      // opportunity for the live web terminal. Now pins on first connect
+      // and requires a match on every connection after that.
+      hostVerifier: tofuVerifier(device),
       algorithms: {
         kex: [
           'ecdh-sha2-nistp256',

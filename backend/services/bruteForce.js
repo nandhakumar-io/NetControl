@@ -16,6 +16,7 @@
 'use strict';
 const { query, queryOne, execute } = require('../db');
 const { v4: uuidv4 } = require('uuid');
+const bus = require('./bus');
 
 const THRESHOLD    = parseInt(process.env.BF_THRESHOLD    || '5',  10);
 const WINDOW_SEC   = parseInt(process.env.BF_WINDOW_SEC   || '300', 10);
@@ -24,17 +25,51 @@ const MAX_BAN_SEC  = parseInt(process.env.BF_MAX_BAN_SEC  || '86400', 10);
 // Ban durations per strike (seconds): 5m, 15m, 1h, 24h
 const BAN_DURATIONS = [300, 900, 3600, MAX_BAN_SEC];
 
-// In-memory attempt cache: ip → [timestamp, timestamp, ...]
-// Kept small — only stores recent attempts within the window
+// SECURITY FIX: this used to be a plain in-memory Map, scoped to a single
+// Node process. server.js runs one worker per 2 CPU cores in production —
+// with N workers behind Traefik's round-robin, an attacker's failed logins
+// land on different workers, and each worker's own Map never sees more than
+// ~THRESHOLD/N of them, so the real threshold before a ban was effectively
+// THRESHOLD × N. The ip_bans/ip_ban_log tables were always correctly
+// persisted to MySQL, but the live counter deciding WHEN to write a ban
+// wasn't shared. Use the same Redis connection services/bus.js already
+// manages (getClient()) so every worker sees the same counter; falls back
+// to the in-memory Map when Redis isn't configured (single-process/dev —
+// see bus.js's own fallback for the same reasoning).
+const redis = bus.getClient(); // null in single-process fallback mode
+
+// In-memory fallback cache: ip → [timestamp, timestamp, ...]
 const attempts = new Map();
 
-function cleanOldAttempts(ip) {
+function cleanOldAttemptsLocal(ip) {
   const cutoff = Math.floor(Date.now() / 1000) - WINDOW_SEC;
   const list = attempts.get(ip) || [];
   const fresh = list.filter(ts => ts > cutoff);
   if (fresh.length) attempts.set(ip, fresh);
   else attempts.delete(ip);
   return fresh;
+}
+
+// Records one failed attempt for `ip` and returns the current count within
+// the rolling window — via Redis (shared across all workers) when
+// available, otherwise the process-local Map.
+async function bumpAttempts(ip) {
+  if (redis) {
+    const key = `bf:attempts:${ip}`;
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, WINDOW_SEC);
+    return count;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const list = cleanOldAttemptsLocal(ip);
+  list.push(now);
+  attempts.set(ip, list);
+  return list.length;
+}
+
+async function clearAttempts(ip) {
+  if (redis) { await redis.del(`bf:attempts:${ip}`).catch(() => {}); return; }
+  attempts.delete(ip);
 }
 
 // ── Check if IP is currently banned ───────────────────────────────────────────
@@ -58,9 +93,7 @@ async function isBanned(ip) {
 // ── Record a failed attempt; ban if threshold crossed ────────────────────────
 async function recordFailure(ip, username) {
   const now = Math.floor(Date.now() / 1000);
-  const list = cleanOldAttempts(ip);
-  list.push(now);
-  attempts.set(ip, list);
+  const count = await bumpAttempts(ip);
 
   // Persist to attempt log (fire-and-forget)
   execute(
@@ -68,7 +101,7 @@ async function recordFailure(ip, username) {
     [uuidv4(), ip, username || null, now]
   ).catch(() => {});
 
-  if (list.length >= THRESHOLD) {
+  if (count >= THRESHOLD) {
     // Count prior bans to determine duration
     const priorBans = await query(
       'SELECT id FROM ip_bans WHERE ip = ?',
@@ -82,22 +115,22 @@ async function recordFailure(ip, username) {
     await execute(
       `INSERT INTO ip_bans (id, ip, reason, attempts, duration_sec, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [banId, ip, `${list.length} failed logins in ${WINDOW_SEC}s`, list.length, duration, now, expiresAt]
+      [banId, ip, `${count} failed logins in ${WINDOW_SEC}s`, count, duration, now, expiresAt]
     ).catch(() => {});
 
     // Clear attempts so the counter resets after ban
-    attempts.delete(ip);
+    await clearAttempts(ip);
 
-    console.warn(`[BruteForce] Banned ${ip} for ${Math.round(duration/60)}min (strike ${strikeIdx+1}, ${list.length} failures)`);
+    console.warn(`[BruteForce] Banned ${ip} for ${Math.round(duration/60)}min (strike ${strikeIdx+1}, ${count} failures)`);
     return { banned: true, expiresAt, duration };
   }
 
-  return { banned: false, remaining: THRESHOLD - list.length };
+  return { banned: false, remaining: THRESHOLD - count };
 }
 
 // ── Record a successful login — resets failure counter ────────────────────────
-function recordSuccess(ip) {
-  attempts.delete(ip);
+async function recordSuccess(ip) {
+  await clearAttempts(ip);
 }
 
 // ── Admin: list all active bans ───────────────────────────────────────────────
@@ -116,20 +149,29 @@ async function liftBan(banId, liftedBy) {
     'UPDATE ip_bans SET lifted_at = ?, lifted_by = ? WHERE id = ?',
     [now, liftedBy || null, banId]
   );
-  // Also clear in-memory attempts for any IP in this ban
+  // Also clear the shared attempt counter for any IP in this ban
   const ban = await queryOne('SELECT ip FROM ip_bans WHERE id = ?', [banId]).catch(() => null);
-  if (ban) attempts.delete(ban.ip);
+  if (ban) await clearAttempts(ban.ip);
 }
 
 // ── Current attempt counts (for admin dashboard) ──────────────────────────────
-function getAttemptCounts() {
+async function getAttemptCounts() {
+  if (redis) {
+    const keys = await redis.keys('bf:attempts:*').catch(() => []);
+    if (!keys.length) return [];
+    const counts = await Promise.all(keys.map(k => redis.get(k)));
+    return keys.map((k, i) => ({
+      ip: k.slice('bf:attempts:'.length),
+      count: parseInt(counts[i]) || 0,
+      threshold: THRESHOLD,
+    })).filter(r => r.count > 0);
+  }
   const result = [];
-  for (const [ip, list] of attempts.entries()) {
-    const fresh = cleanOldAttempts(ip);
+  for (const [ip] of attempts.entries()) {
+    const fresh = cleanOldAttemptsLocal(ip);
     if (fresh.length) result.push({ ip, count: fresh.length, threshold: THRESHOLD });
   }
   return result;
 }
 
 module.exports = { isBanned, recordFailure, recordSuccess, listBans, liftBan, getAttemptCounts };
-
