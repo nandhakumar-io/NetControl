@@ -370,7 +370,7 @@ async function clearExpiredMaintenance(nowSec) {
   for (const d of expired) {
     webhook.invalidateMaintenanceCache(d.id);
     audit.log({
-      username: 'system', action: 'maintenance_expired',
+      username: 'system', action: 'maintenance_expired', orgId: d.org_id,
       targetType: 'device', targetId: d.id, targetName: d.name,
       result: 'success', details: 'Maintenance window expired — auto-cleared',
     }).catch(() => {});

@@ -1,5 +1,5 @@
 // services/audit.js — Structured audit logging (MySQL + Winston file log)
-const { execute } = require('../db');
+const { execute, queryOne } = require('../db');
 const { v4: uuidv4 } = require('uuid');
 const winston = require('winston');
 const fs = require('fs');
@@ -20,9 +20,37 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 async function log(opts) {
+  // BUG FIX: audit_log has carried an org_id column since the multi-tenant
+  // migration (db/migrate-orgs.js), and routes/audit.js's list/export/tally
+  // queries now hard-filter on `WHERE org_id = ?` (a necessary security fix —
+  // see routes/audit.js — so one tenant can't read another's audit trail).
+  // But this function never read or inserted org_id, so every entry written
+  // by any of the ~90 call sites across the app landed with org_id = NULL,
+  // which never matches req.orgId and is therefore invisible to every
+  // caller of the audit log page/export, even though rows were being
+  // written correctly to the table the whole time.
+  //
+  // Rather than touching every call site, resolve org_id here: use an
+  // explicit opts.orgId if the caller has one to hand (e.g. a route that
+  // already ran requireOrgContext), otherwise fall back to looking up the
+  // acting user's active_org_id. Events with no user (e.g. a failed login
+  // for a username that doesn't exist) genuinely have no org to attribute
+  // to and are left NULL — they simply won't show up in a tenant-scoped
+  // view, which is correct.
+  let orgId = opts.orgId || null;
+  if (!orgId && opts.userId) {
+    try {
+      const user = await queryOne('SELECT active_org_id FROM users WHERE id = ?', [opts.userId]);
+      orgId = user?.active_org_id || null;
+    } catch (e) {
+      logger.error('Failed to resolve org_id for audit entry', { error: e.message, userId: opts.userId });
+    }
+  }
+
   const entry = {
     id:          uuidv4(),
     timestamp:   Math.floor(Date.now() / 1000),
+    org_id:      orgId,
     user_id:     opts.userId     || null,
     username:    opts.username   || 'system',
     action:      opts.action,
@@ -42,9 +70,9 @@ async function log(opts) {
   try {
     await execute(
       `INSERT INTO audit_log
-         (id, timestamp, user_id, username, action, target_type, target_id, target_name, ip_source, result, details)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [entry.id, entry.timestamp, entry.user_id, entry.username, entry.action,
+         (id, timestamp, org_id, user_id, username, action, target_type, target_id, target_name, ip_source, result, details)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [entry.id, entry.timestamp, entry.org_id, entry.user_id, entry.username, entry.action,
        entry.target_type, entry.target_id, entry.target_name, entry.ip_source,
        entry.result, entry.details]
     );

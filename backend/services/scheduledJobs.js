@@ -142,6 +142,7 @@ async function runBackupSchedule(schedule) {
     await audit.log({
       username: 'scheduler',
       action: 'backup_schedule_run',
+      orgId: schedule.org_id,
       targetType: 'backup_schedule',
       targetId: schedule.id,
       targetName: schedule.name,
@@ -166,6 +167,7 @@ async function runBackupSchedule(schedule) {
     await audit.log({
       username: 'scheduler',
       action: 'backup_schedule_run',
+      orgId: schedule.org_id,
       targetType: 'backup_schedule',
       targetId: schedule.id,
       targetName: schedule.name,
@@ -238,6 +240,7 @@ async function runLogExportSchedule(schedule) {
       await audit.log({
         username: 'scheduler',
         action: 'log_export_schedule_run',
+        orgId: schedule.org_id,
         targetType: 'log_export_schedule',
         targetId: schedule.id,
         targetName: schedule.name,
@@ -285,6 +288,7 @@ async function runLogExportSchedule(schedule) {
     await audit.log({
       username: 'scheduler',
       action: 'log_export_schedule_run',
+      orgId: schedule.org_id,
       targetType: 'log_export_schedule',
       targetId: schedule.id,
       targetName: schedule.name,
@@ -306,6 +310,7 @@ async function runLogExportSchedule(schedule) {
     await audit.log({
       username: 'scheduler',
       action: 'log_export_schedule_run',
+      orgId: schedule.org_id,
       targetType: 'log_export_schedule',
       targetId: schedule.id,
       targetName: schedule.name,
@@ -420,7 +425,7 @@ async function runSlaReportSchedule(schedule) {
     }).catch(() => {});
 
     await audit.log({
-      username: 'scheduler', action: 'sla_report_schedule_run', targetType: 'sla_report_schedule',
+      username: 'scheduler', action: 'sla_report_schedule_run', orgId: schedule.org_id, targetType: 'sla_report_schedule',
       targetId: schedule.id, targetName: schedule.name, ipSource: 'scheduler', result: 'success',
       details: `Report ${result.id} generated, email ${emailResult.sent ? 'sent' : 'skipped'}`,
     }).catch(() => {});
@@ -437,7 +442,7 @@ async function runSlaReportSchedule(schedule) {
     }).catch(() => {});
 
     await audit.log({
-      username: 'scheduler', action: 'sla_report_schedule_run', targetType: 'sla_report_schedule',
+      username: 'scheduler', action: 'sla_report_schedule_run', orgId: schedule.org_id, targetType: 'sla_report_schedule',
       targetId: schedule.id, targetName: schedule.name, ipSource: 'scheduler', result: 'failure',
       details: e.message,
     }).catch(() => {});
