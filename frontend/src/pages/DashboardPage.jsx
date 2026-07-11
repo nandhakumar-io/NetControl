@@ -396,7 +396,12 @@ export default function DashboardPage() {
     return p.reduce((a,b)=>a+b,0)/p.length
   }, [metVals])
 
-  const critAlerts = alerts.filter(a=>a.severity==='critical').length
+  // /alerts/triggered returns every log row, acknowledged or resolved ones
+  // included — filtering on severity alone meant the dashboard's critical
+  // banner and Alerts stat card never reflected acknowledging an alert on
+  // the Alerts page; only a new/unack'd/unresolved incident should count.
+  const openAlerts = alerts.filter(a => !a.acknowledged_at && !a.resolved_at)
+  const critAlerts = openAlerts.filter(a=>a.severity==='critical').length
 
   const topCpu = useMemo(() =>
     [...metVals].sort((a,b)=>(b.cpu||0)-(a.cpu||0)).slice(0,6)
@@ -501,7 +506,7 @@ export default function DashboardPage() {
           sub={`${metVals.length} reporting`}       color={cpuColor(avgCpu)} spark={cpuSpark}/>
         <StatCard icon={MemoryStick} label="Avg RAM"   value={avgRam!=null?`${Math.round(avgRam)}%`:'—'}
           sub="memory used"                         color={avgRam!=null?ramColor(avgRam):'#475569'} spark={ramSpark}/>
-        <StatCard icon={Bell}        label="Alerts"    value={alerts.length}
+        <StatCard icon={Bell}        label="Alerts"    value={openAlerts.length}
           sub={`${critAlerts} critical`}            color={critAlerts>0?'#ef4444':'#eab308'}/>
       </div>
 

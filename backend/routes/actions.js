@@ -3,6 +3,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { query, queryOne } = require('../db');
 const { requireAuth, requireActionPin } = require('../middleware/auth');
+const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { actionLimiter } = require('../middleware/rateLimiter');
 const { decrypt } = require('../services/crypto');
 const { wake } = require('../services/wol');
@@ -57,36 +58,45 @@ function actionRoute(action) {
       if (!deviceId && !groupId)
         return res.status(400).json({ error: 'deviceId or groupId required' });
 
-      // SECURITY FIX: Operators can only act on devices in their accessible groups (IDOR prevention)
       let devices = [];
-      if (deviceId) {
-        const d = await loadDevice(deviceId);
-        if (!d) return res.status(404).json({ error: 'Device not found' });
-        if (req.user.role !== 'admin') {
-          const access = await queryOne(
-            'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
-            [req.user.id, d.group_id]
-          );
-          if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+      try {
+        if (deviceId) {
+          const d = await loadDevice(deviceId);
+          if (!d) return res.status(404).json({ error: 'Device not found' });
+          await verifyDeviceOrgAccess(req, d);
+          if (req.user.role !== 'admin') {
+            const access = await queryOne(
+              'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+              [req.user.id, d.group_id]
+            );
+            if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+          }
+          devices = [d];
+        } else {
+          const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
+          if (!group) return res.status(404).json({ error: 'Group not found' });
+          const headerOrgId = req.headers?.['x-org-id'];
+          const orgId = headerOrgId || req.user?.activeOrgId;
+          if (!orgId || group.org_id !== orgId) {
+            return res.status(403).json({ error: 'Access denied to this group' });
+          }
+          if (req.user.role !== 'admin') {
+            const access = await queryOne(
+              'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
+              [req.user.id, groupId]
+            );
+            if (!access) return res.status(403).json({ error: 'Access denied to this group' });
+          }
+          const rows = await query('SELECT * FROM devices WHERE group_id = ? AND org_id = ?', [groupId, orgId]);
+          devices = rows.map(d => ({
+            ...d,
+            _ssh_password:   decrypt(d.ssh_password),
+            _ssh_key:        decrypt(d.ssh_key),
+            _winrm_password: decrypt(d.winrm_password),
+          }));
         }
-        devices = [d];
-      } else {
-        const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
-        if (!group) return res.status(404).json({ error: 'Group not found' });
-        if (req.user.role !== 'admin') {
-          const access = await queryOne(
-            'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
-            [req.user.id, groupId]
-          );
-          if (!access) return res.status(403).json({ error: 'Access denied to this group' });
-        }
-        const rows = await query('SELECT * FROM devices WHERE group_id = ?', [groupId]);
-        devices = rows.map(d => ({
-          ...d,
-          _ssh_password:   decrypt(d.ssh_password),
-          _ssh_key:        decrypt(d.ssh_key),
-          _winrm_password: decrypt(d.winrm_password),
-        }));
+      } catch (e) {
+        return res.status(e.status || 500).json({ error: e.message, code: e.code });
       }
 
       if (!devices.length) return res.status(400).json({ error: 'No devices found for target' });
@@ -138,6 +148,12 @@ router.post('/exec',
 
     const device = await loadDevice(req.body.deviceId);
     if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    try {
+      await verifyDeviceOrgAccess(req, device);
+    } catch (e) {
+      return res.status(e.status || 500).json({ error: e.message, code: e.code });
+    }
 
     // SECURITY FIX: Operators can only exec on their accessible devices
     if (req.user.role !== 'admin') {

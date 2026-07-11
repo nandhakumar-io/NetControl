@@ -2,6 +2,7 @@
 const express = require('express');
 const { getPool } = require('../db');
 const { requireAuth, requireRole, requirePermission } = require('../middleware/auth');
+const { requireOrgContext } = require('../middleware/tenant');
 const syslogForwarder = require('../services/syslogForwarder');
 
 const router = express.Router();
@@ -13,6 +14,18 @@ router.use(requireAuth);
 function buildAuditQuery(req) {
   const where  = [];
   const params = [];
+
+  // SECURITY FIX: audit_log has carried an org_id column since the
+  // multi-tenant migration, but this route never filtered by it — any user
+  // with the view_audit permission bit (including a global 'admin', who in
+  // an MSP deployment may only be meant to administer their own client org)
+  // could see and export every OTHER tenant's audit trail: usernames, IPs,
+  // and full command text from routes/actions.js's exec endpoint. req.orgId
+  // is set by requireOrgContext, which also verifies the caller is actually
+  // a member of that org (rejecting an arbitrary X-Org-Id) before we ever
+  // get here — see middleware/tenant.js.
+  where.push('org_id = ?');
+  params.push(req.orgId);
 
   if (req.user.role !== 'admin') {
     where.push(`(
@@ -46,7 +59,7 @@ function csvEscape(val) {
 }
 
 // GET /api/audit?page=1&limit=25&action=wake&search=admin&result=success
-router.get('/', requirePermission(128), async (req, res) => {
+router.get('/', requirePermission(128), requireOrgContext, async (req, res) => {
   try {
     const page   = Math.max(1, parseInt(req.query.page)  || 1);
     const limit  = Math.min(200, Math.max(1, parseInt(req.query.limit) || 25));
@@ -152,7 +165,7 @@ async function generateAuditExport(filters, format) {
 }
 
 // GET /api/audit/export?format=csv|txt — honors the same filters as the list view
-router.get('/export', requirePermission(128), async (req, res) => {
+router.get('/export', requirePermission(128), requireOrgContext, async (req, res) => {
   try {
     const format = req.query.format === 'txt' ? 'txt' : 'csv';
     const { whereClause, params } = buildAuditQuery(req);

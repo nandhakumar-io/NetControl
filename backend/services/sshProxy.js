@@ -27,16 +27,17 @@ const { WebSocketServer } = require('ws');
 const { Client }          = require('ssh2');
 const jwt                 = require('jsonwebtoken');
 const { queryOne }        = require('../db');
+const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { decrypt }         = require('./crypto');
 require('dotenv').config();
 
 // SECURITY FIX: Verify token and check user is still enabled + has device access
-async function verifyUserAndAccess(token, deviceId) {
+async function verifyUserAndAccess(token, deviceId, upgradeReq) {
   if (!token) throw new Error('No token');
   const payload = jwt.verify(token, process.env.JWT_SECRET);
 
   // Live DB check — reject if user disabled since token was issued
-  const user = await queryOne('SELECT id, role, enabled FROM users WHERE id = ?', [payload.id]);
+  const user = await queryOne('SELECT id, role, enabled, active_org_id FROM users WHERE id = ?', [payload.id]);
   if (!user || !user.enabled) throw new Error('Account disabled');
 
   // Operators must have group access to the target device
@@ -49,6 +50,17 @@ async function verifyUserAndAccess(token, deviceId) {
     );
     if (!access) throw new Error('Access denied to this device');
   }
+
+  // SECURITY FIX: also confirm the device belongs to an org this user is a
+  // member of (see middleware/tenant.js#verifyDeviceOrgAccess for the full
+  // rationale — global 'admin'/'operator' role alone does not imply access
+  // to another tenant's devices in MSP/multi-org deployments).
+  const device = await queryOne('SELECT id, org_id FROM devices WHERE id = ?', [deviceId]);
+  if (!device) throw new Error('Device not found');
+  await verifyDeviceOrgAccess(
+    { headers: upgradeReq?.headers || {}, user: { id: user.id, activeOrgId: user.active_org_id } },
+    device
+  );
 
   return { ...payload, role: user.role };
 }
@@ -190,7 +202,7 @@ function attachSSHProxy(httpServer) {
       if (!deviceIdFromUrl(req)) return done(false, 400, 'Bad path');
       const token    = extractToken(req);
       const deviceId = deviceIdFromUrl(req);
-      verifyUserAndAccess(token, deviceId)
+      verifyUserAndAccess(token, deviceId, req)
         .then(() => done(true))
         .catch((err) => {
           console.error('[SSHProxy] Auth rejected:', err.message);

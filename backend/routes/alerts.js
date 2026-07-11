@@ -80,11 +80,18 @@ const sseClients = new Map();
 
 function pushNotification(userIds, notification) {
   for (const uid of userIds) {
+    // Build the enriched copy once and use it for BOTH the pending queue
+    // (picked up on next /stream reconnect) and the live SSE write — this
+    // used to build an enriched object with id/ts for the queue but write
+    // the bare, id-less `notification` to already-open SSE clients, so a
+    // live-pushed item had no `id`/`read_at` and couldn't be matched with
+    // what GET /alerts/notifications later returns after a reload.
+    const enriched = { ...notification, id: uuidv4(), ts: Date.now() };
     if (!pendingNotifications.has(uid)) pendingNotifications.set(uid, []);
-    pendingNotifications.get(uid).push({ ...notification, id: uuidv4(), ts: Date.now() });
+    pendingNotifications.get(uid).push(enriched);
     if (sseClients.has(uid)) {
       for (const res of sseClients.get(uid)) {
-        try { res.write(`data: ${JSON.stringify(notification)}\n\n`); } catch {}
+        try { res.write(`data: ${JSON.stringify(enriched)}\n\n`); } catch {}
       }
     }
   }

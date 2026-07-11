@@ -60,6 +60,30 @@ async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
 
   try {
+    // EventSource (used for GET /api/alerts/stream) can't set custom
+    // headers, so the frontend passes the JWT as ?token=... instead of an
+    // Authorization header. Without this, every SSE connection 401'd
+    // silently (EventSource retries invisibly rather than surfacing an
+    // error), so live push notifications never arrived — the bell only
+    // ever reflected whatever GET /alerts/notifications loaded on mount,
+    // making it look like notifications only "showed up after a refresh".
+    const queryToken = typeof req.query.token === 'string' ? req.query.token : null;
+    if (!authHeader && queryToken) {
+      const payload = jwt.verify(queryToken, process.env.JWT_SECRET);
+      const liveUser = await queryOne(
+        'SELECT id, username, role, enabled, permissions, active_org_id FROM users WHERE id = ?',
+        [payload.id]
+      );
+      if (!liveUser || !liveUser.enabled) {
+        return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
+      }
+      req.user = {
+        ...payload, role: liveUser.role, permissions: liveUser.permissions || 0,
+        activeOrgId: liveUser.active_org_id || null,
+      };
+      return next();
+    }
+
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.slice(7);
       const payload = jwt.verify(token, process.env.JWT_SECRET);

@@ -33,6 +33,7 @@ const express    = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { queryOne } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { agentRelayLimiter } = require('../middleware/rateLimiter');
 const jwt    = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -219,8 +220,14 @@ async function agentAuthMiddleware(req, res, next) {
 // ── POST /api/terminal/open/:deviceId — client opens a session ────────────────
 router.post('/open/:deviceId', requireAuth, async (req, res) => {
   const { deviceId } = req.params;
-  const device = await queryOne('SELECT id, name FROM devices WHERE id = ?', [deviceId]).catch(() => null);
+  const device = await queryOne('SELECT id, name, org_id FROM devices WHERE id = ?', [deviceId]).catch(() => null);
   if (!device) return res.status(404).json({ error: 'Device not found' });
+
+  try {
+    await verifyDeviceOrgAccess(req, device);
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.message, code: e.code });
+  }
 
   if (req.user.role !== 'admin') {
     const access = await queryOne(

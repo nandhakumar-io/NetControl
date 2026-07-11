@@ -397,7 +397,11 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
         ssh_username:   device.ssh_username   || '',
         ssh_password:   '',
         ssh_key:        '',
-        winrm_username: device.winrm_username || '',
+        // Backend stores the Windows/RPC username in `rpc_username`
+        // (routes/devices.js) — device.winrm_username never existed on the
+        // returned row, so this always prefilled blank and forced a retype
+        // on every edit. Fall back to rpc_username, which is what's actually there.
+        winrm_username: device.rpc_username || device.winrm_username || '',
         winrm_password: '',
       } : EMPTY)
       setErrors({})
