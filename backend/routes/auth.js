@@ -39,6 +39,18 @@ function verifyMfaToken(token) {
   if (payload.purpose !== '2fa_pending') throw new Error('Invalid token purpose');
   return payload;
 }
+// Same shape/lifetime as signMfaToken, but for accounts an ADMIN has marked
+// totp_required that haven't enrolled yet. Distinct `purpose` so this token
+// can only be redeemed at /2fa/enroll/* and can never be replayed against
+// /2fa/verify (which requires an already-confirmed secret) or vice versa.
+function signEnrollToken(userId) {
+  return jwt.sign({ id: userId, purpose: '2fa_enroll_pending' }, process.env.JWT_SECRET, { expiresIn: '10m' });
+}
+function verifyEnrollToken(token) {
+  const payload = jwt.verify(token, process.env.JWT_SECRET);
+  if (payload.purpose !== '2fa_enroll_pending') throw new Error('Invalid token purpose');
+  return payload;
+}
 function publicUser(user) {
   return { id: user.id, username: user.username, role: user.role, permissions: user.permissions || 0 };
 }
@@ -237,6 +249,15 @@ router.post('/login', authLimiter, async (req, res) => {
       return res.json({ requires2FA: true, mfaToken: signMfaToken(user.id) });
     }
 
+    // Admin has mandated 2FA for this account (Users page → "Require 2FA")
+    // but the user hasn't enrolled yet. Don't complete the login — hand
+    // back a scope-limited enroll token so the frontend can walk them
+    // through setup, then finish the login itself once a code is confirmed.
+    if (user.totp_required) {
+      await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa_enrollment', ipSource: ip, result: 'success' });
+      return res.json({ requiresEnrollment: true, enrollToken: signEnrollToken(user.id) });
+    }
+
     const accessToken = signAccess(user);
     await createRefreshToken(user.id, res);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
@@ -373,6 +394,93 @@ function oauthClient() {
   return new OAuth2Client(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, redirectUri());
 }
 
+
+// Reached only when login found user.totp_required && !user.totp_enabled.
+// Mirrors /me/2fa/setup + /me/2fa/confirm from routes/users.js, but keyed
+// off the enrollToken from login instead of requireAuth — the user has no
+// access token yet, that's the whole point of forcing enrollment first.
+
+// POST /api/auth/2fa/enroll/setup — generate a pending secret + QR code.
+router.post('/2fa/enroll/setup', authLimiter, async (req, res) => {
+  const { enrollToken } = req.body;
+  if (!enrollToken) return res.status(400).json({ error: 'enrollToken is required' });
+  try {
+    const payload = verifyEnrollToken(enrollToken);
+    const user = await queryOne('SELECT id, username, totp_enabled, totp_required FROM users WHERE id = ?', [payload.id]);
+    if (!user) return res.status(401).json({ error: 'Please sign in again.' });
+    if (!user.totp_required) return res.status(400).json({ error: '2FA is not required for this account.' });
+    if (user.totp_enabled) return res.status(400).json({ error: '2FA is already enabled — please sign in again.' });
+
+    const secret = twoFactor.generateSecret();
+    await execute('UPDATE users SET totp_secret = ? WHERE id = ?', [twoFactor.encryptSecret(secret), user.id]);
+
+    const otpauthUrl = twoFactor.keyUri(secret, user.username);
+    const qrDataUrl = await twoFactor.qrCodeDataUrl(otpauthUrl);
+    res.json({ secret, otpauthUrl, qrDataUrl });
+  } catch {
+    return res.status(401).json({ error: 'Your session expired. Please sign in again.' });
+  }
+});
+
+// POST /api/auth/2fa/enroll/confirm — verify the first code, turn 2FA on,
+// and — since this account has now satisfied its admin-mandated requirement
+// — finish the login exactly like /2fa/verify does (issues a real session).
+router.post('/2fa/enroll/confirm', authLimiter, async (req, res) => {
+  const ip = req.realIp || req.ip;
+  const { enrollToken, code } = req.body;
+  if (!enrollToken || !code) return res.status(400).json({ error: 'enrollToken and code are required' });
+
+  try {
+    const payload = verifyEnrollToken(enrollToken);
+    const user = await queryOne('SELECT * FROM users WHERE id = ?', [payload.id]);
+    if (!user || !user.totp_required) return res.status(401).json({ error: 'Please sign in again.' });
+    if (!user.enabled) return res.status(403).json({ error: 'Account is disabled. Contact your administrator.' });
+    if (!user.totp_secret) return res.status(400).json({ error: 'No pending 2FA setup. Call /2fa/enroll/setup first.' });
+
+    const secret = twoFactor.decryptSecret(user.totp_secret);
+    if (!twoFactor.verifyToken(secret, code)) {
+      const bfResult = await bf.recordFailure(ip, user.username);
+      await audit.log({ userId: user.id, username: user.username, action: '2fa_enroll_failed', ipSource: ip, result: 'failure' });
+      if (bfResult.banned) return res.status(429).json({ error: 'Too many failed attempts. Your IP has been temporarily blocked.', code: 'IP_BANNED' });
+      return res.status(401).json({ error: 'Invalid code. Check your authenticator app and try again.', attemptsRemaining: bfResult.remaining });
+    }
+
+    const { plain, hashed } = await twoFactor.generateBackupCodes();
+    await execute(
+      `UPDATE users SET totp_enabled = 1, totp_backup_codes = ?, totp_confirmed_at = ? WHERE id = ?`,
+      [twoFactor.encryptBackupCodes(hashed), Math.floor(Date.now() / 1000), user.id]
+    );
+    await audit.log({
+      userId: user.id, username: user.username, action: '2fa_enabled', targetType: 'user',
+      targetId: user.id, targetName: user.username, ipSource: ip, result: 'success', details: 'admin-mandated enrollment',
+    });
+
+    const ipCheck = await isIPAllowed(ip, user.id, user.role);
+    if (!ipCheck.allowed) {
+      await logBlockedAttempt({ username: user.username, ip, reason: `IP allowlist: ${ipCheck.reason}` });
+      await audit.log({ userId: user.id, username: user.username, action: 'login_blocked_ip', ipSource: ip, result: 'failure', details: 'IP not in allowlist (post-enrollment)' });
+      return res.status(403).json({ error: 'Access denied: your IP address is not permitted.', code: 'IP_NOT_ALLOWED' });
+    }
+
+    bf.recordSuccess(ip);
+    const accessToken = signAccess(user);
+    await createRefreshToken(user.id, res);
+    await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
+    await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: 'via mandated 2FA enrollment' });
+    webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip} (completed mandated 2FA enrollment)` }).catch(() => {});
+
+    res.json({
+      accessToken,
+      user: publicUser(user),
+      mustChangePassword: !!user.must_change_password,
+      backupCodes: plain, // shown exactly once — same as /me/2fa/confirm
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/google', authLimiter, (req, res) => {
   if (!googleEnabled()) return res.status(501).json({ error: 'Google OAuth is not configured.' });
   const state = makeState();
@@ -483,6 +591,11 @@ router.get('/google/callback', authLimiter, async (req, res) => {
     if (user.totp_enabled) {
       await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa', ipSource: ip, result: 'success', details: 'via Google' });
       return res.redirect(`${frontendUrl}/auth/callback#requires2FA=1&mfaToken=${encodeURIComponent(signMfaToken(user.id))}`);
+    }
+
+    if (user.totp_required) {
+      await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa_enrollment', ipSource: ip, result: 'success', details: 'via Google' });
+      return res.redirect(`${frontendUrl}/auth/callback#requiresEnrollment=1&enrollToken=${encodeURIComponent(signEnrollToken(user.id))}`);
     }
 
     const accessToken = signAccess(user);

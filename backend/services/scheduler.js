@@ -34,8 +34,8 @@ async function executeScheduledAction(schedule) {
     let details = '';
     try {
       if (schedule.action === 'wake') {
-        const { wake } = require('./wol');
-        await wake(device.mac_address);
+        const { wakeSmart } = require('./wol');
+        await wakeSmart(device);
       } else if (schedule.action === 'shutdown') {
         if (device.os_type === 'linux') await require('./ssh').shutdown(built);
         else await require('./winrm').shutdown(built);

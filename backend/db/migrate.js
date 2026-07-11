@@ -747,6 +747,13 @@ run()
       console.warn('  ⚠  two_factor:', e.message);
     }
     try {
+      const { migrateTwoFactorRequired } = require('./migrate-2fa-required');
+      await migrateTwoFactorRequired();
+      console.log('  ✓ two_factor_required (users.totp_required)');
+    } catch (e) {
+      console.warn('  ⚠  two_factor_required:', e.message);
+    }
+    try {
       const { migrateBackupVerify } = require('./migrate-backup-verify');
       await migrateBackupVerify();
       console.log('  ✓ backup_verify (backups.verify_status/verified_at/verify_error/verify_checksum)');

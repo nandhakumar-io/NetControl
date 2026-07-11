@@ -95,9 +95,15 @@ export default function TwoFactorModal({ open, onClose }) {
                   <p className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>
                     Two-factor authentication is <span className="text-accent-green">enabled</span> on your account.
                   </p>
-                  <button className="btn-secondary w-full justify-center" onClick={() => setStep('disable')}>
-                    <ShieldOff size={14} /> Disable 2FA
-                  </button>
+                  {status.required ? (
+                    <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
+                      Your administrator requires 2FA on this account, so it can't be disabled here. Contact them if you need it turned off.
+                    </p>
+                  ) : (
+                    <button className="btn-secondary w-full justify-center" onClick={() => setStep('disable')}>
+                      <ShieldOff size={14} /> Disable 2FA
+                    </button>
+                  )}
                 </>
               ) : (
                 <>

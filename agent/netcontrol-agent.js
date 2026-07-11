@@ -541,6 +541,65 @@ async function runRelaySession(creds, sessionId) {
   await new Promise(r => proc.on('close', r));
 }
 
+// ── Wake-on-LAN relay ──────────────────────────────────────────────────────────
+// Broadcast frames never cross subnets, so a wake request from the central
+// server only reaches devices on the server's own L2 segment. This agent
+// runs ON the target's subnet, so it sends the magic packet locally instead
+// — built with plain `dgram` (no extra npm dependency needed).
+const dgram = require('dgram');
+
+function sendMagicPacket(mac, broadcastAddr, port = 9) {
+  return new Promise((resolve, reject) => {
+    const macBytes = mac.split(/[:-]/).map((h) => parseInt(h, 16));
+    if (macBytes.length !== 6 || macBytes.some((b) => Number.isNaN(b))) {
+      return reject(new Error(`Invalid MAC address: ${mac}`));
+    }
+    const packet = Buffer.alloc(102);
+    packet.fill(0xff, 0, 6);
+    for (let i = 6; i < 102; i += 6) Buffer.from(macBytes).copy(packet, i);
+
+    const sock = dgram.createSocket('udp4');
+    sock.once('error', (err) => { try { sock.close(); } catch {} reject(err); });
+    sock.bind(() => {
+      sock.setBroadcast(true);
+      sock.send(packet, 0, packet.length, port, broadcastAddr, (err) => {
+        sock.close();
+        if (err) reject(err); else resolve();
+      });
+    });
+  });
+}
+
+async function wolRelayLoop(getCredsFn) {
+  while (running) {
+    const creds = getCredsFn();
+    const hdrs  = { 'x-api-key': creds.api_key };
+    try {
+      const res = await longPoll(`${SERVER_URL}/api/wol-relay/device/${creds.device_id}/pending`, hdrs);
+      if (res.status === 403) {
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      const job = res.body?.job;
+      if (job) {
+        console.log(`\n[Agent] WoL relay: waking ${job.targetName || job.mac} on local subnet…`);
+        let ok = true, error = null;
+        try {
+          await sendMagicPacket(job.mac, job.broadcastAddr || '255.255.255.255');
+        } catch (e) {
+          ok = false; error = e.message;
+          console.warn(`[Agent] WoL relay failed: ${e.message}`);
+        }
+        await httpReq(
+          `${SERVER_URL}/api/wol-relay/device/${creds.device_id}/result`,
+          { method: 'POST', headers: hdrs },
+          { targetDeviceId: job.targetDeviceId, targetName: job.targetName, ok, error }
+        ).catch(() => {});
+      }
+    } catch { await new Promise((r) => setTimeout(r, 3000)); }
+  }
+}
+
 async function relayLoop(getCredsFn) {
   while (running) {
     const creds = getCredsFn();
@@ -583,7 +642,7 @@ async function main() {
     console.log(`[Agent] Credentials loaded for "${creds.device_name}"`);
   }
 
-  console.log(`[Agent] Running — metrics every ${INTERVAL_SEC}s + HTTP terminal relay`);
+  console.log(`[Agent] Running — metrics every ${INTERVAL_SEC}s + HTTP terminal relay + WoL relay`);
 
   const startRelay = () => {
     relayLoop(() => creds).catch(e => {
@@ -592,6 +651,14 @@ async function main() {
     });
   };
   startRelay();
+
+  const startWolRelay = () => {
+    wolRelayLoop(() => creds).catch(e => {
+      console.error('[Agent] WoL relay crashed:', e.message);
+      if (running) setTimeout(startWolRelay, 5000);
+    });
+  };
+  startWolRelay();
 
   let fails = 0, backoff = 2000;
   while (running) {

@@ -14,6 +14,10 @@ export const useAuthStore = create((set) => ({
         set({ isLoading: false })
         return { ok: false, requires2FA: true, mfaToken: data.mfaToken }
       }
+      if (data.requiresEnrollment) {
+        set({ isLoading: false })
+        return { ok: false, requiresEnrollment: true, enrollToken: data.enrollToken }
+      }
       const token = data.accessToken || data.token
       localStorage.setItem('nc_token', token)
       set({ user: data.user, token, isLoading: false })
@@ -34,6 +38,34 @@ export const useAuthStore = create((set) => ({
       localStorage.setItem('nc_token', token)
       set({ user: data.user, token, isLoading: false })
       return { ok: true, backupCodeUsed: data.backupCodeUsed, backupCodesRemaining: data.backupCodesRemaining }
+    } catch (err) {
+      set({ isLoading: false })
+      return { ok: false, message: err.response?.data?.error || 'Verification failed' }
+    }
+  },
+
+  // Admin-mandated 2FA enrollment — reached when login() returns
+  // requiresEnrollment instead of requires2FA (account has no secret yet).
+  // startEnrollment generates the QR/secret; confirmEnrollment verifies the
+  // first code, turns 2FA on, and — since that satisfies the requirement —
+  // completes the login in the same call.
+  startEnrollment: async (enrollToken) => {
+    try {
+      const { data } = await api.post('/auth/2fa/enroll/setup', { enrollToken })
+      return { ok: true, secret: data.secret, otpauthUrl: data.otpauthUrl, qrDataUrl: data.qrDataUrl }
+    } catch (err) {
+      return { ok: false, message: err.response?.data?.error || 'Could not start 2FA setup' }
+    }
+  },
+
+  confirmEnrollment: async (enrollToken, code) => {
+    set({ isLoading: true })
+    try {
+      const { data } = await api.post('/auth/2fa/enroll/confirm', { enrollToken, code })
+      const token = data.accessToken || data.token
+      localStorage.setItem('nc_token', token)
+      set({ user: data.user, token, isLoading: false })
+      return { ok: true, backupCodes: data.backupCodes }
     } catch (err) {
       set({ isLoading: false })
       return { ok: false, message: err.response?.data?.error || 'Verification failed' }

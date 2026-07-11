@@ -6,7 +6,7 @@ const { requireAuth, requireActionPin, requireRole } = require('../middleware/au
 const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { actionLimiter } = require('../middleware/rateLimiter');
 const { decrypt } = require('../services/crypto');
-const { wake } = require('../services/wol');
+const { wakeSmart } = require('../services/wol');
 const ssh = require('../services/ssh');
 const winrm = require('../services/winrm');
 const audit = require('../services/audit');
@@ -36,8 +36,10 @@ async function loadDevice(id) {
 
 async function performAction(action, device) {
   if (action === 'wake') {
-    await wake(device.mac_address);
-    return 'wake packet sent';
+    const result = await wakeSmart(device);
+    return result.method === 'relay'
+      ? `wake packet relayed via ${result.relayAgent}`
+      : 'wake packet sent (direct — no on-subnet relay agent found)';
   }
   if (action === 'shutdown') {
     if (device.os_type === 'linux') await ssh.shutdown(device);

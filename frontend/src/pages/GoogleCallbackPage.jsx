@@ -41,6 +41,21 @@ export default function GoogleCallbackPage() {
       return
     }
 
+    if (hash.get('requiresEnrollment') === '1') {
+      const enrollToken = hash.get('enrollToken')
+      window.history.replaceState(null, '', '/auth/callback')
+      if (!enrollToken) {
+        toast.error('Google sign-in did not complete')
+        navigate('/login', { replace: true })
+        return
+      }
+      // Same idea, but for an admin-mandated 2FA account that hasn't
+      // enrolled yet — LoginPage shows the QR/setup step instead.
+      sessionStorage.setItem('nc_pending_enroll_token', enrollToken)
+      navigate('/login', { replace: true })
+      return
+    }
+
     const token = hash.get('token')
     const userRaw = hash.get('user')
 

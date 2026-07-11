@@ -24,7 +24,14 @@ export default function LoginPage() {
   const [googleEnabled, setGoogleEnabled] = useState(false)
   const [mfaToken, setMfaToken] = useState(null)
   const [code, setCode] = useState('')
-  const { login, verify2FA, isLoading, token } = useAuthStore()
+  // Admin-mandated 2FA enrollment — separate from the normal mfaToken step
+  // above, since this account has no secret yet and needs to see a QR code
+  // before it can produce a valid code at all.
+  const [enrollToken, setEnrollToken] = useState(null)
+  const [enrollData, setEnrollData] = useState(null) // { secret, otpauthUrl, qrDataUrl }
+  const [enrollCode, setEnrollCode] = useState('')
+  const [backupCodes, setBackupCodes] = useState(null)
+  const { login, verify2FA, startEnrollment, confirmEnrollment, isLoading, token } = useAuthStore()
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -41,7 +48,25 @@ export default function LoginPage() {
       sessionStorage.removeItem('nc_pending_mfa_token')
       setMfaToken(pending)
     }
+    const pendingEnroll = sessionStorage.getItem('nc_pending_enroll_token')
+    if (pendingEnroll) {
+      sessionStorage.removeItem('nc_pending_enroll_token')
+      setEnrollToken(pendingEnroll)
+    }
   }, [])
+
+  // Once we have an enrollToken (either from a password login or the Google
+  // callback above), fetch the QR code/secret to show right away.
+  useEffect(() => {
+    if (!enrollToken || enrollData) return
+    let cancelled = false
+    startEnrollment(enrollToken).then((result) => {
+      if (cancelled) return
+      if (result.ok) setEnrollData(result)
+      else { setError(result.message); setEnrollToken(null) }
+    })
+    return () => { cancelled = true }
+  }, [enrollToken])
 
   // A freshly deployed instance has no users yet — send the operator to the
   // setup wizard instead of a login form they can't possibly get through.
@@ -93,6 +118,26 @@ export default function LoginPage() {
       navigate('/dashboard', { replace: true })
     } else if (result.requires2FA) {
       setMfaToken(result.mfaToken)
+    } else if (result.requiresEnrollment) {
+      setEnrollToken(result.enrollToken)
+    } else {
+      setError(result.message)
+    }
+  }
+
+  const handleConfirmEnrollment = async (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!enrollCode.trim()) { setError('Enter the code from your authenticator app'); return }
+    setError('')
+    const result = await confirmEnrollment(enrollToken, enrollCode.trim())
+    if (result.ok) {
+      if (result.backupCodes?.length) {
+        setBackupCodes(result.backupCodes)
+      } else {
+        toast.success('2FA enabled — welcome back')
+        navigate('/dashboard', { replace: true })
+      }
     } else {
       setError(result.message)
     }
@@ -136,7 +181,85 @@ export default function LoginPage() {
         <div className="glass rounded-2xl border border-white/10 overflow-hidden">
           <div className="h-0.5 bg-gradient-to-r from-transparent via-brand-500 to-transparent opacity-60" />
 
-          {!mfaToken ? (
+          {enrollToken ? (
+            backupCodes ? (
+              <div className="p-6 flex flex-col gap-4">
+                <div>
+                  <p className="text-sm font-body font-medium text-slate-200">Save your backup codes</p>
+                  <p className="text-xs text-slate-500 font-body mt-1">
+                    Each can be used once if you lose access to your authenticator app. They won't be shown again.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 font-mono text-xs bg-black/20 rounded-lg p-3 border border-white/10">
+                  {backupCodes.map(c => <span key={c} className="text-slate-300">{c}</span>)}
+                </div>
+                <button
+                  type="button"
+                  className="btn-primary w-full justify-center mt-1"
+                  onClick={() => { toast.success('2FA enabled — welcome back'); navigate('/dashboard', { replace: true }) }}
+                >
+                  I've saved these — continue
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleConfirmEnrollment} className="p-6 flex flex-col gap-4">
+                <div>
+                  <p className="text-sm font-body font-medium text-slate-200">Set up two-factor authentication</p>
+                  <p className="text-xs text-slate-500 font-body mt-1">
+                    Your administrator requires 2FA on this account. Scan this code with an authenticator app (Google Authenticator, Authy, 1Password, etc).
+                  </p>
+                </div>
+                {enrollData?.qrDataUrl ? (
+                  <div className="flex justify-center bg-white rounded-lg p-3">
+                    <img src={enrollData.qrDataUrl} alt="2FA QR code" width={160} height={160} />
+                  </div>
+                ) : (
+                  <div className="flex justify-center py-6"><Loader2 size={18} className="animate-spin text-slate-500" /></div>
+                )}
+                {enrollData?.secret && (
+                  <p className="text-[11px] text-slate-500 font-body text-center break-all">
+                    Can't scan it? Enter this key manually: <span className="font-mono text-slate-300">{enrollData.secret}</span>
+                  </p>
+                )}
+                <div>
+                  <label className="label">Authentication code</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className="input-field text-center tracking-[0.3em] font-mono"
+                    placeholder="000000"
+                    maxLength={6}
+                    value={enrollCode}
+                    onChange={e => setEnrollCode(e.target.value)}
+                    autoComplete="one-time-code"
+                    autoFocus
+                  />
+                </div>
+
+                {error && (
+                  <div className="px-3 py-2 rounded-lg bg-accent-red/10 border border-accent-red/20">
+                    <p className="text-xs text-accent-red font-body">{error}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="btn-primary w-full justify-center mt-1"
+                  disabled={isLoading || !enrollData}
+                >
+                  {isLoading ? <Loader2 size={14} className="animate-spin" /> : null}
+                  {isLoading ? 'Verifying...' : 'Enable 2FA & sign in'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setEnrollToken(null); setEnrollData(null); setEnrollCode(''); setError('') }}
+                  className="text-xs text-slate-500 hover:text-slate-300 font-body text-center"
+                >
+                  ← Back to sign in
+                </button>
+              </form>
+            )
+          ) : !mfaToken ? (
           <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
             <div>
               <label className="label">Username</label>
@@ -230,7 +353,7 @@ export default function LoginPage() {
           </form>
           )}
 
-          {googleEnabled && !mfaToken && (
+          {googleEnabled && !mfaToken && !enrollToken && (
             <div className="px-6 pb-2">
               <div className="flex items-center gap-3 mb-4">
                 <div className="flex-1 h-px bg-white/10" />

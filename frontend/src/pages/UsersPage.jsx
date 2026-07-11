@@ -144,6 +144,13 @@ function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onAc
                 <Link2 size={10} style={{ color: '#34d399' }} />
               </span>
             )}
+            {user.totp_enabled ? (
+              <span title="2FA enabled" className="text-[9px] px-1.5 py-0.5 rounded font-body font-bold"
+                style={{ background: 'rgba(52,211,153,0.12)', color: '#34d399' }}>2FA</span>
+            ) : user.totp_required ? (
+              <span title="2FA required — user hasn't enrolled yet" className="text-[9px] px-1.5 py-0.5 rounded font-body font-bold"
+                style={{ background: 'rgba(251,191,36,0.12)', color: '#fbbf24' }}>2FA pending</span>
+            ) : null}
           </div>
           <p className="text-[10px] font-body truncate" style={{ color: 'var(--text-muted)' }}>
             {user.email || `Created ${formatTs(user.created_at)}`}

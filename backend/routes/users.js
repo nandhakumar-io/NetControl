@@ -20,7 +20,7 @@ function sanitizeUser(u) {
 // Columns safe to return to the client. google_linked is derived so we never
 // leak the raw Google subject id, just whether an account is linked.
 const USER_FIELDS = `id, username, email, display_name, role, permissions, enabled,
-  has_password, totp_enabled, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
+  has_password, totp_enabled, totp_required, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
 
 // ── POST /api/users/me/change-password — any authenticated user ──────────────
 // Used to satisfy must_change_password after the random one-time admin
@@ -61,8 +61,8 @@ const twoFactor = require('../services/twoFactor');
 // GET /api/users/me/2fa/status — is 2FA on for the current account?
 router.get('/me/2fa/status', async (req, res) => {
   try {
-    const user = await queryOne('SELECT totp_enabled, totp_confirmed_at FROM users WHERE id = ?', [req.user.id]);
-    res.json({ enabled: !!user?.totp_enabled, confirmedAt: user?.totp_confirmed_at || null });
+    const user = await queryOne('SELECT totp_enabled, totp_required, totp_confirmed_at FROM users WHERE id = ?', [req.user.id]);
+    res.json({ enabled: !!user?.totp_enabled, required: !!user?.totp_required, confirmedAt: user?.totp_confirmed_at || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -129,6 +129,9 @@ router.post('/me/2fa/disable',
     try {
       const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.user.id]);
       if (!user) return res.status(404).json({ error: 'User not found' });
+      if (user.totp_required) {
+        return res.status(403).json({ error: 'Your administrator requires 2FA on this account. Ask them to lift that requirement before disabling it.' });
+      }
 
       const passOk = await bcrypt.compare(req.body.password, user.password || '');
       if (!passOk) return res.status(401).json({ error: 'Current password is incorrect' });
@@ -246,6 +249,7 @@ router.post('/',
     body('displayName').optional({ nullable: true }).trim().isLength({ max: 100 }),
     body('role').isIn(['admin', 'operator', 'viewer', 'custom']),
     body('permissions').optional().isInt({ min: 0 }),
+    body('totpRequired').optional().isBoolean(),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -253,6 +257,7 @@ router.post('/',
 
     const { username, password, role, permissions, displayName } = req.body;
     const email = req.body.email ? req.body.email.toLowerCase().trim() : null;
+    const totpRequired = req.body.totpRequired ? 1 : 0;
 
     if (!password && !email) {
       return res.status(400).json({ error: 'Provide a password, or an email to invite the user via Google sign-in.' });
@@ -282,9 +287,9 @@ router.post('/',
       const id = uuidv4();
 
       await execute(
-        `INSERT INTO users (id, username, password, has_password, email, display_name, role, permissions, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-        [id, lower, hash, hasPassword, email, displayName || null, role, permissions || 0]
+        `INSERT INTO users (id, username, password, has_password, email, display_name, role, permissions, enabled, totp_required)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+        [id, lower, hash, hasPassword, email, displayName || null, role, permissions || 0, totpRequired]
       );
 
       // Add the new user to an organization immediately — without this,
@@ -348,6 +353,7 @@ router.put('/:id',
     body('permissions').optional().isInt({ min: 0 }),
     body('enabled').optional().isBoolean(),
     body('unlinkGoogle').optional().isBoolean(),
+    body('totpRequired').optional().isBoolean(),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -374,6 +380,7 @@ router.put('/:id',
       const enabled     = req.body.enabled     !== undefined ? (req.body.enabled ? 1 : 0) : existing.enabled;
       const displayName = req.body.displayName !== undefined ? (req.body.displayName || null) : existing.display_name;
       const email       = req.body.email       !== undefined ? (req.body.email ? req.body.email.toLowerCase().trim() : null) : existing.email;
+      const totpRequired = req.body.totpRequired !== undefined ? (req.body.totpRequired ? 1 : 0) : existing.totp_required;
 
       // Check username uniqueness if changing
       if (username !== existing.username) {
@@ -403,14 +410,14 @@ router.put('/:id',
         const hash = await bcrypt.hash(req.body.password, 12);
         await execute(
           `UPDATE users SET username=?, role=?, permissions=?, enabled=?, password=?, has_password=?,
-             email=?, display_name=?, google_id=? WHERE id=?`,
-          [username, role, permissions, enabled, hash, hasPassword, email, displayName, googleId, req.params.id]
+             email=?, display_name=?, google_id=?, totp_required=? WHERE id=?`,
+          [username, role, permissions, enabled, hash, hasPassword, email, displayName, googleId, totpRequired, req.params.id]
         );
       } else {
         await execute(
           `UPDATE users SET username=?, role=?, permissions=?, enabled=?, has_password=?,
-             email=?, display_name=?, google_id=? WHERE id=?`,
-          [username, role, permissions, enabled, hasPassword, email, displayName, googleId, req.params.id]
+             email=?, display_name=?, google_id=?, totp_required=? WHERE id=?`,
+          [username, role, permissions, enabled, hasPassword, email, displayName, googleId, totpRequired, req.params.id]
         );
       }
 

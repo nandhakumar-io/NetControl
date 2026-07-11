@@ -290,6 +290,7 @@ app.use('/api/push',   require('./routes/push'));
 // relay, every relay call hit the catch-all 404 handler below — exactly the
 // "Relay failed: Not found" / "status code 404" error shown in the UI.
 app.use('/api/terminal',  require('./services/webTerminal').router);
+app.use('/api/wol-relay', require('./routes/wolRelay'));
 
 // SECURITY FIX: Health endpoint no longer exposes PID, memory, or uptime
 // to unauthenticated callers — those are recon aids for an attacker.

@@ -12,6 +12,7 @@ const EMPTY = {
   role:        'operator',
   permissions: 0,
   enabled:     true,
+  totpRequired: false,
 }
 
 // ── Permission toggles for custom role ──────────────────────────────────────
@@ -52,6 +53,7 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
         role:        user.role,
         permissions: user.permissions || 0,
         enabled:     !!user.enabled,
+        totpRequired: !!user.totp_required,
       } : EMPTY)
       setErrors({})
       setShowPw(false)
@@ -91,6 +93,7 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
         role:        form.role,
         permissions: form.role === 'custom' ? form.permissions : 0,
         enabled:     form.enabled,
+        totpRequired: form.totpRequired,
       }
       if (form.password) payload.password = form.password
       if (form.email.trim() || (user && user.email)) payload.email = form.email.trim() || null
@@ -356,6 +359,30 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
                 </div>
               </F>
             )}
+
+            {/* Require 2FA toggle — admin-mandated, separate from the user's own totp_enabled */}
+            <div className="flex items-center justify-between">
+              <div>
+                <p className={`text-sm font-body font-medium ${isLight ? 'text-[#1a1a2e]' : 'text-slate-200'}`}>Require 2FA</p>
+                <p className={`text-xs font-body ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
+                  {user && user.totp_enabled
+                    ? 'Already has 2FA enabled — this just keeps it mandatory.'
+                    : 'Next login will force them through 2FA setup before they can proceed.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => set('totpRequired', !form.totpRequired)}
+                className={`relative w-9 h-5 rounded-full border transition-all duration-300 shrink-0
+                  ${form.totpRequired
+                    ? isLight ? 'bg-[#6c5ce7] border-[#6c5ce7]' : 'bg-brand-500 border-brand-500'
+                    : isLight ? 'bg-slate-200 border-slate-300' : 'bg-surface-4 border-white/10'
+                  }`}
+              >
+                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all duration-300
+                  ${form.totpRequired ? 'left-[18px]' : 'left-0.5'}`} />
+              </button>
+            </div>
 
             {/* Enabled toggle */}
             {user && (
