@@ -281,7 +281,7 @@ export default function UsersPage() {
   )
 
   return (
-    <div className="p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
       <PageHeader icon={Users} title="User Management"
         description="Manage accounts, roles and group-level access"
         actions={
@@ -314,7 +314,7 @@ export default function UsersPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-5 gap-3 mb-5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-5">
         {[['Total', counts.total, '#a78bfa'], ['Admin', counts.admin, '#a78bfa'],
           ['Operator', counts.operator, '#38bdf8'], ['Viewer', counts.viewer, '#94a3b8'],
           ['Disabled', counts.disabled, '#f87171']].map(([l, v, c]) => (

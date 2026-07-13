@@ -81,7 +81,7 @@ export default function SchedulesPage() {
   const disabled = schedules.filter(s => !s.enabled)
 
   return (
-    <div className="p-6 max-w-[1400px] mx-auto animate-fade-in">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto animate-fade-in">
       <PageHeader
         icon={Clock}
         title="Schedules"

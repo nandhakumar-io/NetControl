@@ -73,12 +73,20 @@ html.light {
 
   html { transition: background-color 0.25s ease, color 0.25s ease; }
 
+  /* Mobile safety net — a single element (a wide table, an un-wrapped
+     fixed-width chart, etc.) shouldn't be able to force the whole page to
+     scroll sideways or make mobile Safari/Chrome shrink-to-fit zoom out.
+     Anything that genuinely needs horizontal scroll (tables, the terminal)
+     already opts in locally via its own overflow-x-auto wrapper. */
+  html, body { overflow-x: hidden; max-width: 100vw; }
+
   body {
     background-color: var(--bg-page);
     color: var(--text-primary);
     font-family: 'DM Sans', sans-serif;
     -webkit-font-smoothing: antialiased;
     min-height: 100vh;
+    width: 100%;
   }
 
   /* Ambient gradient blobs — dark */

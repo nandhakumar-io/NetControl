@@ -19,8 +19,8 @@ export default function PageHeader({
   const defaultIconColor = isLight ? 'text-white' : 'text-brand-400'
 
   return (
-    <div className="flex items-start justify-between mb-6">
-      <div className="flex items-center gap-4">
+    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-6">
+      <div className="flex items-center gap-4 min-w-0">
         <div
           className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0
             ${iconBg ?? defaultIconBg}
@@ -29,9 +29,9 @@ export default function PageHeader({
         >
           <Icon size={20} className={iconColor ?? defaultIconColor} />
         </div>
-        <div>
+        <div className="min-w-0">
           <h1
-            className="font-display text-xl"
+            className="font-display text-lg sm:text-xl truncate"
             style={{ color: 'var(--text-primary)' }}
           >
             {title}
@@ -46,8 +46,7 @@ export default function PageHeader({
           )}
         </div>
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && <div className="flex items-center gap-2 flex-wrap">{actions}</div>}
     </div>
   )
 }
-

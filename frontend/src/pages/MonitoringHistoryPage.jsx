@@ -398,7 +398,7 @@ export default function MonitoringHistoryPage() {
   }
 
   return (
-    <div className="p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
+    <div className="p-4 sm:p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
 
       {/* Header */}
       <div className="flex items-start justify-between gap-3 flex-wrap">

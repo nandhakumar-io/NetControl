@@ -737,7 +737,7 @@ export default function DiscoveryPage() {
   )
 
   return (
-    <div className="p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
       <PageHeader icon={Radar} title="Network Discovery"
         description="ICMP ping sweep, SNMP, LLDP/CDP neighbors, nmap port scan and vendor detection"
         actions={

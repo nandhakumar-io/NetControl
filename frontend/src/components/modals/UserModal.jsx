@@ -16,6 +16,17 @@ const EMPTY = {
 }
 
 // ── Permission toggles for custom role ──────────────────────────────────────
+// BUG FIX: this list stopped at VIEW_AUDIT (bit 128) — every permission bit
+// added since (DISCOVER_NETWORK, MANAGE_COMPLIANCE, MANAGE_PROCESS_POLICIES,
+// MANAGE_BACKUPS, VIEW_SLA_REPORTS, MANAGE_RUNBOOKS, and now
+// MANAGE_SYNTHETIC_CHECKS) was fully wired end-to-end on the backend and in
+// usePermissions.js, but had no checkbox here — so a custom-role user could
+// never actually be granted access to Discovery, Compliance, Backups,
+// Runbooks, SLA Reports, or Health Checks through this UI at all, no matter
+// what an admin tried. MANAGE_USERS/MANAGE_ROLES were missing too; this page
+// is already admin-only (see requireRole('admin') gating routes/users.js),
+// so surfacing them here just lets an admin delegate user/role management to
+// a custom role — it doesn't change who can reach this screen.
 const PERM_DEFS = [
   { bit: PERM.VIEW_DEVICES,     label: 'View Devices'      },
   { bit: PERM.MANAGE_DEVICES,   label: 'Manage Devices'    },
@@ -25,6 +36,15 @@ const PERM_DEFS = [
   { bit: PERM.VIEW_SCHEDULES,   label: 'View Schedules'    },
   { bit: PERM.MANAGE_SCHEDULES, label: 'Manage Schedules'  },
   { bit: PERM.VIEW_AUDIT,       label: 'View Audit Log'    },
+  { bit: PERM.DISCOVER_NETWORK,        label: 'Network Discovery' },
+  { bit: PERM.MANAGE_COMPLIANCE,       label: 'Compliance'        },
+  { bit: PERM.MANAGE_PROCESS_POLICIES, label: 'Process Rules'     },
+  { bit: PERM.MANAGE_BACKUPS,          label: 'Backups'           },
+  { bit: PERM.VIEW_SLA_REPORTS,        label: 'SLA Reports'       },
+  { bit: PERM.MANAGE_RUNBOOKS,         label: 'Runbooks'          },
+  { bit: PERM.MANAGE_SYNTHETIC_CHECKS, label: 'Health Checks'     },
+  { bit: PERM.MANAGE_USERS,     label: 'Manage Users'      },
+  { bit: PERM.MANAGE_ROLES,     label: 'Manage Roles'      },
 ]
 
 const F = ({ label, children, error }) => (
@@ -334,7 +354,7 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
             {/* Custom permission bits */}
             {form.role === 'custom' && (
               <F label="Permissions">
-                <div className={`rounded-lg border p-3 space-y-2
+                <div className={`rounded-lg border p-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 max-h-64 overflow-y-auto
                   ${isLight ? 'bg-[#f5f5fa] border-black/[0.07]' : 'bg-surface-3 border-white/6'}`}>
                   {PERM_DEFS.map(({ bit, label }) => {
                     const on = !!(form.permissions & bit)

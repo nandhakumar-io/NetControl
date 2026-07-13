@@ -220,7 +220,7 @@ export default function SlaReportsPage() {
   const band = slaBand(preview?.avgUptimePct)
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
       <PageHeader
         icon={FileBarChart2}
         title="SLA Reports"

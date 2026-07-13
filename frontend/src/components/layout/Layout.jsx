@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
-  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck,
-  ShieldBan, Archive, FileBarChart2, Wrench, Building2,
+  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
+  ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
@@ -18,7 +18,7 @@ import OrgSwitcher from './OrgSwitcher'
 // ── Notification bell — SSE listener only, no nav ─────────────────────────────
 // This component handles LIVE notifications (toasts + badge count).
 // The actual Alerts page is navigated to via the NavItem below.
-function NotificationBell({ collapsed, isLight }) {
+function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
   const [notifs, setNotifs] = useState([])
   const [open, setOpen]     = useState(false)
   const token    = localStorage.getItem('nc_token')
@@ -69,6 +69,18 @@ function NotificationBell({ collapsed, isLight }) {
   return (
     <div className="relative" ref={panelRef}>
       {/* Bell badge button — opens notification dropdown */}
+      {variant === 'topbar' ? (
+        <button onClick={() => setOpen(o => !o)} title="Notifications"
+          className={`relative w-9 h-9 rounded-lg flex items-center justify-center shrink-0
+            ${isLight ? 'text-slate-500 hover:bg-black/[0.04]' : 'text-slate-400 hover:bg-white/[0.06]'}`}>
+          <Bell size={18} />
+          {unread > 0 && (
+            <span className="absolute top-1 right-1 w-4 h-4 rounded-full bg-accent-red text-white text-[9px] flex items-center justify-center font-bold">
+              {unread > 9 ? '9+' : unread}
+            </span>
+          )}
+        </button>
+      ) : (
       <button
         onClick={() => setOpen(o => !o)}
         title="Notifications"
@@ -96,17 +108,18 @@ function NotificationBell({ collapsed, isLight }) {
           </span>
         )}
       </button>
+      )}
 
       {/* Notification dropdown */}
       {open && (
         <div
-          className="fixed z-[200] w-80 rounded-2xl overflow-hidden shadow-2xl animate-slide-up"
-          style={{
-            left: collapsed ? '68px' : '228px',
-            bottom: '80px',
-            background: isLight ? '#fff' : '#0f0f1a',
-            border: isLight ? '1px solid rgba(0,0,0,0.08)' : '1px solid rgba(255,255,255,0.08)',
-          }}
+          className="fixed z-[200] w-[calc(100vw-2rem)] max-w-80 rounded-2xl overflow-hidden shadow-2xl animate-slide-up"
+          style={variant === 'topbar'
+            ? { right: '12px', top: '60px', background: isLight ? '#fff' : '#0f0f1a',
+                border: isLight ? '1px solid rgba(0,0,0,0.08)' : '1px solid rgba(255,255,255,0.08)' }
+            : { left: collapsed ? '68px' : '228px', bottom: '80px',
+                background: isLight ? '#fff' : '#0f0f1a',
+                border: isLight ? '1px solid rgba(0,0,0,0.08)' : '1px solid rgba(255,255,255,0.08)' }}
         >
           <div className="flex items-center justify-between px-4 py-3"
             style={{ borderBottom: `1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'}` }}>
@@ -159,6 +172,15 @@ function NotificationBell({ collapsed, isLight }) {
 // ── Layout ─────────────────────────────────────────────────────────────────────
 export default function Layout() {
   const [collapsed, setCollapsed] = useState(false)
+  // Mobile off-canvas nav drawer — the sidebar below is always full-width
+  // and fixed-position under the md breakpoint (see the <aside> className),
+  // hidden by default and toggled by the hamburger button in the mobile
+  // top bar. `collapsed` (the icon-rail mode) is a desktop-only concept and
+  // is ignored on mobile — a collapsed icon rail doesn't make sense for an
+  // off-canvas drawer that's either fully open or fully closed.
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const location = useLocation()
+  useEffect(() => { setMobileOpen(false) }, [location.pathname])
   // BUG FIX: TwoFactorModal (setup/disable/backup codes — routes/users.js's
   // /me/2fa/* endpoints) was fully built but never mounted or given a
   // trigger anywhere in the app — there's no Settings/Profile page, so it
@@ -205,6 +227,7 @@ export default function Layout() {
         { to: '/monitoring', icon: Activity, label: 'Monitoring', show: can(1) },
         { to: '/alerts',     icon: Bell,     label: 'Alerts',     show: can(1) },
         { to: '/discovery',  icon: Radar,    label: 'Discovery',  show: can(1024) },
+        { to: '/synthetic-checks', icon: Waypoints, label: 'Health Checks', show: can(65536) },
       ],
     },
     {
@@ -288,11 +311,22 @@ export default function Layout() {
   return (
     <div className={`flex h-screen overflow-hidden transition-colors duration-200 ${isLight ? 'bg-[#eef0f5]' : 'grid-bg bg-surface-0'}`}>
 
+      {/* Mobile drawer backdrop — tapping it closes the nav, same as tapping
+          outside any other overlay in this app */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
       <aside
-        className={`flex flex-col shrink-0 transition-all duration-300 ease-in-out relative
+        className={`flex flex-col shrink-0 transition-transform md:transition-[width] duration-300 ease-in-out
+          fixed inset-y-0 left-0 z-40 md:relative md:z-auto
+          ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0
           ${isLight ? 'bg-white border-r border-black/[0.06]' : 'bg-surface-1 border-r border-white/6'}
-          ${collapsed ? 'w-[60px]' : 'w-[220px]'}`}
+          w-[240px] ${collapsed ? 'md:w-[60px]' : 'md:w-[220px]'}`}
         style={isLight ? { boxShadow: '2px 0 12px rgba(0,0,0,0.05)' } : {}}
       >
         {/* Logo */}
@@ -422,7 +456,7 @@ export default function Layout() {
         {/* Collapse toggle */}
         <button
           onClick={() => setCollapsed(c => !c)}
-          className={`absolute top-1/2 -translate-y-1/2 w-6 h-6 rounded-full border flex items-center justify-center transition-all duration-150 z-50
+          className={`hidden md:flex absolute top-1/2 -translate-y-1/2 w-6 h-6 rounded-full border items-center justify-center transition-all duration-150 z-50
             ${isLight ? 'bg-white border-black/10 text-slate-400 hover:text-[#6c5ce7] hover:border-[#6c5ce7]/30'
                       : 'bg-surface-4 border-white/10 text-slate-400 hover:text-slate-200'}`}
           style={{ right: '-12px' }}
@@ -431,8 +465,33 @@ export default function Layout() {
         </button>
       </aside>
 
+      {/* Mobile top bar — the sidebar is off-canvas by default under md, so
+          this is the only way to reach it (hamburger) and to know which
+          page you're on without the always-visible desktop sidebar. */}
+      <div className={`md:hidden fixed top-0 inset-x-0 z-20 flex items-center gap-3 px-4 h-14 border-b
+        ${isLight ? 'bg-white/95 border-black/[0.06] backdrop-blur' : 'bg-surface-1/95 border-white/6 backdrop-blur'}`}>
+        <button
+          onClick={() => setMobileOpen(o => !o)}
+          className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0
+            ${isLight ? 'text-slate-500 hover:bg-black/[0.04]' : 'text-slate-400 hover:bg-white/[0.06]'}`}
+          aria-label="Toggle navigation"
+        >
+          <Menu size={18} />
+        </button>
+        <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0
+          ${isLight ? 'bg-[#6c5ce7] text-white' : 'bg-brand-500/20 border border-brand-500/30 text-brand-400'}`}>
+          <Zap size={14} />
+        </div>
+        <span className={`font-display text-sm tracking-wide ${isLight ? 'text-[#1a1a2e]' : 'text-white'}`}>
+          NetControl
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          <NotificationBell collapsed={true} isLight={isLight} variant="topbar" />
+        </div>
+      </div>
+
       {/* Main content */}
-      <main className={`flex-1 overflow-y-auto transition-colors duration-200 ${isLight ? 'text-[#1a1a2e]' : ''}`}>
+      <main className={`flex-1 overflow-y-auto transition-colors duration-200 pt-14 md:pt-0 ${isLight ? 'text-[#1a1a2e]' : ''}`}>
         <Outlet />
       </main>
     </div>

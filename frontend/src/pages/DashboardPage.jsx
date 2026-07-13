@@ -461,7 +461,7 @@ export default function DashboardPage() {
   const greeting = hour<12?'Good morning':hour<17?'Good afternoon':'Good evening'
 
   return (
-    <div className="p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
+    <div className="p-4 sm:p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
 
       {/* ── Header ────────────────────────────────────────────────────────── */}
       <div className="flex items-start justify-between">

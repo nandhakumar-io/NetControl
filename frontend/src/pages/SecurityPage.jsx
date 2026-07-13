@@ -58,6 +58,11 @@ const ALL_EVENTS = {
   'log_export.failed':         { label: 'Log export failed',       color: '#f87171', cat: 'schedule' },
   'schedule.action_succeeded': { label: 'Device schedule succeeded', color: '#34d399', cat: 'schedule' },
   'schedule.action_failed':    { label: 'Device schedule failed',  color: '#f87171', cat: 'schedule' },
+  // Scripted HTTP/TCP/SSH health checks (services/syntheticMonitor.js) —
+  // fires once a check crosses its failure_threshold (not on every single
+  // failure) and once more on recovery.
+  'synthetic.failed':          { label: 'Scripted check failed',   color: '#f87171', cat: 'system' },
+  'synthetic.recovered':       { label: 'Scripted check recovered', color: '#34d399', cat: 'system' },
 }
 
 // ── Field wrapper ─────────────────────────────────────────────────────────────
@@ -578,7 +583,7 @@ export default function SecurityPage() {
   }
 
   return (
-    <div className="p-6 max-w-[1200px] mx-auto animate-fade-in pb-10">
+    <div className="p-4 sm:p-6 max-w-[1200px] mx-auto animate-fade-in pb-10">
 
       {/* Header */}
       <div className="flex items-center justify-between mb-6">

@@ -372,7 +372,7 @@ export default function GroupsPage() {
 
   // Skeleton
   if (loading) return (
-    <div className="p-6 max-w-[1400px] mx-auto">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto">
       <div className="h-20 rounded-2xl animate-pulse mb-6" style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }} />
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {Array.from({ length: 3 }).map((_, i) => (
@@ -383,7 +383,7 @@ export default function GroupsPage() {
   )
 
   return (
-    <div className="p-6 max-w-[1400px] mx-auto animate-fade-in">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto animate-fade-in">
 
       <PageHeader
         icon={Layers}

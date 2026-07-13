@@ -680,7 +680,7 @@ export default function DevicesPage() {
   })
 
   return (
-    <div className="p-6 max-w-[1600px] mx-auto animate-fade-in pb-28">
+    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto animate-fade-in pb-28">
 
       {/* Header */}
       <PageHeader

@@ -660,7 +660,7 @@ export default function CompliancePage() {
   )
 
   return (
-    <div className="p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
+    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
       <PageHeader icon={ShieldCheck} title="Config Compliance"
         description="Detect drift in installed packages, running services, and firewall rules — did someone change something on that box?"
         actions={

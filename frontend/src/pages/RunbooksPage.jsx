@@ -58,7 +58,7 @@ export default function RunbooksPage() {
   }
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="p-4 sm:p-6 max-w-5xl mx-auto">
       <PageHeader
         icon={Wrench}
         title="Runbooks"

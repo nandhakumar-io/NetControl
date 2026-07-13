@@ -223,7 +223,7 @@ export default function ProcessPoliciesPage() {
   )
 
   return (
-    <div className="p-5 space-y-5 animate-fade-in max-w-[1400px] mx-auto pb-10">
+    <div className="p-4 sm:p-5 space-y-5 animate-fade-in max-w-[1400px] mx-auto pb-10">
       <PageHeader
         icon={ShieldBan}
         title="Process Restrictions"

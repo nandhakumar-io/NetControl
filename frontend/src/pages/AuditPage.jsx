@@ -782,7 +782,7 @@ export default function AuditPage() {
   }
 
   return (
-    <div className="p-6 max-w-[1760px] mx-auto animate-fade-in">
+    <div className="p-4 sm:p-6 max-w-[1760px] mx-auto animate-fade-in">
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <PageHeader
