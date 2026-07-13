@@ -5,7 +5,7 @@ import {
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
-  ChevronRight as ArrowIcon
+  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -219,6 +219,7 @@ export default function Layout() {
         { to: '/groups',        icon: Layers,    label: 'Labs & Groups', show: can(8) },
         { to: '/remote-access', icon: Share2,    label: 'Remote Access', show: can(1) },
         { to: '/file-push',     icon: FolderOpen,label: 'File Push',     show: can(1) },
+        { to: '/bulk-command',  icon: TerminalSquare, label: 'Bulk Command', show: can(4) },
       ],
     },
     {
@@ -228,6 +229,7 @@ export default function Layout() {
         { to: '/alerts',     icon: Bell,     label: 'Alerts',     show: can(1) },
         { to: '/discovery',  icon: Radar,    label: 'Discovery',  show: can(1024) },
         { to: '/synthetic-checks', icon: Waypoints, label: 'Health Checks', show: can(65536) },
+        { to: '/capacity',   icon: TrendingUp, label: 'Capacity Forecast', show: can(1) },
       ],
     },
     {

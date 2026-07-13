@@ -43,6 +43,7 @@ const { apiLimiter, bulkImportLimiter, apiKeyLimiter, isPersonalApiKey } = requi
 const { loadAllSchedules }      = require('./services/scheduler');
 const statusPoller              = require('./services/statusPoller');
 const complianceService          = require('./services/complianceService');
+const capacityForecast           = require('./services/capacityForecast');
 const scheduledJobs             = require('./services/scheduledJobs');
 const { attachSSHProxy }        = require('./services/sshProxy');
 
@@ -273,6 +274,8 @@ app.use('/api/alerts',    require('./routes/alerts').router);
 app.use('/api/discovery', require('./routes/discovery'));
 app.use('/api/synthetic-checks', require('./routes/syntheticChecks'));
 app.use('/api/compliance', require('./routes/compliance'));
+app.use('/api/capacity-forecast', require('./routes/capacityForecast'));
+app.use('/api/bulk-command', require('./routes/bulkCommand'));
 app.use('/api/process-policies', require('./routes/processPolicies'));
 app.use('/api/backup',   require('./routes/backup'));
 app.use('/api/sla-reports', require('./routes/slaReports'));
@@ -402,6 +405,7 @@ async function boot() {
       loadAllSchedules();
       statusPoller.start();
       complianceService.start();
+      capacityForecast.start();
       scheduledJobs.start();
     }
   });

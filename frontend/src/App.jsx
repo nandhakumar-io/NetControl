@@ -29,6 +29,8 @@ import SlaReportsPage from './pages/SlaReportsPage'
 import OrganizationsPage from './pages/OrganizationsPage'
 import RunbooksPage   from './pages/RunbooksPage'
 import SyntheticChecksPage from './pages/SyntheticChecksPage'
+import CapacityForecastPage from './pages/CapacityForecastPage'
+import BulkCommandPage from './pages/BulkCommandPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -122,6 +124,8 @@ export default function App() {
           <Route path="sla-reports"      element={<RequirePermission bit={16384}><SlaReportsPage /></RequirePermission>} />
           <Route path="organizations"    element={<OrganizationsPage />} />
           <Route path="runbooks"         element={<RequirePermission bit={1}><RunbooksPage /></RequirePermission>} />
+          <Route path="capacity"         element={<RequirePermission bit={1}><CapacityForecastPage /></RequirePermission>} />
+          <Route path="bulk-command"     element={<RequirePermission bit={4}><BulkCommandPage /></RequirePermission>} />
 
           {/* Admin-only routes */}
           <Route

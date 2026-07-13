@@ -851,6 +851,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  synthetic_checks:', e.message);
     }
+    try {
+      const { migrateCapacityForecast } = require('./migrate-capacity-forecast');
+      await migrateCapacityForecast();
+      console.log('  ✓ capacity_forecast_notices (disk/RAM-fill trend forecasting dedupe table)');
+    } catch (e) {
+      console.warn('  ⚠  capacity_forecast_notices:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node
