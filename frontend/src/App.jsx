@@ -28,6 +28,7 @@ import BackupsPage    from './pages/BackupPage'
 import SlaReportsPage from './pages/SlaReportsPage'
 import OrganizationsPage from './pages/OrganizationsPage'
 import RunbooksPage   from './pages/RunbooksPage'
+import SyntheticChecksPage from './pages/SyntheticChecksPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -114,6 +115,7 @@ export default function App() {
           <Route path="monitoring/history" element={<RequirePermission bit={1}><MonitoringHistoryPage /></RequirePermission>} />
           <Route path="alerts"          element={<RequirePermission bit={1}><AlertsPage /></RequirePermission>} />
           <Route path="discovery"       element={<RequirePermission bit={1024}><DiscoveryPage /></RequirePermission>} />
+          <Route path="synthetic-checks" element={<RequirePermission bit={65536}><SyntheticChecksPage /></RequirePermission>} />
           <Route path="compliance"      element={<RequirePermission bit={2048}><CompliancePage /></RequirePermission>} />
           <Route path="process-policies" element={<RequirePermission bit={4096}><ProcessPoliciesPage /></RequirePermission>} />
           <Route path="backups"          element={<RequirePermission bit={8192}><BackupsPage /></RequirePermission>} />

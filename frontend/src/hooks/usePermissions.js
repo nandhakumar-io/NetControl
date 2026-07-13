@@ -19,10 +19,15 @@ export const PERM = {
   MANAGE_BACKUPS: 8192,
   VIEW_SLA_REPORTS: 16384,
   MANAGE_RUNBOOKS: 32768,
+  MANAGE_SYNTHETIC_CHECKS: 65536,
 }
 
 const ROLE_PERMS = {
-  admin:    0xFFFF,
+  // BUG FIX: was 0xFFFF, which stops at bit 32768 (manage_runbooks) — the
+  // 65536 bit for Health Checks fell outside it, so admins couldn't even
+  // see the nav link for their own instance's feature. Matches the same
+  // fix in backend/middleware/auth.js's ROLE_PERMISSIONS.
+  admin:    0x1FFFFF,
   operator: 1 | 4 | 8 | 32 | 128,
   viewer:   1 | 8 | 32 | 128,
 }

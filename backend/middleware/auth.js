@@ -187,11 +187,20 @@ function requireRole(...roles) {
  *                                its own bit rather than reusing
  *                                manage_process_policies, since granting one
  *                                should not silently grant the other)
+ *   65536 - manage_synthetic_checks (create/edit/run/delete HTTP/TCP/SSH
+ *                                health checks against a device — admin
+ *                                only by convention)
  *
  * Admins always pass; operators pass bits 1|4|8|32; viewers pass 1|8|32|128.
  */
 const ROLE_PERMISSIONS = {
-  admin:    0xFFFF, // all bits
+  // BUG FIX: this was 0xFFFF (bits 0-15 only), which stops at 32768
+  // (manage_runbooks) — so the 65536 bit added for manage_synthetic_checks
+  // fell outside the mask entirely and admins got 403'd trying to use
+  // their own instance's Health Checks feature. 0x1FFFFF covers every bit
+  // defined above with room for a few more before this needs touching
+  // again; "admin always passes" should hold for any bit added here.
+  admin:    0x1FFFFF, // all bits
   operator: 1 | 4 | 8 | 32 | 128,
   viewer:   1 | 8 | 32 | 128,
 };

@@ -271,6 +271,7 @@ app.use('/api/security',   require('./routes/security'));
 app.use('/api/metrics',   require('./routes/metrics'));
 app.use('/api/alerts',    require('./routes/alerts').router);
 app.use('/api/discovery', require('./routes/discovery'));
+app.use('/api/synthetic-checks', require('./routes/syntheticChecks'));
 app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/process-policies', require('./routes/processPolicies'));
 app.use('/api/backup',   require('./routes/backup'));

@@ -844,6 +844,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  compliance_drift_patterns:', e.message);
     }
+    try {
+      const { migrateSyntheticChecks } = require('./migrate-synthetic-checks');
+      await migrateSyntheticChecks();
+      console.log('  ✓ synthetic_checks + synthetic_check_results (Health Checks page had no backend at all — table, route, and runner were all missing)');
+    } catch (e) {
+      console.warn('  ⚠  synthetic_checks:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node
