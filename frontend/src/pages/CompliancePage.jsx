@@ -3,7 +3,7 @@ import {
   ShieldCheck, RefreshCw, Loader2, ChevronDown, ChevronRight, Lock,
   CheckCircle2, AlertTriangle, XCircle, HelpCircle, Play, Anchor,
   Package, Server as ServerIcon, Flame, Plus, Minus, Clock,
-  FileText, Trash2, FolderPlus, WifiOff,
+  FileText, Trash2, FolderPlus, WifiOff, ShieldAlert, Settings2, RotateCcw, X,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -133,8 +133,62 @@ function DiffView({ diff }) {
   )
 }
 
+// ── Known-bad pattern matches for one snapshot ────────────────────────────────
+// Separate from DiffView (the raw added/removed lists) — this shows which of
+// those lines were actually flagged as significant, at what severity, and
+// whether an auto-revert runbook fired for it. Only fetched when a drift
+// snapshot row is expanded, since most snapshots are 'clean' and never need it.
+function MatchedPatterns({ deviceId, snapshotId }) {
+  const [matches, setMatches] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    api.get(`/compliance/${deviceId}/snapshots/${snapshotId}/matches`)
+      .then(({ data }) => { if (!cancelled) setMatches(data) })
+      .catch(() => { if (!cancelled) setMatches([]) })
+    return () => { cancelled = true }
+  }, [deviceId, snapshotId])
+
+  if (matches === null) return null
+  if (matches.length === 0) return null
+
+  return (
+    <div className="mb-3 space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <ShieldAlert size={12} style={{ color: '#f87171' }} />
+        <span className="text-[11px] font-body font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+          Matched known-bad patterns
+        </span>
+      </div>
+      {matches.map(m => {
+        const critical = m.severity === 'critical'
+        const color = critical ? '#f87171' : '#fbbf24'
+        return (
+          <div key={m.id} className="px-3 py-2 rounded-lg text-[11px] font-body"
+            style={{ background: `${color}0f`, border: `1px solid ${color}35` }}>
+            <div className="flex items-center gap-2">
+              <span className="font-bold uppercase text-[10px]" style={{ color }}>{m.severity}</span>
+              <span style={{ color: 'var(--text-primary)' }}>{m.pattern_label}</span>
+              <span className="font-mono text-[10px]" style={{ color: 'var(--text-faint)' }}>
+                {m.category} · {m.match_type}
+              </span>
+            </div>
+            <p className="font-mono text-[10px] mt-1 truncate" style={{ color: 'var(--text-muted)' }}>
+              {m.matched_line}
+            </p>
+            {!!m.auto_reverted && (
+              <div className="flex items-center gap-1 mt-1.5 text-[10px] font-mono" style={{ color: '#34d399' }}>
+                <RotateCcw size={10} /> auto-revert ran: {m.revert_result}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Snapshot history row ──────────────────────────────────────────────────────
-function SnapshotRow({ snap }) {
+function SnapshotRow({ snap, deviceId }) {
   const [open, setOpen] = useState(false)
   const snapStatus = snap.status === 'error' && snap.unreachable ? 'unreachable' : snap.status
   const c = STATUS_CFG[snapStatus] || STATUS_CFG.pending
@@ -150,7 +204,12 @@ function SnapshotRow({ snap }) {
       </div>
       {open && (
         <div className="px-4 pb-3">
-          {snap.status === 'drift' ? <DiffView diff={snap.diff} /> : (
+          {snap.status === 'drift' ? (
+            <>
+              <MatchedPatterns deviceId={deviceId} snapshotId={snap.id} />
+              <DiffView diff={snap.diff} />
+            </>
+          ) : (
             <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
               {snap.status === 'error' ? snap.error : 'Matched the baseline — no drift.'}
             </p>
@@ -379,7 +438,7 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
             <div className="py-8 text-center text-xs font-body" style={{ color: 'var(--text-muted)' }}>
               No snapshots yet — run a check or wait for the next scheduled one.
             </div>
-          ) : snapshots.map(s => <SnapshotRow key={s.id} snap={s} />)}
+          ) : snapshots.map(s => <SnapshotRow key={s.id} snap={s} deviceId={d.device_id} />)}
         </div>
       )}
 
@@ -407,12 +466,171 @@ function DeviceCard({ d, expanded, onToggleExpand, onChanged }) {
   )
 }
 
+// ── Drift patterns manager ──────────────────────────────────────────────────
+// Global defaults (org_id null, seeded by db/migrate-drift-patterns.js) are
+// shown read-only — an org can't mutate a rule every other org relies on —
+// alongside whatever org-specific patterns this org has added itself.
+const CATEGORY_LABEL = { packages: 'Packages', services: 'Services', firewall_rules: 'Firewall Rules', files: 'Watched Files' }
+
+function PatternForm({ onSaved, onCancel }) {
+  const [label, setLabel] = useState('')
+  const [category, setCategory] = useState('firewall_rules')
+  const [matchType, setMatchType] = useState('removed')
+  const [pattern, setPattern] = useState('')
+  const [severity, setSeverity] = useState('critical')
+  const [saving, setSaving] = useState(false)
+
+  const save = async () => {
+    if (!label.trim() || !pattern.trim()) { toast.error('Label and pattern are required'); return }
+    setSaving(true)
+    try {
+      await api.post('/compliance/drift-patterns', {
+        label: label.trim(), category, match_type: matchType, pattern: pattern.trim(), severity,
+      })
+      toast.success('Pattern added')
+      onSaved()
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to add pattern') }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <div className="p-3 rounded-lg space-y-2" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
+      <input className="input-field text-xs py-1.5 w-full" placeholder="Label, e.g. 'VPN service stopped'"
+        value={label} onChange={e => setLabel(e.target.value)} />
+      <div className="grid grid-cols-3 gap-2">
+        <select className="input-field text-xs py-1.5" value={category} onChange={e => setCategory(e.target.value)}>
+          {Object.entries(CATEGORY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+        </select>
+        <select className="input-field text-xs py-1.5" value={matchType} onChange={e => setMatchType(e.target.value)}>
+          <option value="removed">when removed</option>
+          <option value="added">when added</option>
+        </select>
+        <select className="input-field text-xs py-1.5" value={severity} onChange={e => setSeverity(e.target.value)}>
+          <option value="critical">critical</option>
+          <option value="warning">warning</option>
+        </select>
+      </div>
+      <input className="input-field text-xs py-1.5 w-full font-mono" placeholder="Regex, e.g. \b(DROP|REJECT)\b"
+        value={pattern} onChange={e => setPattern(e.target.value)} />
+      <p className="text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>
+        Matched (case-insensitive) against every line {matchType} in a snapshot's diff for this category.
+      </p>
+      <div className="flex justify-end gap-2 pt-1">
+        <button onClick={onCancel} className="btn-ghost text-xs px-3 py-1.5">Cancel</button>
+        <button onClick={save} disabled={saving} className="btn-primary text-xs px-3 py-1.5">
+          {saving ? <Loader2 size={12} className="animate-spin" /> : 'Add Pattern'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function DriftPatternsModal({ onClose }) {
+  const [patterns, setPatterns] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const { data } = await api.get('/compliance/drift-patterns')
+      setPatterns(data)
+    } catch { toast.error('Failed to load drift patterns') }
+    finally { setLoading(false) }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const toggleEnabled = async (p) => {
+    try {
+      await api.put(`/compliance/drift-patterns/${p.id}`, { enabled: !p.enabled })
+      setPatterns(prev => prev.map(x => x.id === p.id ? { ...x, enabled: !p.enabled } : x))
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to update pattern') }
+  }
+
+  const remove = async (p) => {
+    if (!confirm(`Delete pattern "${p.label}"?`)) return
+    try {
+      await api.delete(`/compliance/drift-patterns/${p.id}`)
+      setPatterns(prev => prev.filter(x => x.id !== p.id))
+      toast.success('Pattern deleted')
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to delete pattern') }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+      <div className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-2xl p-6 animate-slide-up"
+        style={{ background: 'var(--bg-card)', border: '1px solid rgba(124,92,245,0.3)' }} onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-base flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+            <ShieldAlert size={16} /> Known-Bad Drift Patterns
+          </h3>
+          <button onClick={onClose} className="icon-btn"><X size={14} /></button>
+        </div>
+        <p className="text-xs font-body mb-4" style={{ color: 'var(--text-muted)' }}>
+          Plain drift (something changed) only gets a routine notice. A line matching one of these
+          rules escalates to the severity below and — if a runbook is attached — triggers an
+          automatic revert attempt. Global patterns (no org badge) apply to every org and can't be
+          edited here, only disabled by adding your own override.
+        </p>
+
+        {loading ? (
+          <div className="py-8 flex justify-center"><Loader2 size={16} className="animate-spin" style={{ color: 'var(--text-muted)' }} /></div>
+        ) : (
+          <div className="space-y-2 mb-4">
+            {patterns.map(p => {
+              const critical = p.severity === 'critical'
+              const color = critical ? '#f87171' : '#fbbf24'
+              const isGlobal = !p.org_id
+              return (
+                <div key={p.id} className="flex items-center gap-3 px-3 py-2 rounded-lg"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)', opacity: p.enabled ? 1 : 0.5 }}>
+                  <input type="checkbox" checked={!!p.enabled} onChange={() => toggleEnabled(p)} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-body font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{p.label}</span>
+                      <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded" style={{ color, background: `${color}18` }}>{p.severity}</span>
+                      {isGlobal && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ color: 'var(--text-faint)', background: 'var(--bg-card)' }}>global</span>}
+                      {p.auto_revert_runbook_name && (
+                        <span className="text-[10px] font-mono flex items-center gap-1" style={{ color: '#34d399' }}>
+                          <RotateCcw size={9} /> {p.auto_revert_runbook_name}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] font-mono mt-0.5 truncate" style={{ color: 'var(--text-muted)' }}>
+                      {CATEGORY_LABEL[p.category]} · {p.match_type} · /{p.pattern}/i
+                    </p>
+                  </div>
+                  {!isGlobal && (
+                    <button onClick={() => remove(p)} className="icon-btn shrink-0" title="Delete pattern">
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {showForm ? (
+          <PatternForm onCancel={() => setShowForm(false)} onSaved={() => { setShowForm(false); load() }} />
+        ) : (
+          <button onClick={() => setShowForm(true)} className="btn-ghost text-xs px-3 py-1.5 flex items-center gap-1.5">
+            <Plus size={12} /> Add pattern
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function CompliancePage() {
   const [devices, setDevices] = useState([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [showPatterns, setShowPatterns] = useState(false)
 
   const { can } = usePermissions()
   const canManageCompliance = can(2048)
@@ -445,8 +663,16 @@ export default function CompliancePage() {
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
       <PageHeader icon={ShieldCheck} title="Config Compliance"
         description="Detect drift in installed packages, running services, and firewall rules — did someone change something on that box?"
-        actions={<button onClick={load} className="icon-btn"><RefreshCw size={13} /></button>}
+        actions={
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowPatterns(true)} className="btn-ghost text-xs px-3 py-1.5 flex items-center gap-1.5">
+              <Settings2 size={12} /> Drift Patterns
+            </button>
+            <button onClick={load} className="icon-btn"><RefreshCw size={13} /></button>
+          </div>
+        }
       />
+      {showPatterns && <DriftPatternsModal onClose={() => setShowPatterns(false)} />}
 
       {/* Status filter chips */}
       <div className="flex flex-wrap gap-2 mb-4">

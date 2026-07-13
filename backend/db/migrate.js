@@ -837,6 +837,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  devices.ssh_host_key_fingerprint:', e.message);
     }
+    try {
+      const { migrateDriftPatterns } = require('./migrate-drift-patterns');
+      await migrateDriftPatterns();
+      console.log('  ✓ compliance_drift_patterns (known-bad pattern matching + auto-revert runbook hook for config drift)');
+    } catch (e) {
+      console.warn('  ⚠  compliance_drift_patterns:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

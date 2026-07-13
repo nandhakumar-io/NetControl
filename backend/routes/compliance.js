@@ -6,6 +6,7 @@
 'use strict';
 
 const express = require('express');
+const { v4: uuidv4 } = require('uuid');
 const { param, body, validationResult } = require('express-validator');
 const { query, queryOne, execute } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
@@ -264,6 +265,154 @@ router.delete('/:deviceId/files/:id',
         targetName: device.name, result: 'success', details: row.file_path,
       });
       res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── Known-bad drift pattern management ────────────────────────────────────────
+// A pattern is checked against every drift snapshot's added/removed lines
+// (see complianceService.matchDriftPatterns). Global defaults (org_id NULL,
+// seeded by db/migrate-drift-patterns.js) are always included alongside
+// whatever this org has added itself, and are shown here too (read-only for
+// non-owners — see the ownership check in PUT/DELETE below).
+
+// ── GET /api/compliance/drift-patterns — list patterns visible to this org ───
+router.get('/drift-patterns', requirePermission(MANAGE_COMPLIANCE), async (req, res) => {
+  try {
+    const rows = await query(
+      `SELECT p.*, r.name AS auto_revert_runbook_name
+         FROM compliance_drift_patterns p
+         LEFT JOIN runbook_actions r ON r.id = p.auto_revert_runbook_id
+        WHERE p.org_id = ? OR p.org_id IS NULL
+        ORDER BY p.org_id IS NULL DESC, p.category, p.label`,
+      [req.orgId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/compliance/drift-patterns — add an org-specific pattern ────────
+router.post('/drift-patterns',
+  requirePermission(MANAGE_COMPLIANCE),
+  body('label').isString().trim().isLength({ min: 1, max: 150 }),
+  body('category').isIn(['packages', 'services', 'firewall_rules', 'files']),
+  body('match_type').isIn(['added', 'removed']),
+  body('pattern').isString().trim().isLength({ min: 1, max: 500 }),
+  body('severity').isIn(['critical', 'warning']),
+  body('auto_revert_runbook_id').optional({ nullable: true }).isUUID(),
+  async (req, res) => {
+    if (validate(req, res)) return;
+
+    // Fail fast on an invalid regex rather than storing a rule that will
+    // silently never match (or throw) on every future check.
+    try { new RegExp(req.body.pattern); }
+    catch (e) { return res.status(400).json({ error: `Invalid pattern: ${e.message}` }); }
+
+    if (req.body.auto_revert_runbook_id) {
+      const rb = await queryOne('SELECT id FROM runbook_actions WHERE id = ? AND org_id = ?', [req.body.auto_revert_runbook_id, req.orgId]);
+      if (!rb) return res.status(400).json({ error: 'Runbook not found' });
+    }
+
+    const id = uuidv4();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await execute(
+        `INSERT INTO compliance_drift_patterns
+           (id, org_id, label, category, match_type, pattern, severity, auto_revert_runbook_id, enabled, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        [id, req.orgId, req.body.label, req.body.category, req.body.match_type, req.body.pattern,
+         req.body.severity, req.body.auto_revert_runbook_id || null, req.user.id, now]
+      );
+      await audit.log({
+        userId: req.user.id, username: req.user.username, ipSource: req.realIp,
+        action: 'compliance_drift_pattern_created', targetType: 'drift_pattern', targetId: id,
+        targetName: req.body.label, result: 'success',
+        details: `${req.body.category}/${req.body.match_type}: ${req.body.pattern} (${req.body.severity})`,
+      });
+      res.json({ id, org_id: req.orgId, ...req.body, enabled: true, created_at: now });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── PUT /api/compliance/drift-patterns/:id — update an org-specific pattern ──
+// Global defaults (org_id NULL) can't be edited here — an org shouldn't be
+// able to silently change what every other org sees as a "critical" pattern.
+// Disabling a default for just this org is done via enabled=false on a copy
+// (create a new org-scoped pattern) rather than mutating the shared row.
+router.put('/drift-patterns/:id',
+  requirePermission(MANAGE_COMPLIANCE), param('id').isUUID(),
+  body('label').optional().isString().trim().isLength({ min: 1, max: 150 }),
+  body('pattern').optional().isString().trim().isLength({ min: 1, max: 500 }),
+  body('severity').optional().isIn(['critical', 'warning']),
+  body('enabled').optional().isBoolean(),
+  body('auto_revert_runbook_id').optional({ nullable: true }).isUUID(),
+  async (req, res) => {
+    if (validate(req, res)) return;
+    const existing = await queryOne('SELECT * FROM compliance_drift_patterns WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Pattern not found' });
+    if (existing.org_id !== req.orgId) return res.status(403).json({ error: 'Cannot edit a global or another org\'s pattern' });
+
+    if (req.body.pattern) {
+      try { new RegExp(req.body.pattern); }
+      catch (e) { return res.status(400).json({ error: `Invalid pattern: ${e.message}` }); }
+    }
+    if (req.body.auto_revert_runbook_id) {
+      const rb = await queryOne('SELECT id FROM runbook_actions WHERE id = ? AND org_id = ?', [req.body.auto_revert_runbook_id, req.orgId]);
+      if (!rb) return res.status(400).json({ error: 'Runbook not found' });
+    }
+
+    const fields = ['label', 'pattern', 'severity', 'enabled', 'auto_revert_runbook_id'];
+    const sets = [], vals = [];
+    for (const f of fields) {
+      if (req.body[f] !== undefined) { sets.push(`${f} = ?`); vals.push(f === 'enabled' ? (req.body.enabled ? 1 : 0) : req.body[f]); }
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(req.params.id);
+
+    try {
+      await execute(`UPDATE compliance_drift_patterns SET ${sets.join(', ')} WHERE id = ?`, vals);
+      await audit.log({
+        userId: req.user.id, username: req.user.username, ipSource: req.realIp,
+        action: 'compliance_drift_pattern_updated', targetType: 'drift_pattern', targetId: req.params.id,
+        targetName: req.body.label || existing.label, result: 'success',
+      });
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── DELETE /api/compliance/drift-patterns/:id ─────────────────────────────────
+router.delete('/drift-patterns/:id', requirePermission(MANAGE_COMPLIANCE), param('id').isUUID(), async (req, res) => {
+  if (validate(req, res)) return;
+  const existing = await queryOne('SELECT * FROM compliance_drift_patterns WHERE id = ?', [req.params.id]);
+  if (!existing) return res.status(404).json({ error: 'Pattern not found' });
+  if (existing.org_id !== req.orgId) return res.status(403).json({ error: 'Cannot delete a global or another org\'s pattern' });
+  try {
+    await execute('DELETE FROM compliance_drift_patterns WHERE id = ?', [req.params.id]);
+    await audit.log({
+      userId: req.user.id, username: req.user.username, ipSource: req.realIp,
+      action: 'compliance_drift_pattern_deleted', targetType: 'drift_pattern', targetId: req.params.id,
+      targetName: existing.label, result: 'success',
+    });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/compliance/:deviceId/snapshots/:id/matches — which known-bad
+// patterns fired for this snapshot, and whether auto-revert ran ────────────
+router.get('/:deviceId/snapshots/:id/matches',
+  requirePermission(MANAGE_COMPLIANCE), param('deviceId').isUUID(), param('id').isUUID(),
+  async (req, res) => {
+    if (validate(req, res)) return;
+    if (!(await assertDevice(req.params.deviceId, req.orgId, res))) return;
+    try {
+      const snap = await queryOne('SELECT id FROM compliance_snapshots WHERE id = ? AND device_id = ?', [req.params.id, req.params.deviceId]);
+      if (!snap) return res.status(404).json({ error: 'Snapshot not found' });
+      const rows = await query(
+        'SELECT * FROM compliance_drift_matches WHERE snapshot_id = ? ORDER BY severity = "critical" DESC, created_at ASC',
+        [req.params.id]
+      );
+      res.json(rows);
     } catch (e) { res.status(500).json({ error: e.message }); }
   }
 );

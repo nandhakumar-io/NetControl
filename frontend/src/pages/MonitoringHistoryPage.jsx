@@ -197,6 +197,8 @@ export default function MonitoringHistoryPage() {
 
   const [rowsA, setRowsA] = useState([])
   const [rowsB, setRowsB] = useState([])
+  const [metaA, setMetaA] = useState({ from: null, bucketSeconds: null })
+  const [metaB, setMetaB] = useState({ from: null, bucketSeconds: null })
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(null) // 'A' | 'B' | null
 
@@ -245,7 +247,7 @@ export default function MonitoringHistoryPage() {
 
   const fetchHistory = useCallback(async (id, from, to) => {
     const { data } = await api.get(`/metrics/${id}/history`, { params: { from, to } })
-    return data?.points || []
+    return data || { points: [], from, bucketSeconds: null }
   }, [])
 
   const fetchGroupHistory = useCallback(async (id, from, to) => {
@@ -266,14 +268,18 @@ export default function MonitoringHistoryPage() {
         ])
         setRowsA(a?.points || [])
         setRowsB(b?.points || [])
+        setMetaA({ from: a?.from ?? fromA, bucketSeconds: a?.bucketSeconds ?? null })
+        setMetaB(b ? { from: b.from ?? fromB, bucketSeconds: b.bucketSeconds ?? null } : { from: null, bucketSeconds: null })
         setGroupDevicesSummary(a?.devices || [])
       } else {
         const [a, b] = await Promise.all([
           fetchHistory(deviceId, fromA, toA),
-          compareOn && fromB != null ? fetchHistory(deviceId, fromB, toB) : Promise.resolve([]),
+          compareOn && fromB != null ? fetchHistory(deviceId, fromB, toB) : Promise.resolve({ points: [], from: null, bucketSeconds: null }),
         ])
-        setRowsA(a)
-        setRowsB(b)
+        setRowsA(a?.points || [])
+        setRowsB(b?.points || [])
+        setMetaA({ from: a?.from ?? fromA, bucketSeconds: a?.bucketSeconds ?? null })
+        setMetaB(compareOn ? { from: b?.from ?? fromB, bucketSeconds: b?.bucketSeconds ?? null } : { from: null, bucketSeconds: null })
         setGroupDevicesSummary([])
       }
     } catch (e) {
@@ -296,16 +302,45 @@ export default function MonitoringHistoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode, deviceId, groupId])
 
-  // Merge series A/B by index (both queries cover equal-length spans so
-  // bucket counts line up) into one chart-friendly array per metric.
+  // Merge series A/B by elapsed-time bucket, not raw array index.
+  //
+  // BUG FIX: metrics_history rows are sparse — GROUP BY only emits a row for
+  // buckets that actually have data (see fetchHistoryRows in
+  // routes/metrics.js), so a device with any downtime, agent gaps, or a
+  // shorter custom compare range simply has fewer rows. The old code paired
+  // rowsA[i] with rowsB[i] on the assumption "both queries cover
+  // equal-length spans so bucket counts line up" — that assumption doesn't
+  // hold the moment either side has a gap, so the "Compare" overlay and its
+  // per-bucket deltas were silently lining up unrelated moments in time
+  // (e.g. bucket 5 of period A, which might be 10:25am, against bucket 5 of
+  // period B, which might really correspond to 11:40am if B had an earlier
+  // gap) instead of showing the real difference at the same elapsed offset.
+  //
+  // Fix: use the `from`/`bucketSeconds` the backend already returns (same
+  // bucketSeconds for A and B whenever the two spans are equal length, which
+  // is true for every preset — 'previous'/'last_week'/'last_month' — and
+  // only diverges for a custom compare range of a different length) to
+  // compute each point's elapsed-bucket-index from the start of its own
+  // range, then merge on that index. A point 3 buckets into period A is now
+  // always compared against the point 3 buckets into period B, regardless
+  // of gaps elsewhere in either series.
   const merged = useMemo(() => {
     const { fromA, spanA } = rangeAB
-    const len = Math.max(rowsA.length, rowsB.length)
-    const out = []
-    for (let i = 0; i < len; i++) {
-      const a = rowsA[i], b = rowsB[i]
-      const elapsedSec = a ? a.ts - fromA : (rangeAB.fromB != null ? (b.ts - rangeAB.fromB) : i)
-      out.push({
+    const bucketSecA = metaA.bucketSeconds || 60
+    const bucketSecB = metaB.bucketSeconds || bucketSecA
+    const baseA = metaA.from ?? fromA
+    const baseB = metaB.from ?? rangeAB.fromB
+
+    const mapA = new Map(rowsA.map(p => [Math.round((p.ts - baseA) / bucketSecA), p]))
+    const mapB = new Map(rowsB.map(p => [Math.round((p.ts - baseB) / bucketSecB), p]))
+
+    const keys = new Set([...mapA.keys(), ...mapB.keys()])
+    const sortedKeys = [...keys].sort((x, y) => x - y)
+
+    return sortedKeys.map(k => {
+      const a = mapA.get(k), b = mapB.get(k)
+      const elapsedSec = k * bucketSecA
+      return {
         elapsed: fmtElapsed(elapsedSec, spanA),
         aTime: a ? new Date(a.ts * 1000).toLocaleString() : null,
         bTime: b ? new Date(b.ts * 1000).toLocaleString() : null,
@@ -314,10 +349,9 @@ export default function MonitoringHistoryPage() {
         a_disk: a?.disk_avg ?? null, b_disk: b?.disk_avg ?? null,
         a_rx: a?.net_rx_avg ?? null, b_rx: b?.net_rx_avg ?? null,
         a_tx: a?.net_tx_avg ?? null, b_tx: b?.net_tx_avg ?? null,
-      })
-    }
-    return out
-  }, [rowsA, rowsB, rangeAB])
+      }
+    })
+  }, [rowsA, rowsB, rangeAB, metaA, metaB])
 
   const stats = useMemo(() => {
     const agg = (rows, key) => {
