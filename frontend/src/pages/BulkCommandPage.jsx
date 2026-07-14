@@ -16,7 +16,8 @@ import { useSearchParams } from 'react-router-dom'
 import {
   TerminalSquare, Search, Loader2, Play, RotateCcw, CheckCircle2, XCircle,
   Circle, ChevronDown, ChevronRight, Square, CheckSquare, ShieldAlert,
-  X, Server, Wifi, WifiOff, HelpCircle, Copy, Check,
+  X, Server, Wifi, WifiOff, HelpCircle, Copy, Check, Clock, Star, Trash2,
+  Download, AlertTriangle,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -100,11 +101,14 @@ export default function BulkCommandPage() {
   const [selected, setSelected] = useState(new Set())
 
   const [command, setCommand] = useState('')
+  const [history, setHistory] = useState([])
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [pinOpen, setPinOpen] = useState(false)
   const [pin, setPin] = useState('')
   const [pinError, setPinError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
+  const [pinTargetIds, setPinTargetIds] = useState(null) // ids the PIN dialog will actually run against (null = use `selected`)
   const [runId, setRunId] = useState(null)
   const [runDevices, setRunDevices] = useState([])   // devices included in the active/last run
   const [results, setResults] = useState({})          // deviceId -> { status, output, durationMs }
@@ -124,8 +128,47 @@ export default function BulkCommandPage() {
     } finally { setLoadingDevices(false) }
   }, [])
 
-  useEffect(() => { loadDevices() }, [loadDevices])
+  const loadHistory = useCallback(async () => {
+    try {
+      const { data } = await api.get('/bulk-command/history')
+      setHistory(data)
+    } catch {
+      // Non-critical — the console still works fine with a blank textarea,
+      // so just silently skip populating the dropdown rather than toasting.
+    }
+  }, [])
+
+  useEffect(() => { loadDevices(); loadHistory() }, [loadDevices, loadHistory])
   useEffect(() => () => esRef.current?.close(), [])
+
+  const useHistoryCommand = (cmd) => {
+    setCommand(cmd)
+    setHistoryOpen(false)
+  }
+
+  const toggleFavorite = async (entry, e) => {
+    e.stopPropagation()
+    const next = !entry.is_favorite
+    setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, is_favorite: next } : h)) // optimistic
+    try {
+      await api.post(`/bulk-command/history/${entry.id}/favorite`, { favorite: next })
+    } catch {
+      setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, is_favorite: !next } : h)) // revert
+      toast.error('Failed to update favorite')
+    }
+  }
+
+  const deleteHistoryEntry = async (entry, e) => {
+    e.stopPropagation()
+    const prev = history
+    setHistory(prev.filter(h => h.id !== entry.id)) // optimistic
+    try {
+      await api.delete(`/bulk-command/history/${entry.id}`)
+    } catch {
+      setHistory(prev)
+      toast.error('Failed to remove')
+    }
+  }
 
   // ── Deep-link preselect: /bulk-command?deviceId=... (e.g. the "Run
   // command" quick action on a Capacity Forecast row) ────────────────────
@@ -185,9 +228,10 @@ export default function BulkCommandPage() {
       setResults({})
       setRunId(data.runId)
       setRunStatus('running')
-      setPinOpen(false); setPin(''); setPinError('')
+      setPinOpen(false); setPin(''); setPinError(''); setPinTargetIds(null)
       attachStream(data.runId)
       toast.success(`Running on ${data.total} device${data.total === 1 ? '' : 's'}…`)
+      loadHistory() // pick up the just-run command (new entry, or bumped run_count/last_used_at)
     } catch (err) {
       setPinError(err.response?.data?.error || 'Failed to start run')
     } finally { setSubmitting(false) }
@@ -248,21 +292,54 @@ export default function BulkCommandPage() {
   const handleSubmit = () => {
     if (!command.trim()) { toast.error('Enter a command to run'); return }
     if (selected.size === 0) { toast.error('Select at least one device'); return }
+    setPinTargetIds(null) // run against the current picker selection, not a stale retry target
     setPinOpen(true)
   }
 
   const confirmPin = () => {
     if (!pin.trim()) { setPinError('Action PIN is required'); return }
-    runAgainst([...selected], pin)
+    // pinTargetIds is set explicitly by retryFailed(); a normal run leaves
+    // it null and falls back to whatever's checked in the device picker.
+    runAgainst(pinTargetIds ?? [...selected], pin)
   }
 
   const failedIds = Object.entries(results).filter(([, r]) => r.status === 'failure').map(([id]) => id)
   const retryFailed = () => {
     if (!failedIds.length) return
-    setPin(''); setPinError(''); setPinOpen(true)
-    // Stash which ids a retry should target — reuse selected state so the
-    // same confirmPin/runAgainst path works for both first-run and retry.
-    setSelected(new Set(failedIds))
+    setPin(''); setPinError('')
+    // BUG FIX: this used to call setSelected(new Set(failedIds)) to reuse
+    // the device-picker's own selection state for the retry target. That
+    // silently overwrote whatever the user had checked in the left panel —
+    // canceling the retry dialog left their original selection gone with
+    // no way back, and the picker's checkboxes would visually jump to only
+    // the failed devices. Track the retry target separately instead so the
+    // picker selection is never touched by a retry.
+    setPinTargetIds(failedIds)
+    setPinOpen(true)
+  }
+
+  // ── CSV export — entirely client-side, since the full result set (device,
+  // status, duration, output) is already sitting in `results`/`runDevices`
+  // by the time this is clickable. Useful for the compliance/audit trail
+  // this app already leans on heavily elsewhere. ─────────────────────────
+  const csvEscape = (val) => {
+    const s = String(val ?? '')
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const exportResultsCsv = () => {
+    const rows = [['Device', 'IP Address', 'Status', 'Duration (ms)', 'Output']]
+    for (const d of runDevices) {
+      const r = results[d.id] || {}
+      rows.push([d.name, d.ip_address, r.status || 'pending', r.durationMs ?? '', r.output || ''])
+    }
+    const csv = rows.map(row => row.map(csvEscape).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    a.href = url; a.download = `netcontrol-bulk-command-${stamp}.csv`
+    document.body.appendChild(a); a.click(); a.remove()
+    URL.revokeObjectURL(url)
   }
 
   const counts = useMemo(() => {
@@ -273,6 +350,22 @@ export default function BulkCommandPage() {
       failure: vals.filter(r => r.status === 'failure').length,
     }
   }, [results])
+
+  // ── Dry-run preview: before the PIN dialog fires anything, show how many
+  // of the target devices are actually online right now — a device that's
+  // offline or unknown is going to fail/time out regardless of the command,
+  // so surfacing this up front saves a wasted 30s-per-device run. ─────────
+  const pinTargetDevices = useMemo(() => {
+    const ids = pinTargetIds ?? [...selected]
+    const idSet = new Set(ids)
+    return devices.filter(d => idSet.has(d.id))
+  }, [pinTargetIds, selected, devices])
+
+  const pinTargetBreakdown = useMemo(() => {
+    const b = { online: 0, offline: 0, unknown: 0, error: 0 }
+    for (const d of pinTargetDevices) b[d.status] = (b[d.status] || 0) + 1
+    return b
+  }, [pinTargetDevices])
 
   return (
     <div>
@@ -338,8 +431,40 @@ export default function BulkCommandPage() {
             </div>
           </div>
 
-          <div className="card">
-            <label className="label">Command</label>
+          <div className="card relative">
+            <div className="flex items-center justify-between mb-1">
+              <label className="label mb-0">Command</label>
+              {history.length > 0 && (
+                <button
+                  onClick={() => setHistoryOpen(o => !o)}
+                  className="flex items-center gap-1 text-[11px] font-body font-medium"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  <Clock size={11} /> Recent {historyOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                </button>
+              )}
+            </div>
+            {historyOpen && (
+              <div className="mb-2 rounded-lg overflow-hidden max-h-48 overflow-y-auto"
+                style={{ border: '1px solid var(--border-subtle)' }}>
+                {history.map(h => (
+                  <div key={h.id}
+                    onClick={() => useHistoryCommand(h.command)}
+                    className="flex items-center gap-2 px-2.5 py-2 cursor-pointer hover:bg-white/[0.03] border-b last:border-b-0"
+                    style={{ borderColor: 'var(--border-subtle)' }}
+                  >
+                    <button onClick={(e) => toggleFavorite(h, e)} className="shrink-0" title={h.is_favorite ? 'Unfavorite' : 'Favorite'}>
+                      <Star size={13} style={{ color: h.is_favorite ? '#fbbf24' : 'var(--text-faint)' }} fill={h.is_favorite ? '#fbbf24' : 'none'} />
+                    </button>
+                    <span className="text-[11px] font-mono truncate flex-1" style={{ color: 'var(--text-secondary)' }}>{h.command}</span>
+                    <span className="text-[10px] font-body shrink-0" style={{ color: 'var(--text-faint)' }}>×{h.run_count}</span>
+                    <button onClick={(e) => deleteHistoryEntry(h, e)} className="shrink-0 hover:text-accent-red" style={{ color: 'var(--text-faint)' }} title="Remove">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <textarea
               value={command}
               onChange={e => setCommand(e.target.value)}
@@ -367,6 +492,11 @@ export default function BulkCommandPage() {
             <span className="text-sm font-display" style={{ color: 'var(--text-primary)' }}>Console</span>
             {runId && (
               <div className="flex items-center gap-2">
+                {Object.keys(results).length > 0 && (
+                  <button onClick={exportResultsCsv} className="btn-ghost text-xs px-3 py-1.5 flex items-center gap-1.5">
+                    <Download size={12} /> Export CSV
+                  </button>
+                )}
                 {failedIds.length > 0 && runStatus === 'done' && (
                   <button onClick={retryFailed} className="btn-ghost text-xs px-3 py-1.5 flex items-center gap-1.5">
                     <RotateCcw size={12} /> Retry failed ({failedIds.length})
@@ -417,7 +547,7 @@ export default function BulkCommandPage() {
 
       {/* ── PIN confirmation ── */}
       {pinOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => { setPinOpen(false); setPin(''); setPinError('') }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => { setPinOpen(false); setPin(''); setPinError(''); setPinTargetIds(null) }}>
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
           <div className="relative z-10 w-full max-w-md animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--bg-card)', borderColor: 'rgba(108,92,231,0.25)', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
@@ -430,14 +560,25 @@ export default function BulkCommandPage() {
                   <div>
                     <h3 className="font-display text-base" style={{ color: 'var(--text-primary)' }}>Confirm Bulk Command</h3>
                     <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                      {selected.size} device{selected.size === 1 ? '' : 's'} · <span className="font-mono">{command.slice(0, 40)}{command.length > 40 ? '…' : ''}</span>
+                      {(pinTargetIds ?? [...selected]).length} device{(pinTargetIds ?? [...selected]).length === 1 ? '' : 's'}
+                      {pinTargetIds ? ' (retry)' : ''} · <span className="font-mono">{command.slice(0, 40)}{command.length > 40 ? '…' : ''}</span>
                     </p>
                   </div>
                 </div>
-                <button onClick={() => { setPinOpen(false); setPin(''); setPinError('') }} className="p-1 rounded-lg hover:text-accent-red" style={{ color: 'var(--text-muted)' }}>
+                <button onClick={() => { setPinOpen(false); setPin(''); setPinError(''); setPinTargetIds(null) }} className="p-1 rounded-lg hover:text-accent-red" style={{ color: 'var(--text-muted)' }}>
                   <X size={16} />
                 </button>
               </div>
+              {(pinTargetBreakdown.offline > 0 || pinTargetBreakdown.unknown > 0 || pinTargetBreakdown.error > 0) && (
+                <div className="mx-6 mb-3 px-3 py-2.5 rounded-lg flex items-start gap-2"
+                  style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.25)' }}>
+                  <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{ color: '#fbbf24' }} />
+                  <p className="text-xs font-body leading-relaxed" style={{ color: '#fbbf24' }}>
+                    {pinTargetBreakdown.online} online, {pinTargetBreakdown.offline} offline, {pinTargetBreakdown.unknown + pinTargetBreakdown.error} unreachable/unknown —
+                    devices that aren't online will very likely fail or time out.
+                  </p>
+                </div>
+              )}
               <div className="mx-6 mb-4 px-3 py-2.5 rounded-lg" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
                 <p className="text-xs font-body leading-relaxed" style={{ color: 'var(--text-muted)' }}>
                   <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>Security check:</span>{' '}
@@ -458,7 +599,7 @@ export default function BulkCommandPage() {
                 />
                 {pinError && <p className="text-xs text-accent-red mt-2 font-body">{pinError}</p>}
                 <div className="flex gap-3 mt-5">
-                  <button onClick={() => { setPinOpen(false); setPin(''); setPinError('') }} className="btn-ghost flex-1 justify-center" disabled={submitting}>Cancel</button>
+                  <button onClick={() => { setPinOpen(false); setPin(''); setPinError(''); setPinTargetIds(null) }} className="btn-ghost flex-1 justify-center" disabled={submitting}>Cancel</button>
                   <button onClick={confirmPin} disabled={submitting || !pin.trim()} className="btn-primary flex-1 justify-center flex items-center gap-2 disabled:opacity-40">
                     {submitting && <Loader2 size={14} className="animate-spin" />}
                     {submitting ? 'Starting…' : 'Confirm & Run'}

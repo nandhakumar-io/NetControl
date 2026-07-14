@@ -858,6 +858,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  capacity_forecast_notices:', e.message);
     }
+    try {
+      const { migrateBulkCommandHistory } = require('./migrate-bulk-command-history');
+      await migrateBulkCommandHistory();
+      console.log('  ✓ bulk_command_history (org-scoped recent/favorite commands for the Bulk Command console)');
+    } catch (e) {
+      console.warn('  ⚠  bulk_command_history:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

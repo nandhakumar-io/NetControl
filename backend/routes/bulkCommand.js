@@ -5,9 +5,11 @@
 // on real infrastructure): admin/operator only, org + group scoped, PIN
 // confirmed, rate limited, fully audited per-device via services/bulkCommand.js.
 'use strict';
+const crypto = require('crypto');
 const express = require('express');
+const { v4: uuidv4 } = require('uuid');
 const { body, param, validationResult } = require('express-validator');
-const { query, queryOne } = require('../db');
+const { query, queryOne, execute } = require('../db');
 const { requireAuth, requireActionPin, requireRole } = require('../middleware/auth');
 const { requireOrgContext } = require('../middleware/tenant');
 const { actionLimiter } = require('../middleware/rateLimiter');
@@ -16,6 +18,37 @@ const bulkCommand = require('../services/bulkCommand');
 
 const router = express.Router();
 router.use(requireAuth, requireOrgContext, requireRole('admin', 'operator'));
+
+function hashCommand(command) {
+  return crypto.createHash('sha256').update(command).digest('hex');
+}
+
+// Fire-and-forget upsert into the org's command history — never allowed to
+// slow down or fail a run itself, same pattern as audit.log() elsewhere.
+async function recordHistory(orgId, command, userId, username) {
+  try {
+    const hash = hashCommand(command);
+    const existing = await queryOne(
+      'SELECT id FROM bulk_command_history WHERE org_id = ? AND command_hash = ?',
+      [orgId, hash]
+    );
+    if (existing) {
+      await execute(
+        'UPDATE bulk_command_history SET run_count = run_count + 1, last_used_at = NOW() WHERE id = ?',
+        [existing.id]
+      );
+    } else {
+      await execute(
+        `INSERT INTO bulk_command_history
+           (id, org_id, command, command_hash, run_count, is_favorite, created_by, created_by_username, created_at, last_used_at)
+         VALUES (?, ?, ?, ?, 1, 0, ?, ?, NOW(), NOW())`,
+        [uuidv4(), orgId, command, hash, userId, username]
+      );
+    }
+  } catch (e) {
+    console.error('[BulkCommand] Failed to record command history:', e.message);
+  }
+}
 
 async function loadDevice(id) {
   const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);
@@ -74,9 +107,58 @@ router.post('/run',
       command, devices: accessible, userId: req.user.id, username: req.user.username, orgId: req.orgId,
     });
 
+    recordHistory(req.orgId, command, req.user.id, req.user.username); // fire-and-forget
+
     res.status(201).json({ runId, total: accessible.length, skipped });
   }
 );
+
+// ── Command history / favorites ─────────────────────────────────────────
+// GET /api/bulk-command/history — favorites first (most recently used
+// favorite first), then everything else by recency. Capped so the dropdown
+// stays fast/scannable rather than becoming a dumping ground of every
+// one-off command anyone in the org has ever run.
+router.get('/history', async (req, res) => {
+  try {
+    const rows = await query(
+      `SELECT id, command, run_count, is_favorite, created_by_username, last_used_at
+         FROM bulk_command_history
+        WHERE org_id = ?
+        ORDER BY is_favorite DESC, last_used_at DESC
+        LIMIT 30`,
+      [req.orgId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/bulk-command/history/:id/favorite — toggle. Body: { favorite: bool }
+router.post('/history/:id/favorite',
+  [param('id').isUUID(), body('favorite').isBoolean()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const row = await queryOne('SELECT id FROM bulk_command_history WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      await execute('UPDATE bulk_command_history SET is_favorite = ? WHERE id = ?', [req.body.favorite ? 1 : 0, req.params.id]);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// DELETE /api/bulk-command/history/:id — remove a single history entry
+// (e.g. a mistyped or sensitive one-off command someone doesn't want
+// lingering in the shared org dropdown).
+router.delete('/history/:id', param('id').isUUID(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const result = await execute('DELETE FROM bulk_command_history WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!result.affectedRows) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── GET /api/bulk-command/:runId/stream — SSE, connect any time during or
 // shortly after the run; replays everything so far then streams live ─────
