@@ -72,13 +72,19 @@ router.post('/run',
     body('command').notEmpty().isString().isLength({ max: 1000 }),
     body('deviceIds').isArray({ min: 1, max: 200 }),
     body('deviceIds.*').isUUID(),
+    // Optional override for large/piped commands that legitimately need
+    // longer than the 30s default (e.g. `apt update && apt upgrade -y`,
+    // multi-stage backups piped through gzip/ssh). Bounds mirror
+    // services/bulkCommand.js's MIN/MAX_TIMEOUT_MS so a bad value is
+    // rejected here rather than silently clamped deep in execution.
+    body('timeoutSec').optional().isInt({ min: 5, max: 3600 }).withMessage('timeoutSec must be between 5 and 3600 seconds'),
   ],
   requireActionPin,
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const { command, deviceIds } = req.body;
+    const { command, deviceIds, timeoutSec } = req.body;
 
     // Load + org/group-scope every device up front — a device that fails
     // this check is reported back as 'skipped' rather than silently
@@ -105,6 +111,7 @@ router.post('/run',
 
     const runId = bulkCommand.startRun({
       command, devices: accessible, userId: req.user.id, username: req.user.username, orgId: req.orgId,
+      timeoutMs: timeoutSec ? timeoutSec * 1000 : undefined,
     });
 
     recordHistory(req.orgId, command, req.user.id, req.user.username); // fire-and-forget

@@ -36,7 +36,10 @@ const audit = require('./audit');
 const bus = require('./bus');
 
 const MAX_CONCURRENCY = 8;       // don't open 40 simultaneous SSH/WinRM connections at once
-const PER_DEVICE_TIMEOUT_MS = 30000;
+const DEFAULT_TIMEOUT_MS = 30000;
+const MIN_TIMEOUT_MS = 5000;      // guards against a mistyped "0" hanging workers on a dead connection
+const MAX_TIMEOUT_MS = 60 * 60 * 1000; // 1h ceiling — long enough for big piped/batch jobs without one
+                                        // stuck device tying up a pool worker indefinitely
 const JOB_TTL_SEC = 30 * 60; // jobs older than this get swept up so state doesn't grow forever
 
 const redis = bus.getClient(); // non-null object even if Redis is unreachable — ioredis
@@ -203,8 +206,14 @@ function withTimeout(promise, ms, label) {
  * routes/actions.js's loadDevice) — this function does no further access
  * control itself, same division of responsibility as runbookRunner.js.
  */
-function startRun({ command, devices, userId, username, orgId }) {
+function startRun({ command, devices, userId, username, orgId, timeoutMs }) {
   const runId = uuidv4();
+  // Clamp whatever the caller passed (route already validates range, but
+  // this is the actual execution boundary — never trust just one layer)
+  // and fall back to the default for anything missing/non-numeric.
+  const effectiveTimeoutMs = Number.isFinite(timeoutMs)
+    ? Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, timeoutMs))
+    : DEFAULT_TIMEOUT_MS;
 
   // Fire-and-forget — the caller gets runId back immediately and connects
   // the SSE stream separately, same pattern as discovery scans. Job
@@ -212,9 +221,9 @@ function startRun({ command, devices, userId, username, orgId }) {
   // finds the job (even with status still "running", total already set).
   (async () => {
     await createJob(runId, { command, orgId, userId, username, total: devices.length });
-    await emit(runId, { type: 'start', runId, total: devices.length, command });
+    await emit(runId, { type: 'start', runId, total: devices.length, command, timeoutMs: effectiveTimeoutMs });
     try {
-      await runPool(runId, command, devices, { userId, username });
+      await runPool(runId, command, devices, { userId, username, timeoutMs: effectiveTimeoutMs });
     } catch (e) {
       await emit(runId, { type: 'fatal', message: e.message });
     } finally {
@@ -226,7 +235,7 @@ function startRun({ command, devices, userId, username, orgId }) {
   return runId;
 }
 
-async function runPool(runId, command, devices, { userId, username }) {
+async function runPool(runId, command, devices, { userId, username, timeoutMs }) {
   let cursor = 0;
   const workers = Array.from({ length: Math.min(MAX_CONCURRENCY, devices.length) }, () => worker());
 
@@ -239,7 +248,7 @@ async function runPool(runId, command, devices, { userId, username }) {
       const startedAt = Date.now();
       try {
         const exec = device.os_type === 'linux' ? ssh.execCommand : winrm.execCommand;
-        const result = await withTimeout(exec(device, command), PER_DEVICE_TIMEOUT_MS, `Command on ${device.name}`);
+        const result = await withTimeout(exec(device, command), timeoutMs, `Command on ${device.name}`);
         output = (result?.stdout ?? '').slice(0, 8000);
       } catch (e) {
         status = 'failure';
@@ -253,7 +262,7 @@ async function runPool(runId, command, devices, { userId, username }) {
         userId, username, action: 'bulk_exec_command',
         targetType: 'device', targetId: device.id, targetName: device.name,
         result: status === 'success' ? 'success' : 'failure',
-        details: `Bulk command run: CMD: ${command}`,
+        details: `Bulk command run: CMD: ${command} (timeout ${Math.round(timeoutMs / 1000)}s)`,
       }).catch(() => {});
     }
   }
@@ -261,4 +270,4 @@ async function runPool(runId, command, devices, { userId, username }) {
   await Promise.all(workers);
 }
 
-module.exports = { startRun, attachStream, detachStream, getJob };
+module.exports = { startRun, attachStream, detachStream, getJob, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS };

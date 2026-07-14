@@ -101,6 +101,12 @@ export default function BulkCommandPage() {
   const [selected, setSelected] = useState(new Set())
 
   const [command, setCommand] = useState('')
+  // Override for the 30s-per-device default — large or piped commands
+  // (apt upgrade, multi-stage backups through gzip/ssh, etc.) can
+  // legitimately need much longer than that. Bounds mirror the backend's
+  // validation (5–3600s) so a bad value gets caught before the PIN dialog
+  // rather than surfacing as a confusing 400 after confirming.
+  const [timeoutSec, setTimeoutSec] = useState(30)
   const [history, setHistory] = useState([])
   const [historyOpen, setHistoryOpen] = useState(false)
   const [pinOpen, setPinOpen] = useState(false)
@@ -219,7 +225,7 @@ export default function BulkCommandPage() {
   const runAgainst = async (deviceIds, actionPin) => {
     setSubmitting(true)
     try {
-      const { data } = await api.post('/bulk-command/run', { actionPin, command, deviceIds })
+      const { data } = await api.post('/bulk-command/run', { actionPin, command, deviceIds, timeoutSec })
       if (data.skipped?.length) {
         data.skipped.forEach(s => toast.error(`${s.deviceName || s.deviceId}: ${s.reason}`, { duration: 4000 }))
       }
@@ -292,6 +298,9 @@ export default function BulkCommandPage() {
   const handleSubmit = () => {
     if (!command.trim()) { toast.error('Enter a command to run'); return }
     if (selected.size === 0) { toast.error('Select at least one device'); return }
+    if (!Number.isFinite(timeoutSec) || timeoutSec < 5 || timeoutSec > 3600) {
+      toast.error('Timeout must be between 5 and 3600 seconds'); return
+    }
     setPinTargetIds(null) // run against the current picker selection, not a stale retry target
     setPinOpen(true)
   }
@@ -472,8 +481,24 @@ export default function BulkCommandPage() {
               rows={4}
               className="input-field font-mono text-sm resize-none"
             />
+            <div className="flex items-center gap-2 mt-2">
+              <label className="text-[11px] font-body shrink-0" style={{ color: 'var(--text-muted)' }}>
+                Timeout per device
+              </label>
+              <input
+                type="number"
+                min={5}
+                max={3600}
+                step={5}
+                value={timeoutSec}
+                onChange={e => setTimeoutSec(parseInt(e.target.value, 10))}
+                className="input-field font-mono text-xs h-7 w-20 py-0"
+              />
+              <span className="text-[11px] font-body" style={{ color: 'var(--text-faint)' }}>seconds (5–3600)</span>
+            </div>
             <p className="text-[11px] font-body mt-1.5" style={{ color: 'var(--text-faint)' }}>
-              Linux devices run this over SSH, Windows devices over WinRM — up to 8 at a time, 30s timeout per device.
+              Linux devices run this over SSH, Windows devices over WinRM — up to 8 at a time. Raise the timeout above for
+              large or piped commands (upgrades, multi-stage backups, etc.) that legitimately take longer than the 30s default.
             </p>
             <button
               onClick={handleSubmit}
@@ -562,6 +587,7 @@ export default function BulkCommandPage() {
                     <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
                       {(pinTargetIds ?? [...selected]).length} device{(pinTargetIds ?? [...selected]).length === 1 ? '' : 's'}
                       {pinTargetIds ? ' (retry)' : ''} · <span className="font-mono">{command.slice(0, 40)}{command.length > 40 ? '…' : ''}</span>
+                      {' '}· {timeoutSec}s timeout
                     </p>
                   </div>
                 </div>
