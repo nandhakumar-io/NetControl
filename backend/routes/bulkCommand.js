@@ -264,7 +264,17 @@ router.get('/:runId/stream', param('runId').isUUID(), async (req, res) => {
   res.flushHeaders();
 
   const unsub = await bulkCommand.attachStream(req.params.runId, res);
-  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 20000);
+  // NOTE: this used to be a raw SSE comment (`: ping\n\n`). Comments never
+  // dispatch an event to EventSource in the browser, so the frontend's
+  // stall watchdog had no way to distinguish "connection is fine, the
+  // command is just legitimately still running" from "connection actually
+  // died" — any run whose per-device timeout exceeded the watchdog's 45s
+  // window (this page explicitly supports up to 3600s) got falsely flagged
+  // as stalled, and reconnecting couldn't fix it since the real problem was
+  // that heartbeats were invisible, not that the connection was down. A
+  // named `ping` event fixes that: BulkCommandPage listens for it and
+  // treats it as proof the stream is alive.
+  const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch {} }, 20000);
 
   req.on('close', () => {
     clearInterval(ping);

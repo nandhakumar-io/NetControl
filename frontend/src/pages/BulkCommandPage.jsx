@@ -318,6 +318,20 @@ export default function BulkCommandPage() {
     const es = new EventSource(`${api.defaults.baseURL}/bulk-command/${id}/stream?token=${encodeURIComponent(token)}`)
     esRef.current = es
     es.onopen = () => { errorCountRef.current = 0; setStreamState('connected') }
+    // BUG FIX: the server sends a heartbeat every 20s to keep the
+    // connection alive, but it used to be a raw SSE comment, which
+    // EventSource never surfaces as an event. That meant the watchdog
+    // below only saw real device_start/device_result events — so any
+    // command that legitimately ran longer than 45s (this page allows up
+    // to 3600s) looked identical to a dead connection, and clicking
+    // Reconnect couldn't help because the connection was never actually
+    // the problem. Now that the server sends a named `ping` event, treat
+    // it exactly like a message: proof the stream (and the run) is alive.
+    es.addEventListener('ping', () => {
+      errorCountRef.current = 0
+      lastMessageRef.current = Date.now()
+      setStreamState('connected')
+    })
     es.onmessage = (e) => {
       errorCountRef.current = 0
       lastMessageRef.current = Date.now()
