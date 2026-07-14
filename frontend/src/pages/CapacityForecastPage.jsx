@@ -18,6 +18,10 @@ import {
   AlertTriangle, CheckCircle2, TrendingDown, Minus, HelpCircle, Search, Download,
   TerminalSquare, Layers,
 } from 'lucide-react'
+import {
+  AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ReferenceLine,
+  ResponsiveContainer, CartesianGrid, Cell,
+} from 'recharts'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
@@ -61,24 +65,146 @@ function fmtDate(ts) {
   return new Date(ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-// ── Tiny bar-chart of the daily-average history a trend was fit on ─────────
-function HistoryBars({ history }) {
-  if (!history?.length) return <p className="text-xs font-body py-2" style={{ color: 'var(--text-muted)' }}>No history in this window.</p>
+// ── Builds a single chart-ready series from the daily-average history a
+// trend was fit on, plus a dashed continuation of that same trend line out
+// to the projected fill point (or a short fixed horizon if not rising) —
+// so the chart shows both what actually happened and where it's headed. ──
+function buildTrendSeries(f) {
+  const hist = f.history || []
+  if (!hist.length) return []
+  const points = hist.map(h => ({ ts: h.ts, actual: h.pct, projected: null }))
+  const last = hist[hist.length - 1]
+  points[points.length - 1] = { ...points[points.length - 1], projected: last.pct } // connects the two lines with no gap
+
+  if (f.status === 'rising' && f.slope_per_day) {
+    const DAY = 86400
+    const horizonDays = Math.max(1, Math.min(f.days_to_full != null ? Math.ceil(f.days_to_full) + 2 : 7, 45))
+    for (let i = 1; i <= horizonDays; i++) {
+      const projPct = last.pct + f.slope_per_day * i
+      points.push({ ts: last.ts + i * DAY, actual: null, projected: Math.round(Math.min(105, projPct) * 10) / 10 })
+      if (projPct >= 100) break
+    }
+  }
+  return points
+}
+
+function TrendTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const p = payload.find(p => p.dataKey === 'actual' && p.value != null) || payload.find(p => p.dataKey === 'projected' && p.value != null)
+  if (!p) return null
+  const isProjected = p.dataKey === 'projected'
   return (
-    <div className="space-y-2">
-      <div className="flex items-end gap-[3px] h-16">
-        {history.map((h, i) => (
-          <div key={i}
-            title={`${new Date(h.ts * 1000).toLocaleDateString()} — ${h.pct}%`}
-            className="flex-1 rounded-sm min-w-[4px]"
-            style={{ height: `${Math.max(4, h.pct)}%`, background: h.pct >= 90 ? '#f87171' : h.pct >= 75 ? '#fbbf24' : '#6c5ce7' }}
+    <div style={{ background: 'rgba(6,6,18,0.98)', border: '1px solid rgba(255,255,255,0.09)', borderRadius: 8, fontSize: 11, fontFamily: 'monospace', padding: '7px 11px' }}>
+      <div style={{ color: 'var(--text-faint)' }}>{new Date(p.payload.ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</div>
+      <div style={{ color: isProjected ? '#fbbf24' : '#6c5ce7' }}>
+        {isProjected ? 'Projected: ' : 'Actual: '}<strong>{p.value}%</strong>
+      </div>
+    </div>
+  )
+}
+
+// ── Real trend chart: solid area for actual history, dashed line
+// continuing the fitted trend out to the projected fill date, with a
+// reference line at 100% so it's visually obvious what "full" means. ──────
+function TrendChart({ f }) {
+  const data = useMemo(() => buildTrendSeries(f), [f])
+  if (!data.length) return <p className="text-xs font-body py-6 text-center" style={{ color: 'var(--text-muted)' }}>No history in this window.</p>
+
+  const lineColor = f.status === 'rising' ? '#f87171' : f.status === 'falling' ? '#34d399' : '#6c5ce7'
+
+  return (
+    <div>
+      <ResponsiveContainer width="100%" height={150}>
+        <AreaChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+          <defs>
+            <linearGradient id={`cf-actual-${f.device_id}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={lineColor} stopOpacity={0.28} />
+              <stop offset="100%" stopColor={lineColor} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+          <XAxis dataKey="ts" tickFormatter={t => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+            tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+          <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false} width={30} />
+          <Tooltip content={<TrendTooltip />} />
+          <ReferenceLine y={100} stroke="rgba(248,113,113,0.4)" strokeDasharray="3 3" label={{ value: 'Full', position: 'insideTopRight', fill: '#f87171', fontSize: 9 }} />
+          <Area type="monotone" dataKey="actual" name="Actual" stroke={lineColor} strokeWidth={2} fill={`url(#cf-actual-${f.device_id})`} dot={false} isAnimationActive={false} connectNulls />
+          <Area type="monotone" dataKey="projected" name="Projected" stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="4 3" fill="transparent" dot={false} isAnimationActive={false} connectNulls />
+        </AreaChart>
+      </ResponsiveContainer>
+      {f.status === 'rising' && (
+        <div className="flex items-center gap-3 justify-center mt-1">
+          <span className="flex items-center gap-1 text-[10px] font-mono" style={{ color: lineColor }}>
+            <span className="inline-block w-3 h-px" style={{ background: lineColor }} /> Actual
+          </span>
+          <span className="flex items-center gap-1 text-[10px] font-mono" style={{ color: '#fbbf24' }}>
+            <span className="inline-block w-3 h-px border-t border-dashed" style={{ borderColor: '#fbbf24' }} /> Projected
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Overview: horizontal bar chart of the devices closest to filling up,
+// so the urgency is visible at a glance instead of only in the list below.
+function SoonestToFillChart({ forecasts, thresholds, metric }) {
+  const top = useMemo(() => {
+    return forecasts
+      .filter(f => f.status === 'rising' && f.days_to_full != null)
+      .sort((a, b) => a.days_to_full - b.days_to_full)
+      .slice(0, 8)
+      .map(f => ({
+        name: f.device_name.length > 18 ? f.device_name.slice(0, 17) + '…' : f.device_name,
+        fullName: f.device_name,
+        days: Math.round(f.days_to_full * 10) / 10,
+        critical: f.days_to_full <= thresholds.criticalDays,
+        warning: f.days_to_full <= thresholds.warningDays,
+      }))
+      .reverse() // so the soonest-to-fill renders at the top of the vertical bar chart
+  }, [forecasts, thresholds])
+
+  if (!top.length) {
+    return (
+      <div className="card flex flex-col items-center justify-center py-8 gap-2">
+        <CheckCircle2 size={22} style={{ color: 'var(--text-faint)' }} />
+        <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>No devices are currently trending toward full.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="card">
+      <div className="flex items-center gap-2 mb-1">
+        {metric === 'disk' ? <HardDrive size={13} style={{ color: 'var(--text-muted)' }} /> : <MemoryStick size={13} style={{ color: 'var(--text-muted)' }} />}
+        <span className="text-xs font-body font-semibold" style={{ color: 'var(--text-primary)' }}>Soonest to fill</span>
+      </div>
+      <ResponsiveContainer width="100%" height={Math.max(160, top.length * 34)}>
+        <BarChart data={top} layout="vertical" margin={{ top: 4, right: 24, left: 4, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+          <XAxis type="number" tick={{ fontSize: 9, fill: '#475569' }} tickLine={false} axisLine={false}
+            label={{ value: 'days to full', position: 'insideBottomRight', fill: '#475569', fontSize: 9, dy: 10 }} />
+          <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={110} />
+          <Tooltip
+            cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null
+              const d = payload[0].payload
+              return (
+                <div style={{ background: 'rgba(6,6,18,0.98)', border: '1px solid rgba(255,255,255,0.09)', borderRadius: 8, fontSize: 11, fontFamily: 'monospace', padding: '7px 11px' }}>
+                  <div style={{ color: 'var(--text-primary)' }}>{d.fullName}</div>
+                  <div style={{ color: d.critical ? '#f87171' : d.warning ? '#fbbf24' : '#6c5ce7' }}>~{d.days} day{d.days === 1 ? '' : 's'} to full</div>
+                </div>
+              )
+            }}
           />
-        ))}
-      </div>
-      <div className="flex justify-between text-[10px] font-mono" style={{ color: 'var(--text-faint)' }}>
-        <span>{new Date(history[0].ts * 1000).toLocaleDateString()}</span>
-        <span>{new Date(history[history.length - 1].ts * 1000).toLocaleDateString()}</span>
-      </div>
+          <Bar dataKey="days" radius={[0, 4, 4, 0]} barSize={16}>
+            {top.map((d, i) => (
+              <Cell key={i} fill={d.critical ? '#f87171' : d.warning ? '#fbbf24' : '#6c5ce7'} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
     </div>
   )
 }
@@ -161,8 +287,15 @@ function ForecastRow({ f, thresholds }) {
             <span>{f.sample_days ?? 0} day{f.sample_days === 1 ? '' : 's'} of data{f.r2 != null ? ` · R² ${f.r2}` : ''}</span>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <HistoryBars history={f.history} />
-            <ProjectionGauge f={f} thresholds={thresholds} />
+            <TrendChart f={f} />
+            <div className="flex flex-col justify-center gap-3">
+              <ProjectionGauge f={f} thresholds={thresholds} />
+              {f.status === 'rising' && f.slope_per_day != null && (
+                <p className="text-[11px] font-body" style={{ color: 'var(--text-faint)' }}>
+                  Trending up {f.slope_per_day}%/day — at this rate it reaches 100% {f.days_to_full != null ? fmtDays(f.days_to_full).replace('~', 'in ~') : 'soon'}.
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -317,15 +450,18 @@ export default function CapacityForecastPage() {
         }
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
-        <StatCard icon={AlertTriangle} label={`Critical (≤${thresholds.criticalDays}d)`} value={critical}
-          iconColor="text-accent-red" iconBg="bg-accent-red/10 border-accent-red/25" />
-        <StatCard icon={TrendingUp} label={`Warning (≤${thresholds.warningDays}d)`} value={warning}
-          iconColor="text-accent-yellow" iconBg="bg-accent-yellow/10 border-accent-yellow/25" />
-        <StatCard icon={TrendingUp} label="Rising" value={rising}
-          iconColor="text-accent-yellow" iconBg="bg-accent-yellow/10 border-accent-yellow/25" />
-        <StatCard icon={CheckCircle2} label="Devices Tracked" value={forecasts.length}
-          iconColor="text-brand-400" iconBg="bg-brand-500/10 border-brand-500/25" />
+      <div className="grid grid-cols-1 lg:grid-cols-[1.3fr_1fr] gap-4 mb-6">
+        <div className="grid grid-cols-2 gap-4 content-start">
+          <StatCard icon={AlertTriangle} label={`Critical (≤${thresholds.criticalDays}d)`} value={critical}
+            iconColor="text-accent-red" iconBg="bg-accent-red/10 border-accent-red/25" />
+          <StatCard icon={TrendingUp} label={`Warning (≤${thresholds.warningDays}d)`} value={warning}
+            iconColor="text-accent-yellow" iconBg="bg-accent-yellow/10 border-accent-yellow/25" />
+          <StatCard icon={TrendingUp} label="Rising" value={rising}
+            iconColor="text-accent-yellow" iconBg="bg-accent-yellow/10 border-accent-yellow/25" />
+          <StatCard icon={CheckCircle2} label="Devices Tracked" value={forecasts.length}
+            iconColor="text-brand-400" iconBg="bg-brand-500/10 border-brand-500/25" />
+        </div>
+        <SoonestToFillChart forecasts={forecasts} thresholds={thresholds} metric={metric} />
       </div>
 
       <div className="card p-3 mb-4 flex items-center gap-2 flex-wrap">

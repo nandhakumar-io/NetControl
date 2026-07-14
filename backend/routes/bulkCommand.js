@@ -80,11 +80,16 @@ router.post('/run',
 
 // ── GET /api/bulk-command/:runId/stream — SSE, connect any time during or
 // shortly after the run; replays everything so far then streams live ─────
-router.get('/:runId/stream', param('runId').isUUID(), (req, res) => {
+router.get('/:runId/stream', param('runId').isUUID(), async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const job = bulkCommand.getJob(req.params.runId);
+  // getJob is now backed by Redis (see services/bulkCommand.js) so this
+  // finds the job regardless of which cluster worker actually ran it —
+  // previously an in-memory-only Map here meant this request could 404
+  // just because it landed on a different worker than POST /run did,
+  // leaving the console stuck showing every device as "pending" forever.
+  const job = await bulkCommand.getJob(req.params.runId);
   if (!job || job.orgId !== req.orgId) return res.status(404).json({ error: 'Run not found' });
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -93,12 +98,12 @@ router.get('/:runId/stream', param('runId').isUUID(), (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  bulkCommand.addListener(req.params.runId, res);
+  const unsub = await bulkCommand.attachStream(req.params.runId, res);
   const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 20000);
 
   req.on('close', () => {
     clearInterval(ping);
-    bulkCommand.removeListener(req.params.runId, res);
+    bulkCommand.detachStream(req.params.runId, unsub);
   });
 });
 

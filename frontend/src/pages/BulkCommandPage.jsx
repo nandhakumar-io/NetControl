@@ -109,7 +109,10 @@ export default function BulkCommandPage() {
   const [runDevices, setRunDevices] = useState([])   // devices included in the active/last run
   const [results, setResults] = useState({})          // deviceId -> { status, output, durationMs }
   const [runStatus, setRunStatus] = useState(null)    // null | 'running' | 'done'
+  const [streamState, setStreamState] = useState('connected') // 'connected' | 'reconnecting' | 'stalled'
   const esRef = useRef(null)
+  const errorCountRef = useRef(0)
+  const lastMessageRef = useRef(0)
 
   const loadDevices = useCallback(async () => {
     setLoadingDevices(true)
@@ -192,10 +195,17 @@ export default function BulkCommandPage() {
 
   const attachStream = (id) => {
     esRef.current?.close()
+    errorCountRef.current = 0
+    lastMessageRef.current = Date.now()
+    setStreamState('connected')
     const token = localStorage.getItem('nc_token')
     const es = new EventSource(`${api.defaults.baseURL}/bulk-command/${id}/stream?token=${encodeURIComponent(token)}`)
     esRef.current = es
+    es.onopen = () => { errorCountRef.current = 0; setStreamState('connected') }
     es.onmessage = (e) => {
+      errorCountRef.current = 0
+      lastMessageRef.current = Date.now()
+      setStreamState('connected')
       let ev
       try { ev = JSON.parse(e.data) } catch { return }
       if (ev.type === 'device_start') {
@@ -211,8 +221,29 @@ export default function BulkCommandPage() {
         es.close()
       }
     }
-    es.onerror = () => { /* EventSource auto-retries; final 'done' event closes it cleanly on success */ }
+    // EventSource auto-retries on its own, so a single blip isn't worth
+    // surfacing — but if it keeps failing, that's worth telling the person
+    // about instead of leaving every row silently stuck on "Queued".
+    es.onerror = () => {
+      errorCountRef.current += 1
+      if (errorCountRef.current >= 3) setStreamState('reconnecting')
+      if (errorCountRef.current >= 8) { setStreamState('stalled'); es.close() }
+    }
   }
+
+  // Watchdog: if the run is still "running" but no event (not even a
+  // keep-alive ping) has arrived in 45s, the connection is silently dead
+  // (e.g. a proxy dropped it without firing onerror) — flag it instead of
+  // leaving the console looking like it's just quietly working.
+  useEffect(() => {
+    if (runStatus !== 'running') return
+    const t = setInterval(() => {
+      if (Date.now() - lastMessageRef.current > 45000) setStreamState('stalled')
+    }, 5000)
+    return () => clearInterval(t)
+  }, [runStatus])
+
+  const reconnectStream = () => { if (runId) attachStream(runId) }
 
   const handleSubmit = () => {
     if (!command.trim()) { toast.error('Enter a command to run'); return }
@@ -352,6 +383,23 @@ export default function BulkCommandPage() {
             </div>
           ) : (
             <>
+              {streamState !== 'connected' && runStatus === 'running' && (
+                <div className="mx-4 mt-3 px-3 py-2 rounded-lg flex items-center justify-between gap-3"
+                  style={{
+                    background: streamState === 'stalled' ? 'rgba(248,113,113,0.08)' : 'rgba(251,191,36,0.08)',
+                    border: `1px solid ${streamState === 'stalled' ? 'rgba(248,113,113,0.25)' : 'rgba(251,191,36,0.25)'}`,
+                  }}>
+                  <span className="text-xs font-body flex items-center gap-2" style={{ color: streamState === 'stalled' ? '#fca5a5' : '#fbbf24' }}>
+                    <Loader2 size={12} className={streamState === 'reconnecting' ? 'animate-spin' : ''} />
+                    {streamState === 'stalled'
+                      ? 'Live connection lost — the run may still be executing in the background.'
+                      : 'Live connection interrupted — reconnecting…'}
+                  </span>
+                  {streamState === 'stalled' && (
+                    <button onClick={reconnectStream} className="btn-ghost text-xs px-2.5 py-1 shrink-0">Reconnect</button>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-3 gap-3 p-4">
                 <StatCard icon={Loader2} label="Running" value={counts.running} iconColor="text-blue-400" iconBg="bg-blue-400/10 border-blue-400/25" />
                 <StatCard icon={CheckCircle2} label="Success" value={counts.success} iconColor="text-accent-green" iconBg="bg-accent-green/10 border-accent-green/25" />
