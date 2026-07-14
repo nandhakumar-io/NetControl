@@ -50,6 +50,23 @@ async function recordHistory(orgId, command, userId, username) {
   }
 }
 
+// Fire-and-forget upsert of "which run this user last watched" — the
+// cross-browser replacement for the old localStorage pointer. Never
+// allowed to slow down or fail a run itself, same pattern as recordHistory
+// and audit.log() elsewhere.
+async function recordLastRun(userId, runId, orgId) {
+  try {
+    await execute(
+      `INSERT INTO user_last_bulk_run (user_id, run_id, org_id, updated_at)
+       VALUES (?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE run_id = VALUES(run_id), org_id = VALUES(org_id), updated_at = NOW()`,
+      [userId, runId, orgId]
+    );
+  } catch (e) {
+    console.error('[BulkCommand] Failed to record last-run pointer:', e.message);
+  }
+}
+
 async function loadDevice(id) {
   const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);
   if (!d) return null;
@@ -115,6 +132,7 @@ router.post('/run',
     });
 
     recordHistory(req.orgId, command, req.user.id, req.user.username); // fire-and-forget
+    recordLastRun(req.user.id, runId, req.orgId);                       // fire-and-forget
 
     res.status(201).json({ runId, total: accessible.length, skipped });
   }
@@ -182,6 +200,30 @@ router.get('/devices', async (req, res) => {
       [req.orgId]
     );
     res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/bulk-command/active — "which run was I last watching", the
+// cross-browser resume pointer. Must stay registered before GET /:runId
+// for the same reason as /devices above ('active' would otherwise get
+// matched against :runId's isUUID() validator and 400). Self-cleaning:
+// if the pointed-at run has expired out of Redis (see JOB_TTL_SEC in
+// services/bulkCommand.js), the stale pointer is deleted here so it
+// doesn't keep resolving to a 404 on every future page load. ─────────────
+router.get('/active', async (req, res) => {
+  try {
+    const row = await queryOne(
+      'SELECT run_id FROM user_last_bulk_run WHERE user_id = ? AND org_id = ?',
+      [req.user.id, req.orgId]
+    );
+    if (!row) return res.json({ runId: null });
+
+    const job = await bulkCommand.getJob(row.run_id);
+    if (!job) {
+      await execute('DELETE FROM user_last_bulk_run WHERE user_id = ?', [req.user.id]);
+      return res.json({ runId: null });
+    }
+    res.json({ runId: row.run_id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -866,6 +866,13 @@ run()
       console.warn('  ⚠  bulk_command_history:', e.message);
     }
     try {
+      const { migrateBulkCommandSession } = require('./migrate-bulk-command-session');
+      await migrateBulkCommandSession();
+      console.log('  ✓ user_last_bulk_run (cross-browser resume pointer for the Bulk Command console)');
+    } catch (e) {
+      console.warn('  ⚠  user_last_bulk_run:', e.message);
+    }
+    try {
       const { migrateDefaultRunbooks } = require('./migrate-default-runbooks');
       await migrateDefaultRunbooks();
       console.log('  ✓ default runbooks (seeded starter restart/cleanup/flush actions per org)');

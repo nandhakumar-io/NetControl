@@ -92,8 +92,6 @@ function ResultRow({ id, name, ip, state }) {
 
 // Key used to persist the active/last bulk-command run's id across page
 // navigation and reloads (see restoreRun in the component below).
-const LAST_RUN_KEY = 'nc_bulk_command_last_run_id'
-
 export default function BulkCommandPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const preselectDeviceId = searchParams.get('deviceId')
@@ -197,16 +195,21 @@ export default function BulkCommandPage() {
       setRunStatus(job.status === 'done' ? 'done' : 'running')
       if (job.status !== 'done') attachStream(job.runId)
     } catch (err) {
-      // Job expired (30 min TTL) or otherwise gone — nothing to restore,
-      // just quietly drop the stale pointer instead of erroring at the user.
-      if (err.response?.status === 404) localStorage.removeItem(LAST_RUN_KEY)
+      // Job expired (30 min TTL) or otherwise gone — nothing to restore.
+      // The server-side pointer (user_last_bulk_run) self-cleans on the
+      // next GET /bulk-command/active, so there's nothing to do here.
     }
   }, [devices]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (loadingDevices) return // wait for the device list so name/IP lookups resolve
-    const savedId = localStorage.getItem(LAST_RUN_KEY)
-    if (savedId) restoreRun(savedId)
+    // Cross-browser resume pointer — replaces the old localStorage-only
+    // nc_bulk_command_last_run_id, which meant switching browsers (or even
+    // just a different profile) always showed a blank console even while
+    // the run was still live and fully tracked server-side.
+    api.get('/bulk-command/active')
+      .then(({ data }) => { if (data.runId) restoreRun(data.runId) })
+      .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadingDevices])
 
@@ -297,7 +300,6 @@ export default function BulkCommandPage() {
       setResults({})
       setRunId(data.runId)
       setRunStatus('running')
-      localStorage.setItem(LAST_RUN_KEY, data.runId)
       setPinOpen(false); setPin(''); setPinError(''); setPinTargetIds(null)
       attachStream(data.runId)
       toast.success(`Running on ${data.total} device${data.total === 1 ? '' : 's'}…`)

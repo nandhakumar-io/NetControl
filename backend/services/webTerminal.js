@@ -30,7 +30,6 @@
 
 'use strict';
 const express    = require('express');
-const { v4: uuidv4 } = require('uuid');
 const { queryOne } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { verifyDeviceOrgAccess } = require('../middleware/tenant');
@@ -42,8 +41,9 @@ require('dotenv').config();
 
 const router = express.Router();
 
-const SESSION_TTL_SEC = 5 * 60;      // 5 min inactivity — same window as before
+const SESSION_TTL_SEC = 10 * 60;     // idle window before a session is reaped — matches services/sshProxy.js
 const CLOSED_TTL_SEC  = 30;          // grace period so in-flight polls still see `closed`
+const BUFFER_MAX_CHUNKS = 500;       // capped scrollback replay log, same approach as services/sshProxy.js
 const redis = bus.getClient();       // null in single-process fallback mode
 
 // ── Durable session state (Map when no Redis, Redis hash/lists when there is) ─
@@ -56,6 +56,7 @@ function sKey(id)  { return `term:session:${id}`; }
 function iKey(id)  { return `term:input:${id}`; }
 function pKey(dId) { return `term:pending:${dId}`; }
 function aKey()    { return `term:active`; }
+function bKey(id)  { return `term:buf:${id}`; }
 
 async function createSession(sessionId, { deviceId, deviceName, userId }) {
   const now = Date.now();
@@ -68,7 +69,7 @@ async function createSession(sessionId, { deviceId, deviceName, userId }) {
     await redis.sadd(aKey(), sessionId);
   } else {
     memSessions.set(sessionId, {
-      deviceId, deviceName, userId, inputQueue: [], created: now, lastActive: now,
+      deviceId, deviceName, userId, inputQueue: [], buffer: [], created: now, lastActive: now,
       agentConnected: false, closed: false,
     });
   }
@@ -111,6 +112,7 @@ async function closeSession(sessionId) {
     if (await redis.exists(key)) await redis.hset(key, 'closed', '1');
     await redis.expire(key, CLOSED_TTL_SEC);
     await redis.del(iKey(sessionId));
+    await redis.del(bKey(sessionId));
     await redis.srem(aKey(), sessionId);
   } else {
     const s = memSessions.get(sessionId);
@@ -134,6 +136,30 @@ async function listSessions() {
     sessionId: id, deviceId: s.deviceId, deviceName: s.deviceName,
     agentConnected: s.agentConnected, created: s.created, lastActive: s.lastActive,
   }));
+}
+
+// ── Scrollback buffer (agent output -> replayed to a browser that (re)attaches) ─
+// Same idea as services/sshProxy.js's replay buffer: lets a browser that
+// reconnects — because it navigated away and came back, or the SSE stream
+// hiccuped — see everything it missed instead of a blank terminal, without
+// needing the agent to resend anything.
+async function appendBuffer(sessionId, data) {
+  if (redis) {
+    await redis.rpush(bKey(sessionId), data);
+    await redis.ltrim(bKey(sessionId), -BUFFER_MAX_CHUNKS, -1);
+    await redis.expire(bKey(sessionId), SESSION_TTL_SEC);
+  } else {
+    const s = memSessions.get(sessionId);
+    if (s) {
+      s.buffer.push(data);
+      if (s.buffer.length > BUFFER_MAX_CHUNKS) s.buffer.splice(0, s.buffer.length - BUFFER_MAX_CHUNKS);
+    }
+  }
+}
+
+async function getBuffer(sessionId) {
+  if (redis) return (await redis.lrange(bKey(sessionId), 0, -1)).join('');
+  return (memSessions.get(sessionId)?.buffer || []).join('');
 }
 
 // ── Input queue (browser keystrokes -> waiting agent poll) ────────────────────
@@ -217,7 +243,17 @@ async function agentAuthMiddleware(req, res, next) {
   } catch { res.status(500).json({ error: 'DB error' }); }
 }
 
-// ── POST /api/terminal/open/:deviceId — client opens a session ────────────────
+// ── POST /api/terminal/open/:deviceId — client opens (or reattaches to) a
+// session ────────────────────────────────────────────────────────────────
+// STRUCTURAL FIX: sessionId used to be a fresh uuidv4() every call, so
+// navigating away from a device's terminal and back always produced a
+// brand new session — same underlying gap as services/sshProxy.js had for
+// the direct-SSH path (see that file's header comment for the full
+// rationale). Deriving the id from (userId, deviceId) instead makes this
+// endpoint idempotent: an existing, still-alive session for that user+
+// device is found and reattached to — same relay session, same scrollback
+// (see appendBuffer/getBuffer) — rather than opening a second one the
+// agent would have to juggle two shells for.
 router.post('/open/:deviceId', requireAuth, async (req, res) => {
   const { deviceId } = req.params;
   const device = await queryOne('SELECT id, name, org_id FROM devices WHERE id = ?', [deviceId]).catch(() => null);
@@ -239,7 +275,15 @@ router.post('/open/:deviceId', requireAuth, async (req, res) => {
     if (!access) return res.status(403).json({ error: 'Access denied to this device' });
   }
 
-  const sessionId = uuidv4();
+  const sessionId = `${req.user.id}:${deviceId}`;
+
+  const existing = await getSession(sessionId).catch(() => null);
+  if (existing && !existing.closed) {
+    await touchSession(sessionId);
+    console.log(`[WebTerminal] Reattaching to existing session ${sessionId} for device ${deviceId} (${device.name})`);
+    return res.json({ sessionId, deviceId, deviceName: device.name, reattached: true });
+  }
+
   try {
     await createSession(sessionId, { deviceId, deviceName: device.name, userId: req.user.id });
     await enqueuePending(deviceId, sessionId);
@@ -248,7 +292,7 @@ router.post('/open/:deviceId', requireAuth, async (req, res) => {
     return res.status(500).json({ error: `Could not create session: ${e.message}` });
   }
 
-  res.json({ sessionId, deviceId, deviceName: device.name });
+  res.json({ sessionId, deviceId, deviceName: device.name, reattached: false });
 });
 
 // ── GET /api/terminal/session/:sessionId/output — SSE stream to browser ───────
@@ -284,6 +328,15 @@ router.get('/session/:sessionId/output', async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'status', data: '\x1b[90m[Waiting for agent to connect…]\x1b[0m\r\n' })}\n\n`);
   }
 
+  // Reattach case: a browser navigating back to a device it already had a
+  // session open for. Replay everything buffered so far so the terminal
+  // shows the same scrollback instead of coming up blank, then the live
+  // subscription below carries everything from this point on.
+  const backlog = await getBuffer(sessionId).catch(() => '');
+  if (backlog) {
+    try { res.write(`data: ${JSON.stringify({ type: 'data', data: backlog })}\n\n`); } catch {}
+  }
+
   const unsub = bus.subscribe(`term:output:${sessionId}`, (payload) => {
     try {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -291,7 +344,14 @@ router.get('/session/:sessionId/output', async (req, res) => {
     } catch {}
   });
 
-  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+  // The ping doubles as an "attached client" heartbeat — same idea as
+  // services/sshProxy.js's activity ping — so a session stays alive while
+  // someone actually has it open even through long idle stretches at a
+  // shell prompt, instead of only being kept alive by shell output/input.
+  const ping = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch {}
+    touchSession(sessionId).catch(() => {});
+  }, 15000);
   req.on('close', () => {
     clearInterval(ping);
     bus.unsubscribe(`term:output:${sessionId}`, unsub);
@@ -402,7 +462,10 @@ router.post('/session/:sessionId/output', agentRelayLimiter, agentAuthMiddleware
   await touchSession(sessionId);
   const { data, closed } = req.body;
 
-  if (data) bus.publish(`term:output:${sessionId}`, { type: 'data', data });
+  if (data) {
+    await appendBuffer(sessionId, data);
+    bus.publish(`term:output:${sessionId}`, { type: 'data', data });
+  }
 
   if (closed) {
     bus.publish(`term:output:${sessionId}`, { type: 'closed', data: '\r\n[Shell exited]\r\n' });

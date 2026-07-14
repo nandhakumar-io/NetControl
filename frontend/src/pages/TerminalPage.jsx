@@ -114,6 +114,20 @@ export default function TerminalPage() {
       relaySessionRef.current = null
     }
   }, [])
+  // Stops listening to the relay (closes the SSE stream / poll timer) WITHOUT
+  // ending the session server-side. Used for navigating away / switching
+  // devices — the backend now keys relay sessions by (user, device), same
+  // fix as the direct-SSH path (see services/webTerminal.js), so the shell
+  // the agent is running keeps going and POST /terminal/open/:deviceId
+  // reattaches to it (with buffered scrollback) next time this device's
+  // terminal is opened, instead of starting a fresh one.
+  const detachRelay = useCallback(() => {
+    relayActiveRef.current = false
+    relaySseRetries.current = 0
+    if (relaySseRef.current) { try { relaySseRef.current.close() } catch {} relaySseRef.current = null }
+    if (relayPollRef.current) { clearInterval(relayPollRef.current); relayPollRef.current = null }
+    relaySessionRef.current = null
+  }, [])
 
   // ── Init xterm (once) ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -160,7 +174,7 @@ export default function TerminalPage() {
     ro.observe(termRef.current); roRef.current = ro
 
     return () => {
-      ro.disconnect(); disposeInput(); closeWs(); stopRelay()
+      ro.disconnect(); disposeInput(); closeWs(); detachRelay()
       term.dispose(); xtermRef.current = null; fitRef.current = null
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -186,11 +200,14 @@ export default function TerminalPage() {
     setShowRelayBanner(true)
 
     try {
-      // Open session on backend
+      // Open session on backend — reattaches to an existing session for
+      // this (user, device) if one's still alive, replaying its scrollback,
+      // rather than always starting a fresh shell.
       const { data } = await api.post(`/terminal/open/${deviceId}`)
-      const { sessionId } = data
+      const { sessionId, reattached } = data
       relaySessionRef.current = sessionId
       relayActiveRef.current  = true
+      if (reattached) term?.writeln('\r\n\x1b[90m[Reattached to existing relay session]\x1b[0m\r\n')
 
       // SSE stream for output from agent → browser.
       //
@@ -245,7 +262,7 @@ export default function TerminalPage() {
           term?.writeln('\r\n\x1b[91m[Relay output stream lost]\x1b[0m\r\n')
           setStatus('error')
           setErrMsg('HTTP relay stream disconnected')
-          stopRelay()
+          detachRelay()
         }
       }
       openSse()
@@ -265,11 +282,11 @@ export default function TerminalPage() {
       term?.writeln(`\r\n\x1b[1;31m✖ Relay error: ${e.message}\x1b[0m\r\n`)
       term?.writeln('\x1b[90mMake sure the netcontrol-agent is running on the device.\x1b[0m\r\n')
     }
-  }, [deviceId, stopRelay])
+  }, [deviceId, detachRelay])
 
   // ── WebSocket connect ─────────────────────────────────────────────────────
   const connect = useCallback(() => {
-    closeWs(); disposeInput(); stopRelay()
+    closeWs(); disposeInput(); detachRelay()
 
     setStatus('connecting')
     setTransport('ws')
@@ -351,14 +368,14 @@ export default function TerminalPage() {
         wsRef.current.send(JSON.stringify({ type:'data', data }))
       }
     })
-  }, [deviceId, startRelay, stopRelay])
+  }, [deviceId, startRelay, detachRelay])
 
   useEffect(() => {
     const t = setTimeout(connect, 200)
-    return () => { clearTimeout(t); closeWs(); disposeInput(); stopRelay() }
-  }, [connect, stopRelay])
+    return () => { clearTimeout(t); closeWs(); disposeInput(); detachRelay() }
+  }, [connect, detachRelay])
 
-  const reconnect = () => { stopRelay(); connect() }
+  const reconnect = () => { detachRelay(); connect() }
   const useRelay  = () => { closeWs(); disposeInput(); startRelay() }
 
   const toggleFull = () => {
