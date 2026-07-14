@@ -1,6 +1,6 @@
 // pages/MonitoringPage.jsx
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Activity, Cpu, HardDrive, Wifi, Clock, RefreshCw, AlertTriangle,
   CheckCircle2, Monitor, Search, Server, ArrowDown, ArrowUp,
@@ -448,7 +448,7 @@ const DeviceRow = React.memo(function DeviceRow({ device, metrics, expanded, onT
   const cpuHist = useMemo(()=>hist.map((h,i)=>({i,v:h.cpu})).filter(h=>h.v!=null).slice(-40),[hist])
 
   return (
-    <div className="rounded-xl overflow-hidden mb-1.5 transition-all"
+    <div id={`device-row-${device.id}`} className="rounded-xl overflow-hidden mb-1.5 transition-all"
       style={{border:`1px solid ${live?'rgba(34,197,94,0.15)':'var(--border-subtle)'}`, background:'var(--bg-card)'}}>
 
       {/* Collapsed row */}
@@ -591,6 +591,8 @@ function VirtualList({ items, metrics, expanded, onToggle }) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function MonitoringPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const preselectDeviceId = searchParams.get('deviceId')
   const [devices,      setDevices]      = useState([])
   const [groups,       setGroups]       = useState([])
   const [metrics,      setMetrics]      = useState({})
@@ -637,6 +639,24 @@ export default function MonitoringPage() {
   }, [mergeMetrics])
 
   useEffect(() => { load() }, [load])
+
+  // ── Deep-link preselect: /monitoring?deviceId=... (e.g. clicking a device
+  // name in the notification bell dropdown). Clears any active search/status
+  // filter that could hide the device, expands its row, and scrolls it into
+  // view — mirrors the /bulk-command?deviceId=... pattern used by Capacity
+  // Forecast's "Run command" deep link.
+  useEffect(() => {
+    if (!preselectDeviceId || loading) return
+    const exists = devices.some(d => String(d.id) === String(preselectDeviceId))
+    if (!exists) return
+    setSearch('')
+    setFilterStatus('all')
+    setExpanded(s => new Set(s).add(preselectDeviceId))
+    setTimeout(() => {
+      document.getElementById(`device-row-${preselectDeviceId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 100)
+    setSearchParams(prev => { const next = new URLSearchParams(prev); next.delete('deviceId'); return next }, { replace: true })
+  }, [preselectDeviceId, devices, loading, setSearchParams])
 
   // SSE stream — receives pushed updates the instant agents send data
   // Falls back to polling if no *data* has arrived in a while.

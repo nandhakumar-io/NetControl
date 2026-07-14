@@ -5,7 +5,7 @@ import {
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
-  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare
+  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -23,6 +23,16 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
   const [open, setOpen]     = useState(false)
   const token    = localStorage.getItem('nc_token')
   const panelRef = useRef(null)
+  const navigate = useNavigate()
+
+  // Stream resilience state — mirrors BulkCommandPage's attachStream pattern.
+  // Before this, a dropped connection here left the bell just silently
+  // stale with no indication anything was wrong (unlike the bulk-command
+  // console, which already surfaces "reconnecting…" / "stalled").
+  const [streamState, setStreamState] = useState('connected') // 'connected' | 'reconnecting' | 'stalled'
+  const esRef = useRef(null)
+  const errorCountRef = useRef(0)
+  const lastMessageRef = useRef(Date.now())
 
   // Load persisted notifications on mount
   useEffect(() => {
@@ -30,12 +40,21 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
   }, [])
 
   // SSE — live notification stream (toast popups only)
-  useEffect(() => {
+  const attachStream = () => {
     if (!token) return
+    esRef.current?.close()
+    errorCountRef.current = 0
+    lastMessageRef.current = Date.now()
+    setStreamState('connected')
     const es = new EventSource(
       `${api.defaults.baseURL}/alerts/stream?token=${encodeURIComponent(token)}`
     )
+    esRef.current = es
+    es.onopen = () => { errorCountRef.current = 0; setStreamState('connected') }
     es.onmessage = (e) => {
+      errorCountRef.current = 0
+      lastMessageRef.current = Date.now()
+      setStreamState('connected')
       try {
         const n = JSON.parse(e.data)
         if (!n.type) return
@@ -47,8 +66,34 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
         }
       } catch {}
     }
-    return () => es.close()
+    // EventSource auto-retries on its own, so a single blip isn't worth
+    // surfacing — but if it keeps failing, tell the person instead of
+    // leaving the bell silently stuck.
+    es.onerror = () => {
+      errorCountRef.current += 1
+      if (errorCountRef.current >= 3) setStreamState('reconnecting')
+      if (errorCountRef.current >= 8) { setStreamState('stalled'); es.close() }
+    }
+  }
+
+  useEffect(() => {
+    attachStream()
+    return () => esRef.current?.close()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
+
+  // Watchdog: the bell has no "in-progress run" to gate on like bulk-command
+  // does, so just check continuously — if not even a keep-alive ping has
+  // arrived in 45s, the connection is silently dead (e.g. a proxy dropped it
+  // without ever firing onerror).
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (Date.now() - lastMessageRef.current > 45000) setStreamState('stalled')
+    }, 5000)
+    return () => clearInterval(t)
+  }, [])
+
+  const reconnectStream = () => attachStream()
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -64,7 +109,51 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
     setNotifs([])
     setOpen(false)
   }
+  // Mark a single notification read, in-place — the all-or-nothing "Clear
+  // all" above is still there for wiping the whole list, but most nav-bell
+  // UIs let you dismiss just the one you clicked without nuking the rest.
+  const markRead = async (n) => {
+    if (n.read_at) return
+    setNotifs(prev => prev.map(x => x.id === n.id ? { ...x, read_at: Date.now() } : x))
+    await api.patch(`/alerts/notifications/${n.id}/read`).catch(() => {})
+  }
+  // Click-through to the device the notification is about — same pattern as
+  // Capacity Forecast's "Run command" deep link into Bulk Command
+  // (?deviceId=...), just landing on Monitoring instead so you see live
+  // status/metrics for the device that triggered the alert.
+  const goToDevice = (n) => {
+    markRead(n)
+    setOpen(false)
+    if (n.device_id) navigate(`/monitoring?deviceId=${n.device_id}`)
+  }
   const sevColor = (sev) => sev === 'critical' ? '#f87171' : '#facc15'
+
+  // Group repeats of the same rule+device within a short window — a flapping
+  // device can otherwise fill all 50 slots with near-identical entries
+  // ("CPU high on web-01" six times in a row), which buries everything else
+  // and makes the dropdown useless during an actual incident. Adjacent-only
+  // grouping (not a global bucket by key) keeps chronological order intact:
+  // an unrelated alert in between still breaks the streak into two groups.
+  const GROUP_WINDOW_MS = 10 * 60 * 1000
+  const groups = React.useMemo(() => {
+    const out = []
+    for (const n of notifs) {
+      const key = `${n.rule_name || ''}|${n.device_id || ''}`
+      const last = out[out.length - 1]
+      const ts = n.triggered_at || n.ts || 0
+      const lastTs = last?.latest.triggered_at || last?.latest.ts || 0
+      if (last && last.key === key && Math.abs(lastTs - ts) <= GROUP_WINDOW_MS) {
+        last.items.push(n)
+        // notifs is newest-first, so the first item seen for a key is
+        // already the latest — no need to compare/replace `latest`.
+      } else {
+        out.push({ key, latest: n, items: [n] })
+      }
+    }
+    return out
+  }, [notifs])
+
+  const markGroupRead = (group) => { group.items.forEach(markRead) }
 
   return (
     <div className="relative" ref={panelRef}>
@@ -137,31 +226,81 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
               </button>
             </div>
           </div>
+          {streamState !== 'connected' && (
+            <div className="flex items-center justify-between gap-2 px-4 py-2"
+              style={{
+                background: streamState === 'stalled' ? 'rgba(248,113,113,0.08)' : 'rgba(251,191,36,0.08)',
+                borderBottom: `1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'}`,
+              }}>
+              <span className="text-[11px] font-body flex items-center gap-1.5" style={{ color: streamState === 'stalled' ? '#fca5a5' : '#fbbf24' }}>
+                <Loader2 size={11} className={streamState === 'reconnecting' ? 'animate-spin' : ''} />
+                {streamState === 'stalled' ? 'Live updates stopped' : 'Reconnecting…'}
+              </span>
+              {streamState === 'stalled' && (
+                <button onClick={reconnectStream} className="text-[11px] font-body px-2 py-0.5 rounded-lg hover:bg-black/5" style={{ color: 'var(--text-muted)' }}>
+                  Reconnect
+                </button>
+              )}
+            </div>
+          )}
           <div className="max-h-72 overflow-y-auto">
             {notifs.length === 0 ? (
               <div className="py-8 flex flex-col items-center gap-2 opacity-50">
                 <Bell size={20} style={{ color: 'var(--text-muted)' }} />
                 <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>No notifications</p>
               </div>
-            ) : notifs.map((n, i) => (
-              <div key={n.id || i} className="px-4 py-3 flex items-start gap-3"
-                style={{ borderBottom: `1px solid ${isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)'}` }}>
-                <AlertTriangle size={14} style={{ color: sevColor(n.severity), marginTop: 2, flexShrink: 0 }} />
-                <div className="min-w-0">
-                  <p className="text-xs font-body font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
-                    {n.rule_name || n.message?.split(':')[0] || 'Alert'}
-                  </p>
-                  <p className="text-[11px] font-body mt-0.5 line-clamp-2" style={{ color: 'var(--text-muted)' }}>
-                    {n.details || n.message}
-                  </p>
-                  {n.device_name && (
-                    <p className="text-[10px] font-mono mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                      {n.device_name}
+            ) : groups.map((g, i) => {
+              const n = g.latest
+              const count = g.items.length
+              const groupUnread = g.items.some(x => !x.read_at)
+              return (
+                <div key={n.id || i}
+                  onClick={() => markGroupRead(g)}
+                  className="px-4 py-3 flex items-start gap-3 cursor-pointer transition-colors"
+                  style={{
+                    borderBottom: `1px solid ${isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)'}`,
+                    opacity: groupUnread ? 1 : 0.5,
+                    background: 'transparent',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = isLight ? 'rgba(0,0,0,0.025)' : 'rgba(255,255,255,0.025)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <AlertTriangle size={14} style={{ color: sevColor(n.severity), marginTop: 2, flexShrink: 0 }} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-xs font-body font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
+                        {n.rule_name || n.message?.split(':')[0] || 'Alert'}
+                      </p>
+                      {count > 1 && (
+                        <span className="shrink-0 text-[10px] font-bold px-1.5 rounded-full"
+                          style={{ background: isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)', color: 'var(--text-muted)' }}>
+                          ×{count}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] font-body mt-0.5 line-clamp-2" style={{ color: 'var(--text-muted)' }}>
+                      {n.details || n.message}
                     </p>
-                  )}
+                    {n.device_name && (
+                      n.device_id ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); goToDevice(n) }}
+                          className="text-[10px] font-mono mt-0.5 hover:underline"
+                          style={{ color: 'var(--text-faint)' }}
+                          title="View this device in Monitoring"
+                        >
+                          {n.device_name}
+                        </button>
+                      ) : (
+                        <p className="text-[10px] font-mono mt-0.5" style={{ color: 'var(--text-faint)' }}>
+                          {n.device_name}
+                        </p>
+                      )
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
@@ -326,7 +465,7 @@ export default function Layout() {
       <aside
         className={`flex flex-col shrink-0 transition-transform md:transition-[width] duration-300 ease-in-out
           fixed inset-y-0 left-0 z-40 md:relative md:z-auto
-          ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0
+          ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:transform-none
           ${isLight ? 'bg-white border-r border-black/[0.06]' : 'bg-surface-1 border-r border-white/6'}
           w-[240px] ${collapsed ? 'md:w-[60px]' : 'md:w-[220px]'}`}
         style={isLight ? { boxShadow: '2px 0 12px rgba(0,0,0,0.05)' } : {}}

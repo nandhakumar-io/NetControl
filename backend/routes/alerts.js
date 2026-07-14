@@ -150,6 +150,22 @@ router.delete('/notifications', async (req, res) => {
   } catch { res.json({ ok: true }); }
 });
 
+// ── PATCH /api/alerts/notifications/:id/read ───────────────────────────────────
+// Marks a single notification read (scoped to req.user.id so one user can't
+// mark another admin's notification read). Used by the bell dropdown when a
+// notification row is clicked, as an alternative to the all-or-nothing
+// "Clear all" button.
+router.patch('/notifications/:id/read', async (req, res) => {
+  try {
+    if (!await tableExists('alert_notifications')) return res.json({ ok: true });
+    await execute(
+      'UPDATE alert_notifications SET read_at = ? WHERE id = ? AND user_id = ? AND read_at IS NULL',
+      [Date.now(), req.params.id, req.user.id]
+    );
+    res.json({ ok: true });
+  } catch { res.json({ ok: true }); }
+});
+
 // ── GET /api/alerts/triggered ─────────────────────────────────────────────────
 router.get('/triggered', async (req, res) => {
   try {
