@@ -39,78 +39,134 @@ const MAX_CONCURRENCY = 8;       // don't open 40 simultaneous SSH/WinRM connect
 const PER_DEVICE_TIMEOUT_MS = 30000;
 const JOB_TTL_SEC = 30 * 60; // jobs older than this get swept up so state doesn't grow forever
 
-const redis = bus.getClient(); // null in single-process fallback mode
-const memJobs = new Map();     // runId -> job, used only when redis is null
+const redis = bus.getClient(); // non-null object even if Redis is unreachable — ioredis
+                                // connects lazily/retries in the background, so its mere
+                                // presence does NOT mean commands will actually succeed.
+const memJobs = new Map();     // runId -> job, used whenever Redis isn't actually usable
+
+// Whether Redis is not just configured but actually reachable right now.
+// bus.js already tracks this (it pings/reconnects continuously) — reuse
+// that instead of hanging on a redis.hset() call that may never resolve
+// because ioredis queues commands while disconnected rather than failing
+// fast. This is exactly what made a misconfigured REDIS_URL (e.g. pointing
+// at "localhost" from inside a container where Redis is a separate
+// container) look like "the run just sits there forever, nothing
+// executes" instead of a loud, obvious connection error.
+function redisReady() {
+  return !!redis && bus.getStatus().connected === true;
+}
+
+// Wraps a Redis call so a slow/hung connection can't stall a run — if it
+// doesn't settle quickly, or throws, the caller falls back to the
+// in-memory path for that operation instead of the whole run hanging.
+function withRedisTimeout(promise, ms = 3000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Redis call timed out')), ms)),
+  ]);
+}
 
 function jKey(id) { return `bulk:job:${id}`; }
 function eKey(id) { return `bulk:events:${id}`; }
 function chan(id) { return `bulk:events:${id}`; }
 
+function ensureMemJob(runId, meta) {
+  let job = memJobs.get(runId);
+  if (!job) {
+    job = { runId, events: [], listeners: new Set(), status: 'running', ...meta };
+    memJobs.set(runId, job);
+  }
+  return job;
+}
+
 async function createJob(runId, { command, orgId, userId, username, total }) {
   const now = Date.now();
-  if (redis) {
-    await redis.hset(jKey(runId), {
-      command, orgId, userId, username, total,
-      status: 'running', startedAt: now,
-    });
-    await redis.expire(jKey(runId), JOB_TTL_SEC);
-  } else {
-    memJobs.set(runId, {
-      runId, command, orgId, userId, username, total,
-      startedAt: now, status: 'running', events: [], listeners: new Set(),
-    });
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.hset(jKey(runId), {
+        command, orgId, userId, username, total, status: 'running', startedAt: now,
+      }));
+      await withRedisTimeout(redis.expire(jKey(runId), JOB_TTL_SEC));
+      return;
+    } catch (e) {
+      console.error(`[BulkCommand] Redis unreachable creating job ${runId} — falling back to in-process state ` +
+        `(cross-worker SSE will only work if the browser lands on this same worker). Check REDIS_URL:`, e.message);
+    }
   }
+  ensureMemJob(runId, { command, orgId, userId, username, total, startedAt: now });
 }
 
 async function getJob(runId) {
-  if (redis) {
-    const h = await redis.hgetall(jKey(runId));
-    if (!h || !h.command) return null;
-    return {
-      runId, command: h.command, orgId: h.orgId, userId: h.userId, username: h.username,
-      total: Number(h.total), status: h.status,
-      startedAt: Number(h.startedAt), finishedAt: h.finishedAt ? Number(h.finishedAt) : null,
-    };
+  if (redisReady()) {
+    try {
+      const h = await withRedisTimeout(redis.hgetall(jKey(runId)));
+      if (h && h.command) {
+        return {
+          runId, command: h.command, orgId: h.orgId, userId: h.userId, username: h.username,
+          total: Number(h.total), status: h.status,
+          startedAt: Number(h.startedAt), finishedAt: h.finishedAt ? Number(h.finishedAt) : null,
+        };
+      }
+    } catch (e) {
+      console.error(`[BulkCommand] Redis unreachable reading job ${runId}, checking in-process fallback:`, e.message);
+    }
   }
   return memJobs.get(runId) || null;
 }
 
 async function finishJob(runId) {
   const now = Date.now();
-  if (redis) {
-    if (await redis.exists(jKey(runId))) await redis.hset(jKey(runId), 'status', 'done', 'finishedAt', now);
-    await redis.expire(jKey(runId), JOB_TTL_SEC);
-    await redis.expire(eKey(runId), JOB_TTL_SEC);
-  } else {
-    const job = memJobs.get(runId);
-    if (job) { job.status = 'done'; job.finishedAt = now; }
-    setTimeout(() => memJobs.delete(runId), JOB_TTL_SEC * 1000);
+  if (redisReady()) {
+    try {
+      if (await withRedisTimeout(redis.exists(jKey(runId)))) {
+        await withRedisTimeout(redis.hset(jKey(runId), 'status', 'done', 'finishedAt', now));
+      }
+      await withRedisTimeout(redis.expire(jKey(runId), JOB_TTL_SEC));
+      await withRedisTimeout(redis.expire(eKey(runId), JOB_TTL_SEC));
+    } catch (e) {
+      console.error(`[BulkCommand] Redis unreachable finishing job ${runId}:`, e.message);
+    }
   }
+  const job = memJobs.get(runId);
+  if (job) { job.status = 'done'; job.finishedAt = now; }
+  setTimeout(() => memJobs.delete(runId), JOB_TTL_SEC * 1000);
 }
 
 // Appends to the durable replay log (Redis list, or the in-memory job's
 // events array) AND fans the event out live to anyone currently attached —
 // across every worker, via bus.js.
 async function emit(runId, event) {
-  if (redis) {
-    await redis.rpush(eKey(runId), JSON.stringify(event));
-    await redis.expire(eKey(runId), JOB_TTL_SEC);
-  } else {
-    memJobs.get(runId)?.events.push(event);
+  let usedRedis = false;
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.rpush(eKey(runId), JSON.stringify(event)));
+      await withRedisTimeout(redis.expire(eKey(runId), JOB_TTL_SEC));
+      usedRedis = true;
+    } catch (e) {
+      console.error(`[BulkCommand] Redis unreachable logging event for ${runId}, using in-process fallback:`, e.message);
+    }
   }
-  bus.publish(chan(runId), event);
+  if (!usedRedis) ensureMemJob(runId, {}).events.push(event);
+  bus.publish(chan(runId), event); // bus.js falls back to a local EventEmitter on its own if Redis is down
 }
 
 // Replays everything so far (covers a client connecting mid-run, or right
 // after it finished) then subscribes for live delivery. Returns the
 // unsubscribe handle so the route can tear it down on 'close'.
 async function attachStream(runId, res) {
-  if (redis) {
-    const raw = await redis.lrange(eKey(runId), 0, -1);
-    for (const item of raw) {
-      try { res.write(`data: ${item}\n\n`); } catch { return null; }
+  let replayed = false;
+  if (redisReady()) {
+    try {
+      const raw = await withRedisTimeout(redis.lrange(eKey(runId), 0, -1));
+      for (const item of raw) {
+        try { res.write(`data: ${item}\n\n`); } catch { return null; }
+      }
+      replayed = true;
+    } catch (e) {
+      console.error(`[BulkCommand] Redis unreachable replaying events for ${runId}, using in-process fallback:`, e.message);
     }
-  } else {
+  }
+  if (!replayed) {
     const job = memJobs.get(runId);
     if (job) {
       for (const event of job.events) {
