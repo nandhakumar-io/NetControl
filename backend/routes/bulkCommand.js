@@ -167,6 +167,40 @@ router.delete('/history/:id', param('id').isUUID(), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── GET /api/bulk-command/devices — device picker list for the console,
+// same shape as GET /api/devices but trimmed to just what the picker needs ─
+// NOTE: this must stay registered before GET /:runId below — otherwise
+// Express would match "/devices" against the ":runId" param first (and
+// the isUUID() validator would reject "devices" as a bad id, 400ing what
+// should be a normal picker request).
+router.get('/devices', async (req, res) => {
+  try {
+    const rows = await query(
+      `SELECT d.id, d.name, d.ip_address, d.os_type, d.status, d.group_id, g.name AS group_name
+         FROM devices d LEFT JOIN \`groups\` g ON g.id = d.group_id
+        WHERE d.org_id = ? ORDER BY d.name`,
+      [req.orgId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/bulk-command/:runId — full job state + replayed event log as a
+// plain JSON response (not SSE). Used to restore the console when the page
+// is reloaded or navigated back to — the frontend persists the last runId
+// locally and calls this on mount to rebuild results/progress/status before
+// (re)attaching the live stream if the run is still in progress ──────────
+router.get('/:runId', param('runId').isUUID(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const job = await bulkCommand.getJob(req.params.runId);
+  if (!job || job.orgId !== req.orgId) return res.status(404).json({ error: 'Run not found' });
+
+  const events = await bulkCommand.getEvents(req.params.runId);
+  res.json({ job, events });
+});
+
 // ── GET /api/bulk-command/:runId/stream — SSE, connect any time during or
 // shortly after the run; replays everything so far then streams live ─────
 router.get('/:runId/stream', param('runId').isUUID(), async (req, res) => {
@@ -194,20 +228,6 @@ router.get('/:runId/stream', param('runId').isUUID(), async (req, res) => {
     clearInterval(ping);
     bulkCommand.detachStream(req.params.runId, unsub);
   });
-});
-
-// ── GET /api/bulk-command/devices — device picker list for the console,
-// same shape as GET /api/devices but trimmed to just what the picker needs ─
-router.get('/devices', async (req, res) => {
-  try {
-    const rows = await query(
-      `SELECT d.id, d.name, d.ip_address, d.os_type, d.status, d.group_id, g.name AS group_name
-         FROM devices d LEFT JOIN \`groups\` g ON g.id = d.group_id
-        WHERE d.org_id = ? ORDER BY d.name`,
-      [req.orgId]
-    );
-    res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

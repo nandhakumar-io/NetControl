@@ -90,6 +90,10 @@ function ResultRow({ id, name, ip, state }) {
   )
 }
 
+// Key used to persist the active/last bulk-command run's id across page
+// navigation and reloads (see restoreRun in the component below).
+const LAST_RUN_KEY = 'nc_bulk_command_last_run_id'
+
 export default function BulkCommandPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const preselectDeviceId = searchParams.get('deviceId')
@@ -146,6 +150,65 @@ export default function BulkCommandPage() {
 
   useEffect(() => { loadDevices(); loadHistory() }, [loadDevices, loadHistory])
   useEffect(() => () => esRef.current?.close(), [])
+
+  // ── Persist the active/last run across navigation ───────────────────────
+  // Without this, leaving the page (even just to check another tab) and
+  // coming back left the console completely blank — no way to tell if a
+  // run was still going or see how it turned out, even though the backend
+  // job/results were sitting right there in Redis the whole time (that's
+  // what powers "Retry failed" and the SSE replay-on-reconnect). This just
+  // remembers the runId locally and rebuilds everything else from the
+  // backend on mount.
+  const restoreRun = useCallback(async (id) => {
+    try {
+      const { data } = await api.get(`/bulk-command/${id}`)
+      const { job, events } = data
+
+      // Reconstruct results + progress purely from the replayed event log —
+      // same source of truth the live SSE stream itself is built from.
+      const restoredResults = {}
+      let restoredCommand = job.command
+      let restoredTimeoutSec = null
+      for (const ev of events) {
+        if (ev.type === 'start' && ev.timeoutMs) restoredTimeoutSec = Math.round(ev.timeoutMs / 1000)
+        else if (ev.type === 'device_start') restoredResults[ev.deviceId] = { status: 'running' }
+        else if (ev.type === 'device_result') restoredResults[ev.deviceId] = { status: ev.status, output: ev.output, durationMs: ev.durationMs }
+      }
+
+      // Prefer the live device list (fresher name/IP), but fall back to
+      // whatever the run's own events said for a device that's since been
+      // removed — so a completed run doesn't lose rows just because a
+      // device was deleted afterward.
+      const deviceIds = job.deviceIds?.length ? job.deviceIds : Object.keys(restoredResults)
+      const eventNames = {}
+      for (const ev of events) {
+        if (ev.deviceId && ev.deviceName) eventNames[ev.deviceId] = ev.deviceName
+      }
+      const restoredDevices = deviceIds.map(devId => {
+        const known = devices.find(d => d.id === devId)
+        return known || { id: devId, name: eventNames[devId] || devId, ip_address: '—', os_type: null }
+      })
+
+      setCommand(restoredCommand)
+      if (restoredTimeoutSec) setTimeoutSec(restoredTimeoutSec)
+      setRunDevices(restoredDevices)
+      setResults(restoredResults)
+      setRunId(job.runId)
+      setRunStatus(job.status === 'done' ? 'done' : 'running')
+      if (job.status !== 'done') attachStream(job.runId)
+    } catch (err) {
+      // Job expired (30 min TTL) or otherwise gone — nothing to restore,
+      // just quietly drop the stale pointer instead of erroring at the user.
+      if (err.response?.status === 404) localStorage.removeItem(LAST_RUN_KEY)
+    }
+  }, [devices]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (loadingDevices) return // wait for the device list so name/IP lookups resolve
+    const savedId = localStorage.getItem(LAST_RUN_KEY)
+    if (savedId) restoreRun(savedId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingDevices])
 
   const useHistoryCommand = (cmd) => {
     setCommand(cmd)
@@ -234,6 +297,7 @@ export default function BulkCommandPage() {
       setResults({})
       setRunId(data.runId)
       setRunStatus('running')
+      localStorage.setItem(LAST_RUN_KEY, data.runId)
       setPinOpen(false); setPin(''); setPinError(''); setPinTargetIds(null)
       attachStream(data.runId)
       toast.success(`Running on ${data.total} device${data.total === 1 ? '' : 's'}…`)

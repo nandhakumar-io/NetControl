@@ -82,12 +82,13 @@ function ensureMemJob(runId, meta) {
   return job;
 }
 
-async function createJob(runId, { command, orgId, userId, username, total }) {
+async function createJob(runId, { command, orgId, userId, username, total, deviceIds }) {
   const now = Date.now();
+  const deviceIdsJson = JSON.stringify(deviceIds || []);
   if (redisReady()) {
     try {
       await withRedisTimeout(redis.hset(jKey(runId), {
-        command, orgId, userId, username, total, status: 'running', startedAt: now,
+        command, orgId, userId, username, total, status: 'running', startedAt: now, deviceIds: deviceIdsJson,
       }));
       await withRedisTimeout(redis.expire(jKey(runId), JOB_TTL_SEC));
       return;
@@ -96,7 +97,7 @@ async function createJob(runId, { command, orgId, userId, username, total }) {
         `(cross-worker SSE will only work if the browser lands on this same worker). Check REDIS_URL:`, e.message);
     }
   }
-  ensureMemJob(runId, { command, orgId, userId, username, total, startedAt: now });
+  ensureMemJob(runId, { command, orgId, userId, username, total, startedAt: now, deviceIds: deviceIds || [] });
 }
 
 async function getJob(runId) {
@@ -104,9 +105,11 @@ async function getJob(runId) {
     try {
       const h = await withRedisTimeout(redis.hgetall(jKey(runId)));
       if (h && h.command) {
+        let deviceIds = [];
+        try { deviceIds = JSON.parse(h.deviceIds || '[]'); } catch { /* older job predating this field */ }
         return {
           runId, command: h.command, orgId: h.orgId, userId: h.userId, username: h.username,
-          total: Number(h.total), status: h.status,
+          total: Number(h.total), status: h.status, deviceIds,
           startedAt: Number(h.startedAt), finishedAt: h.finishedAt ? Number(h.finishedAt) : null,
         };
       }
@@ -153,29 +156,30 @@ async function emit(runId, event) {
   bus.publish(chan(runId), event); // bus.js falls back to a local EventEmitter on its own if Redis is down
 }
 
+// Returns the durable replay log as parsed JS objects (not written to any
+// response) — used by GET /:runId so the frontend can reconstruct full run
+// state (results, progress, status) on page load/navigation-back, without
+// needing to have been connected to the SSE stream the whole time.
+async function getEvents(runId) {
+  if (redisReady()) {
+    try {
+      const raw = await withRedisTimeout(redis.lrange(eKey(runId), 0, -1));
+      return raw.map(item => { try { return JSON.parse(item); } catch { return null; } }).filter(Boolean);
+    } catch (e) {
+      console.error(`[BulkCommand] Redis unreachable reading events for ${runId}, using in-process fallback:`, e.message);
+    }
+  }
+  const job = memJobs.get(runId);
+  return job ? job.events.slice() : [];
+}
+
 // Replays everything so far (covers a client connecting mid-run, or right
 // after it finished) then subscribes for live delivery. Returns the
 // unsubscribe handle so the route can tear it down on 'close'.
 async function attachStream(runId, res) {
-  let replayed = false;
-  if (redisReady()) {
-    try {
-      const raw = await withRedisTimeout(redis.lrange(eKey(runId), 0, -1));
-      for (const item of raw) {
-        try { res.write(`data: ${item}\n\n`); } catch { return null; }
-      }
-      replayed = true;
-    } catch (e) {
-      console.error(`[BulkCommand] Redis unreachable replaying events for ${runId}, using in-process fallback:`, e.message);
-    }
-  }
-  if (!replayed) {
-    const job = memJobs.get(runId);
-    if (job) {
-      for (const event of job.events) {
-        try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { return null; }
-      }
-    }
+  const events = await getEvents(runId);
+  for (const event of events) {
+    try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { return null; }
   }
   const unsub = bus.subscribe(chan(runId), (event) => {
     try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone, route's 'close' handler cleans up */ }
@@ -220,7 +224,7 @@ function startRun({ command, devices, userId, username, orgId, timeoutMs }) {
   // creation happens first so a stream that attaches super early always
   // finds the job (even with status still "running", total already set).
   (async () => {
-    await createJob(runId, { command, orgId, userId, username, total: devices.length });
+    await createJob(runId, { command, orgId, userId, username, total: devices.length, deviceIds: devices.map(d => d.id) });
     await emit(runId, { type: 'start', runId, total: devices.length, command, timeoutMs: effectiveTimeoutMs });
     try {
       await runPool(runId, command, devices, { userId, username, timeoutMs: effectiveTimeoutMs });
@@ -270,4 +274,4 @@ async function runPool(runId, command, devices, { userId, username, timeoutMs })
   await Promise.all(workers);
 }
 
-module.exports = { startRun, attachStream, detachStream, getJob, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS };
+module.exports = { startRun, attachStream, detachStream, getJob, getEvents, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS };
