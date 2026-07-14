@@ -12,6 +12,7 @@
 // is just a fresh POST /run scoped to their ids — same pattern the backend
 // comment describes as "stdlib-simple retry."
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   TerminalSquare, Search, Loader2, Play, RotateCcw, CheckCircle2, XCircle,
   Circle, ChevronDown, ChevronRight, Square, CheckSquare, ShieldAlert,
@@ -89,6 +90,9 @@ function ResultRow({ id, name, ip, state }) {
 }
 
 export default function BulkCommandPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const preselectDeviceId = searchParams.get('deviceId')
+
   const [devices, setDevices] = useState([])
   const [loadingDevices, setLoadingDevices] = useState(true)
   const [search, setSearch] = useState('')
@@ -119,6 +123,21 @@ export default function BulkCommandPage() {
 
   useEffect(() => { loadDevices() }, [loadDevices])
   useEffect(() => () => esRef.current?.close(), [])
+
+  // ── Deep-link preselect: /bulk-command?deviceId=... (e.g. the "Run
+  // command" quick action on a Capacity Forecast row) ────────────────────
+  useEffect(() => {
+    if (!preselectDeviceId || loadingDevices) return
+    const match = devices.find(d => d.id === preselectDeviceId)
+    if (match) {
+      setSelected(prev => new Set(prev).add(match.id))
+      toast.success(`${match.name} selected — type a command to run on it`)
+    } else {
+      toast.error('That device is not available here (wrong org, or it no longer exists)')
+    }
+    // Drop the query param once handled so it doesn't re-fire on refresh/tab switches.
+    setSearchParams(prev => { const next = new URLSearchParams(prev); next.delete('deviceId'); return next }, { replace: true })
+  }, [preselectDeviceId, loadingDevices, devices, setSearchParams])
 
   const groups = useMemo(() => {
     const map = new Map()

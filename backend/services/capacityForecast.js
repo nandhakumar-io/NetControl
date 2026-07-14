@@ -15,6 +15,11 @@ const DAY = 86400;
 const MIN_DAYS_FOR_TREND = 3;       // need at least this many distinct days of data to fit a line
 const RISING_SLOPE_FLOOR = 0.05;    // ignore noise — a trend under 0.05%/day isn't "filling up"
 const DEFAULT_WARNING_DAYS = parseInt(process.env.CAPACITY_WARNING_DAYS) || 7;
+// Below this many days-to-full, a rising trend is "critical" rather than just
+// a "warning" — used both for push severity here and for the UI's stat
+// cards/row highlighting (via GET /api/capacity-forecast/config/thresholds),
+// so the two never drift out of sync with each other.
+const CRITICAL_DAYS = parseInt(process.env.CAPACITY_CRITICAL_DAYS) || 2;
 const RENOTIFY_COOLDOWN_SEC = parseInt(process.env.CAPACITY_RENOTIFY_HOURS || 24) * 3600;
 const TICK_MS = 6 * 3600 * 1000; // trend moves slowly — checking every 6h is plenty
 
@@ -109,20 +114,34 @@ function round2(n) { return Math.round(n * 100) / 100; }
 async function computeAllForecasts(metric = 'disk', lookbackDays = 14, orgId = null) {
   const devices = await query(
     orgId
-      ? `SELECT id, name, ip_address FROM devices WHERE org_id = ? OR org_id IS NULL`
-      : `SELECT id, name, ip_address FROM devices`,
+      ? `SELECT d.id, d.name, d.ip_address, d.group_id, g.name AS group_name
+           FROM devices d LEFT JOIN \`groups\` g ON g.id = d.group_id
+          WHERE d.org_id = ? OR d.org_id IS NULL`
+      : `SELECT d.id, d.name, d.ip_address, d.group_id, g.name AS group_name
+           FROM devices d LEFT JOIN \`groups\` g ON g.id = d.group_id`,
     orgId ? [orgId] : []
   );
 
   const results = [];
   for (const device of devices) {
     const forecast = await computeForecast(device.id, metric, lookbackDays).catch(() => ({ status: 'error' }));
-    results.push({ device_id: device.id, device_name: device.name, device_ip: device.ip_address, metric, ...forecast });
+    results.push({
+      device_id: device.id, device_name: device.name, device_ip: device.ip_address,
+      group_id: device.group_id || null, group_name: device.group_name || 'Ungrouped',
+      metric, ...forecast,
+    });
   }
 
   // Soonest-to-fill first; anything without a real projection sinks to the bottom.
   results.sort((a, b) => (a.days_to_full ?? Infinity) - (b.days_to_full ?? Infinity));
   return results;
+}
+
+// ── Threshold config — exposed via GET /api/capacity-forecast/config/thresholds
+// so the frontend colors "critical" vs "warning" using the exact same
+// numbers the backend notifier pages on, instead of a second hardcoded copy.
+function getThresholds() {
+  return { warningDays: DEFAULT_WARNING_DAYS, criticalDays: CRITICAL_DAYS };
 }
 
 // ── Periodic warning notifications ──────────────────────────────────────────
@@ -156,7 +175,7 @@ async function checkAndNotify() {
       const message = `${f.device_name}: ${metric === 'disk' ? 'disk' : 'RAM'} usage at ${f.current_pct}% and rising ~${f.slope_per_day}%/day — projected full in ~${Math.round(f.days_to_full)} day${Math.round(f.days_to_full) === 1 ? '' : 's'}`;
 
       pushNotification(admins.map(a => a.id), {
-        type: 'capacity', severity: f.days_to_full <= 2 ? 'critical' : 'warning',
+        type: 'capacity', severity: f.days_to_full <= CRITICAL_DAYS ? 'critical' : 'warning',
         rule_name: `Capacity forecast (${metric})`, device_id: f.device_id,
         device_name: f.device_name, metric, message, triggered_at: now,
       });
@@ -202,4 +221,4 @@ function stop() {
   timer = null;
 }
 
-module.exports = { computeForecast, computeAllForecasts, checkAndNotify, start, stop };
+module.exports = { computeForecast, computeAllForecasts, checkAndNotify, start, stop, getThresholds };

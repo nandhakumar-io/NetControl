@@ -17,6 +17,18 @@ const VIEW_CAPACITY_FORECAST = 1;
 const router = express.Router();
 router.use(requireAuth, requireOrgContext, requirePermission(VIEW_CAPACITY_FORECAST));
 
+// ── GET /api/capacity-forecast/config/thresholds — the warning/critical
+// day cutoffs the backend notifier actually pages on (see
+// services/capacityForecast.js), so the UI's "Critical"/"Rising" stat
+// cards and per-row coloring always match what triggers a real alert
+// instead of a second hardcoded copy of the same numbers. Declared before
+// the '/:deviceId' route below so 'config' is never swallowed as a UUID
+// param — though with two path segments it can't collide with a
+// single-segment ':deviceId' route regardless of declaration order.
+router.get('/config/thresholds', (_req, res) => {
+  res.json(capacityForecast.getThresholds());
+});
+
 // ── GET /api/capacity-forecast — list view: every device in the org,
 // soonest-to-fill first, for whichever metric (disk|ram) is selected ──────
 router.get('/',
