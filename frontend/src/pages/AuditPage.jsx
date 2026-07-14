@@ -73,6 +73,18 @@ function getMeta(action) {
   }
 }
 
+// Left accent bar + zebra tint color, keyed off the row's result — gives an
+// at-a-glance "something failed" scan down the left edge without having to
+// read the Result badge on every single row.
+const RESULT_ACCENT = {
+  success: 'var(--accent-green, #22c55e)',
+  failure: 'var(--accent-red, #ef4444)',
+  partial: 'var(--accent-yellow, #eab308)',
+}
+function getResultAccent(result) {
+  return RESULT_ACCENT[result] || 'transparent'
+}
+
 // ── Expandable cell ─────────────────────────────────────────────────────────
 // Content stays truncated so the table stays tidy and never grows a row's
 // height. If (and only if) it actually overflows its column, hovering (or
@@ -152,8 +164,9 @@ function ExpandableCell({ text, className = '', mono = false, sub = null }) {
 // ── Skeleton row ─────────────────────────────────────────────────────────────
 function SkeletonRow({ gridCols, showSync }) {
   return (
-    <div className="grid items-center gap-4 px-5 py-4 border-b animate-pulse"
+    <div className="relative grid items-center gap-4 pl-4 pr-5 py-4 border-b animate-pulse"
       style={{ gridTemplateColumns: gridCols, borderColor: 'var(--border-subtle)' }}>
+      <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: 'var(--bg-input)' }} />
       <div className="h-3.5 rounded w-5/6" style={{background:"var(--bg-input)"}} />
       <div className="h-3.5 rounded w-3/4" style={{background:"var(--bg-input)"}} />
       <div className="flex items-center gap-2">
@@ -162,8 +175,8 @@ function SkeletonRow({ gridCols, showSync }) {
       </div>
       <div className="h-3.5 rounded w-2/3" style={{background:"var(--bg-input)"}} />
       <div className="h-3.5 rounded w-4/5" style={{background:"var(--bg-input)"}} />
-      <div className="h-5 rounded-full w-20" style={{background:"var(--bg-input)"}} />
-      {showSync && <div className="h-3.5 rounded w-8" style={{background:"var(--bg-input)"}} />}
+      <div className="h-5 rounded-full w-20 justify-self-end" style={{background:"var(--bg-input)"}} />
+      {showSync && <div className="h-3.5 rounded w-8 justify-self-center" style={{background:"var(--bg-input)"}} />}
     </div>
   )
 }
@@ -990,16 +1003,19 @@ export default function AuditPage() {
 
         {/* Table header */}
         <div
-          className="grid items-center gap-4 px-5 py-3 border-b border-white/10 bg-surface-2/60"
+          className="grid items-center gap-4 pl-4 pr-5 py-3 border-b border-white/10 bg-surface-2/60"
           style={{ gridTemplateColumns: gridCols }}
         >
-          {['Timestamp', 'User', 'Action', 'Target', 'Source IP', 'Result'].map(h => (
+          {['Timestamp', 'User', 'Action', 'Target', 'Source IP'].map(h => (
             <span key={h} className="text-xs font-body font-semibold uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>
               {h}
             </span>
           ))}
+          <span className="text-xs font-body font-semibold uppercase tracking-widest text-right" style={{ color: 'var(--text-secondary)' }}>
+            Result
+          </span>
           {showSync && (
-            <span className="text-xs font-body font-semibold uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>
+            <span className="text-xs font-body font-semibold uppercase tracking-widest text-center" style={{ color: 'var(--text-secondary)' }}>
               Sync
             </span>
           )}
@@ -1031,13 +1047,23 @@ export default function AuditPage() {
               return (
                 <div
                   key={log.id ?? i}
-                  className="grid items-start gap-4 px-5 py-3.5 hover:bg-surface-3/40 transition-colors group"
-                  style={{ gridTemplateColumns: gridCols }}
+                  className="relative grid items-start gap-4 pl-4 pr-5 py-3.5 hover:bg-surface-3/60 transition-colors group"
+                  style={{
+                    gridTemplateColumns: gridCols,
+                    background: i % 2 === 1 ? 'var(--bg-surface-1, rgba(255,255,255,0.015))' : 'transparent',
+                  }}
                 >
+                  {/* Result-colored accent bar — lets a failure jump out while
+                      scanning down the log without reading every badge */}
+                  <div
+                    className="absolute left-0 top-0 bottom-0 w-[3px]"
+                    style={{ background: getResultAccent(result), opacity: result === 'success' ? 0.35 : 0.8 }}
+                  />
+
                   {/* Timestamp */}
                   <div className="flex items-center gap-2 min-w-0">
                     <Clock size={14} className="text-brand-400 shrink-0" />
-                    <ExpandableCell text={formatTime(log.timestamp)} mono className="text-slate-400" />
+                    <ExpandableCell text={formatTime(log.timestamp)} mono className="text-slate-400 tabular-nums" />
                   </div>
 
                   {/* User */}
@@ -1064,36 +1090,41 @@ export default function AuditPage() {
                   />
 
                   {/* Source IP — column is `ip_source` in DB ── */}
-                  <ExpandableCell text={log.ip_source || '—'} mono className="text-slate-500" />
+                  <ExpandableCell text={log.ip_source || '—'} mono className="text-slate-500 tabular-nums" />
 
-                  {/* Result */}
-                  {resMeta ? (
-                    <span className={`inline-flex items-center gap-1.5 w-fit px-2.5 py-1 rounded-md text-sm font-body font-medium border ${resMeta.cls}`}>
-                      <ResIcon size={14} />
-                      {resMeta.label}
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 w-fit px-2.5 py-1 rounded-md text-sm font-body font-medium border text-slate-500 bg-surface-4 border-white/10">
-                      <AlertCircle size={14} />
-                      {result}
-                    </span>
-                  )}
+                  {/* Result — right-aligned so badges form a clean vertical
+                      edge instead of ragging left inside a wide column */}
+                  <div className="justify-self-end">
+                    {resMeta ? (
+                      <span className={`inline-flex items-center gap-1.5 w-fit px-2.5 py-1 rounded-md text-sm font-body font-medium border ${resMeta.cls}`}>
+                        <ResIcon size={14} />
+                        {resMeta.label}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 w-fit px-2.5 py-1 rounded-md text-sm font-body font-medium border text-slate-500 bg-surface-4 border-white/10">
+                        <AlertCircle size={14} />
+                        {result}
+                      </span>
+                    )}
+                  </div>
 
                   {/* Sync — syslog forwarding status for this event */}
                   {showSync && (
-                    log.syslog_synced === 1 || log.syslog_synced === true ? (
-                      <span title="Forwarded to syslog server" className="inline-flex items-center gap-1 text-accent-cyan">
-                        <Radio size={16} />
-                      </span>
-                    ) : log.syslog_synced === 0 || log.syslog_synced === false ? (
-                      <span title="Syslog forward failed" className="inline-flex items-center gap-1 text-accent-red">
-                        <XCircle size={16} />
-                      </span>
-                    ) : (
-                      <span title="Not forwarded (syslog disabled or not yet attempted)" className="inline-flex items-center gap-1 text-brand-400/70">
-                        <MinusCircle size={16} />
-                      </span>
-                    )
+                    <div className="justify-self-center">
+                      {log.syslog_synced === 1 || log.syslog_synced === true ? (
+                        <span title="Forwarded to syslog server" className="inline-flex items-center gap-1 text-accent-cyan">
+                          <Radio size={16} />
+                        </span>
+                      ) : log.syslog_synced === 0 || log.syslog_synced === false ? (
+                        <span title="Syslog forward failed" className="inline-flex items-center gap-1 text-accent-red">
+                          <XCircle size={16} />
+                        </span>
+                      ) : (
+                        <span title="Not forwarded (syslog disabled or not yet attempted)" className="inline-flex items-center gap-1 text-brand-400/70">
+                          <MinusCircle size={16} />
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
               )

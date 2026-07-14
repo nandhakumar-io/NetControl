@@ -865,6 +865,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  bulk_command_history:', e.message);
     }
+    try {
+      const { migrateDefaultRunbooks } = require('./migrate-default-runbooks');
+      await migrateDefaultRunbooks();
+      console.log('  ✓ default runbooks (seeded starter restart/cleanup/flush actions per org)');
+    } catch (e) {
+      console.warn('  ⚠  default runbooks:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node
