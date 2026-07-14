@@ -79,32 +79,35 @@ process.on('unhandledRejection', (err) => {
 const app = express();
 
 // ── Gzip compression — major win for JSON API responses ──────────────────────
-// IMPORTANT: never compress the SSE stream. compression's default filter
+// IMPORTANT: never compress an SSE stream. compression's default filter
 // treats any "text/*" content-type (including text/event-stream) as
-// compressible, so without this exclusion it wraps the stream response in a
+// compressible, so without an exclusion it wraps the stream response in a
 // gzip Transform that buffers output waiting to fill its window. That
-// silently breaks real-time flushing of the 20s keep-alive pings and live
-// metric pushes in routes/metrics.js's GET /stream handler — the proxy in
-// front of this (nginx/traefik) then sees long gaps with no bytes and kills
-// the connection on its read timeout, which looks like "metrics never show
-// up" / a stream that endlessly reconnects, even though an agent is actively
-// posting data every few seconds.
+// silently breaks real-time flushing of keep-alive pings and live event
+// pushes on every SSE endpoint in this app — the proxy in front of this
+// (nginx/traefik) then sees long gaps with no bytes and kills the
+// connection on its read timeout, which looks like "updates never show up"
+// / a stream that endlessly reconnects, even though the server is actively
+// writing to the response every few seconds.
+//
+// BUG FIX: this used to be a hand-maintained list of exact/regex path
+// checks (metrics/stream, the terminal relay's output feed) — every time a
+// new SSE endpoint was added elsewhere in the app, it had to remember to
+// add itself here too, or it would silently get gzip-buffered. That's
+// exactly what happened to routes/bulkCommand.js's GET /:runId/stream and
+// routes/alerts.js's GET /stream: both were missing from this list, so the
+// Bulk Command console's device_start/device_result events were being
+// written by res.write() but sitting in the gzip Transform's buffer
+// instead of reaching the browser — the console just looked like every
+// device was stuck "Queued" forever, even though the run had already
+// executed and completed server-side (check the audit log during a "stuck"
+// run — it's there). Match on Content-Type instead: any handler that has
+// already set text/event-stream is exempt, full stop, regardless of path.
 app.use(compression({
   level: 4,
   threshold: 1024,
   filter: (req, res) => {
-    if (req.path === '/api/metrics/stream') return false;
-    // Same issue as metrics/stream above: this is the terminal relay's SSE
-    // output feed (services/webTerminal.js — GET /session/:id/output). It
-    // was missing from this exclusion, so compression's default "text/*"
-    // filter caught text/event-stream here too and wrapped it in a gzip
-    // Transform that buffers pending output. That silently ate the relay's
-    // 15s keep-alive pings and live shell output — the agent side (plain
-    // HTTP POSTs from the Windows agent) kept working fine, so the terminal
-    // would visibly open on the device, but the browser's EventSource sat
-    // waiting on buffered/delayed bytes until it looked dead and fired
-    // onerror, surfacing as "Relay output stream lost" in the UI.
-    if (/^\/api\/terminal\/session\/[^/]+\/output$/.test(req.path)) return false;
+    if (res.getHeader('Content-Type') === 'text/event-stream') return false;
     return compression.filter(req, res);
   },
 }));
