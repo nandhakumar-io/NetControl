@@ -16,7 +16,7 @@ import {
   Archive, Folder, FileText, ChevronRight, ChevronDown, Home, Shield, Loader2,
   Download, Trash2, RefreshCw, CheckCircle2, XCircle, Clock, HardDrive,
   Server, Plus, Cloud, CloudCog, FolderInput, HardDriveDownload, X, Settings2, Pencil,
-  CalendarClock, Play, PauseCircle, PlayCircle,
+  CalendarClock, Play, PauseCircle, PlayCircle, Database,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -192,12 +192,14 @@ export default function BackupsPage() {
   const [destinations, setDestinations] = useState([])
   const [destinationId, setDestinationId] = useState(null) // null = local
   const [showDestModal, setShowDestModal] = useState(false)
+  const [showDbBackupModal, setShowDbBackupModal] = useState(false)
   const [editingDestination, setEditingDestination] = useState(null)
 
   const [format, setFormat]       = useState('zip')
   const [label, setLabel]         = useState('')
   const [pin, setPin]             = useState('')
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [dbBackupModalOpen, setDbBackupModalOpen] = useState(false)
 
   // ── Scheduled backups tab ──────────────────────────────────────────────────
   const [tab, setTab] = useState('run') // 'run' | 'scheduled'
@@ -348,6 +350,28 @@ export default function BackupsPage() {
       setDeleteTarget(null)
       fetchBackups()
     } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
+  }
+
+  // Creates a fresh archive of NetControl's own database, then immediately
+  // downloads it — a "quick backup" needs the file in hand right away, not
+  // just a new row in the history list below.
+  const handleDbBackup = async (pin) => {
+    const toastId = toast.loading('Backing up NetControl database…')
+    try {
+      const { data } = await api.post('/backup/database', { actionPin: pin })
+      fetchBackups()
+      toast.loading(`Preparing ${data.archiveName}…`, { id: toastId })
+      const res = await api.get(`/backup/${data.id}/download`, { responseType: 'blob' })
+      const url = window.URL.createObjectURL(res.data)
+      const a = document.createElement('a')
+      a.href = url; a.download = data.archiveName
+      document.body.appendChild(a); a.click(); a.remove()
+      window.URL.revokeObjectURL(url)
+      toast.success(`Downloaded ${data.archiveName}`, { id: toastId })
+    } catch (err) {
+      toast.dismiss(toastId)
+      throw err
+    }
   }
 
   const handleDeleteDestination = async (dest) => {
@@ -603,7 +627,17 @@ export default function BackupsPage() {
 
         {/* RIGHT: Backup list */}
         <div className="lg:col-span-2 card space-y-4">
-          <h2 className="text-xs font-body font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Archive History</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-body font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Archive History</h2>
+            {isAdmin && (
+              <button onClick={() => setShowDbBackupModal(true)}
+                className="text-xs font-body flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors hover:text-brand-400"
+                style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}
+                title="One-click backup of NetControl's own database — devices, users, audit log, alert rules, everything">
+                <Database size={13} /> Backup Database
+              </button>
+            )}
+          </div>
 
           {loading ? (
             <div className="space-y-2">
@@ -750,6 +784,15 @@ export default function BackupsPage() {
           )}
         </div>
       )}
+
+      <ActionConfirmModal
+        open={showDbBackupModal}
+        onClose={() => setShowDbBackupModal(false)}
+        onConfirm={handleDbBackup}
+        title="Backup NetControl Database"
+        description="Creates a full dump of NetControl's own database (devices, users, audit log, alert rules, everything) and downloads it immediately. Includes password hashes and encrypted secrets in their server-decryptable form — store the file securely. Enter your action PIN."
+        danger
+      />
 
       <ActionConfirmModal
         open={!!deleteTarget}

@@ -893,6 +893,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  alert-templates-and-tags:', e.message);
     }
+    try {
+      const { migrateBackupDbSource } = require('./migrate-backup-db-source');
+      await migrateBackupDbSource();
+      console.log("  ✓ backups.source_type allows 'database' (one-click NetControl DB backup)");
+    } catch (e) {
+      console.warn('  ⚠  backup-db-source:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

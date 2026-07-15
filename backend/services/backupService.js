@@ -123,6 +123,58 @@ function buildLocalArchiveStream({ sourcePath, format }) {
   return { stream: out, sourceRel, sourceType: stat.isDirectory() ? 'folder' : 'file' };
 }
 
+// ── Database dump (NetControl's own MySQL DB) ───────────────────────────────
+// A dedicated source, separate from the file/folder browser above — this
+// backs up the app's own database (devices, users, audit log, etc.) rather
+// than anything under BACKUP_ROOT. Always produced as tar.gz: mysqldump's
+// stdout is streamed straight into a single `netcontrol-db.sql` archive
+// entry, the same way buildLocalArchiveStream() streams a file/folder, so
+// it flows through the exact same destination-agnostic write path
+// (services/backupDestinations.js) and download route as every other backup.
+function buildDatabaseDumpStream() {
+  const { spawn } = require('child_process');
+  const { PassThrough } = require('stream');
+
+  const host = process.env.DB_HOST || 'localhost';
+  const port = String(parseInt(process.env.DB_PORT) || 3306);
+  const user = process.env.DB_USER || 'netcontrol';
+  const dbName = process.env.DB_NAME || 'netcontrol';
+
+  // Password goes in via MYSQL_PWD (env), never argv — argv is visible to
+  // any other process on the host via `ps`; env vars of a child process are not.
+  const dump = spawn('mysqldump', [
+    '--host', host,
+    '--port', port,
+    '--user', user,
+    '--single-transaction',   // consistent snapshot without locking InnoDB tables
+    '--routines',
+    '--triggers',
+    '--events',
+    dbName,
+  ], {
+    env: { ...process.env, MYSQL_PWD: process.env.DB_PASSWORD || '' },
+  });
+
+  const cfg = FORMAT_CONFIG['tar.gz'];
+  const archive = archiver(cfg.archiverFormat, cfg.archiverOpts);
+  const out = new PassThrough();
+  archive.on('warning', (err) => { if (err.code !== 'ENOENT') out.destroy(err); });
+  archive.on('error', (err) => out.destroy(err));
+  archive.pipe(out);
+
+  let stderr = '';
+  dump.stderr.on('data', (chunk) => { stderr += chunk.toString().slice(0, 2000); });
+  dump.on('error', (err) => out.destroy(new Error(`mysqldump failed to start: ${err.message}`)));
+  dump.on('close', (code) => {
+    if (code !== 0) out.destroy(new Error(`mysqldump exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+  });
+
+  archive.append(dump.stdout, { name: `${dbName}.sql` });
+  archive.finalize();
+
+  return { stream: out };
+}
+
 // ── Archive creation ───────────────────────────────────────────────────────────
 const FORMAT_CONFIG = {
   zip:     { ext: 'zip',     archiverFormat: 'zip', archiverOpts: { zlib: { level: 9 } } },
@@ -242,6 +294,6 @@ function getLocalDiskInfo() {
 module.exports = {
   BACKUP_ROOT, BACKUP_STORE_DIR, RETENTION_COUNT,
   BackupPathError,
-  browse, createArchive, buildLocalArchiveStream, pruneOldArchives, archiveFilePath,
+  browse, createArchive, buildLocalArchiveStream, buildDatabaseDumpStream, pruneOldArchives, archiveFilePath,
   FORMAT_CONFIG, getLocalDiskInfo,
 };

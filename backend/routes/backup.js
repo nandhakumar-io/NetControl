@@ -544,6 +544,103 @@ router.post(
   }
 );
 
+// ── POST /api/backup/database ─────────────────────────────────────────────────
+// One-click backup of NetControl's own database (devices, users, audit log,
+// alert rules, etc.) — separate from the file/folder source flow above since
+// there's no path to browse and no device to pick; it's always "this app's
+// own DB", always written to local storage so the resulting archive can be
+// downloaded immediately via the same GET /:id/download route every other
+// backup uses. Admin-only: a full mysqldump includes password hashes and any
+// encrypted-at-rest secrets (API keys, backup destination credentials) in
+// their still-decryptable-with-server-key form.
+router.post(
+  '/database',
+  requireRole('admin'),
+  [body('actionPin').notEmpty().isString()],
+  requireActionPin,
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const id = uuidv4();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const archiveName = `netcontrol-db-${stamp}.tar.gz`;
+
+    try {
+      await execute(
+        `INSERT INTO backups (id, source_path, device_id, device_name, source_type, format,
+                destination_id, destination_name, destination_type, archive_name, status,
+                created_by, created_by_name, created_at, org_id)
+         VALUES (?, '(NetControl database)', NULL, NULL, 'database', 'tar.gz', NULL, NULL, 'local', ?, 'pending', ?, ?, ?, ?)`,
+        [id, archiveName, req.user.id, req.user.username, nowSec, req.orgId]
+      );
+
+      const { stream } = backupService.buildDatabaseDumpStream();
+      const result = await destinations.writeToDestination(stream, archiveName, { type: 'local', config: {} }, backupService.BACKUP_STORE_DIR);
+
+      await execute(
+        `UPDATE backups SET size_bytes = ?, checksum_sha256 = ?, encrypted = ?,
+                status = 'completed', completed_at = ? WHERE id = ?`,
+        [result.bytes, result.checksum, result.encrypted ? 1 : 0, Math.floor(Date.now() / 1000), id]
+      );
+
+      const rowsNewestFirst = await query(
+        `SELECT id, archive_name FROM backups WHERE status = 'completed' AND destination_type = 'local' AND org_id = ? ORDER BY created_at DESC`,
+        [req.orgId]
+      );
+      const removedIds = await backupService.pruneOldArchives(rowsNewestFirst);
+      if (removedIds.length) {
+        const placeholders = removedIds.map(() => '?').join(',');
+        await execute(`DELETE FROM backups WHERE id IN (${placeholders})`, removedIds);
+      }
+
+      await audit.log({
+        userId: req.user.id,
+        username: req.user.username,
+        action: 'backup_create',
+        targetType: 'backup',
+        targetId: id,
+        targetName: archiveName,
+        ipSource: req.ip,
+        result: 'success',
+        details: `database netcontrol → local/${archiveName} (tar.gz, ${result.bytes} bytes)`,
+      });
+
+      webhook.fire('backup.created', {
+        id, source_path: '(NetControl database)', format: 'tar.gz', archive_name: archiveName,
+        destination: 'local', bytes: result.bytes, created_by: req.user.username,
+        severity: 'info',
+        message: `${req.user.username} backed up the NetControl database → local/${archiveName}`,
+      }).catch(() => {});
+
+      res.json({
+        id, format: 'tar.gz', archiveName, sizeBytes: result.bytes, checksum: result.checksum,
+        destination: 'Local backup store', status: 'completed', prunedCount: removedIds.length,
+      });
+    } catch (e) {
+      await execute(
+        `UPDATE backups SET status = 'failed', error_message = ? WHERE id = ?`,
+        [e.message, id]
+      ).catch(() => {});
+
+      await audit.log({
+        userId: req.user.id,
+        username: req.user.username,
+        action: 'backup_create',
+        targetType: 'backup',
+        targetId: id,
+        targetName: 'NetControl database',
+        ipSource: req.ip,
+        result: 'failure',
+        details: e.message,
+      });
+
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
 // ── GET /api/backup/:id/download ─────────────────────────────────────────────
 // Only meaningful for local-destination archives — S3/remote-folder archives
 // live elsewhere and are downloaded from that destination directly.
@@ -650,4 +747,4 @@ router.delete('/:id', requireRole('admin'), [param('id').isUUID()], async (req, 
   }
 });
 
-module.exports = router;
+module.exports = router;1
