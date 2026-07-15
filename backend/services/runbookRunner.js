@@ -11,6 +11,7 @@ const { queryOne, execute } = require('../db');
 const { v4: uuidv4 } = require('uuid');
 const ssh = require('./ssh');
 const winrm = require('./winrm');
+const { isUnderMaintenance, maintenanceBlockedReason } = require('./maintenance');
 
 const MAX_TIMEOUT_SEC = 300; // hard ceiling regardless of what's configured
 
@@ -33,6 +34,13 @@ function withTimeout(promise, seconds, label) {
 async function runRunbook(runbook, device) {
   if (runbook.os_type !== 'any' && runbook.os_type !== device.os_type) {
     return { result: 'failure', output: `Runbook is for ${runbook.os_type}, device is ${device.os_type} — skipped` };
+  }
+  // Runbooks run arbitrary commands against a device, same trust level as
+  // bulk-command/exec — a device flagged under maintenance is off-limits
+  // here too, whether this runbook was triggered manually or auto-fired by
+  // an alert rule (routes/alerts.js's performAlertActions).
+  if (isUnderMaintenance(device)) {
+    return { result: 'skipped', output: maintenanceBlockedReason(device) };
   }
   try {
     const exec = device.os_type === 'linux' ? ssh.execCommand : winrm.execCommand;

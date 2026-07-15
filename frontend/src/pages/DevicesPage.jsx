@@ -536,7 +536,20 @@ export default function DevicesPage() {
       bulk.map(d => api.post(`/actions/${type}`, { deviceId: d.id, actionPin: pin }))
     )
     clearSelection()
-    const allResults = settled.flatMap(s => s.status === 'fulfilled' ? (s.value.data.results || []) : [])
+    // A rejected settlement here (403 access denied, 409 under maintenance,
+    // etc.) used to just disappear from allResults — flatMap only pulled
+    // from the 'fulfilled' branch — so a locked device silently vanished
+    // from the count instead of showing up with its actual reason.
+    // Promise.allSettled preserves input order, so index back into `bulk`
+    // to know which device a rejection belonged to.
+    const allResults = settled.flatMap((s, i) => {
+      if (s.status === 'fulfilled') return s.value.data.results || []
+      const device = bulk[i]
+      return [{
+        device: device.name, id: device.id, result: 'failure',
+        details: s.reason?.response?.data?.error || s.reason?.message || 'Request failed',
+      }]
+    })
     const failed  = allResults.filter(r => r.result !== 'success').length
     const overall = allResults.length === 0 ? 'failure' : failed === 0 ? 'success' : failed === allResults.length ? 'failure' : 'partial'
     return { results: allResults, overall }

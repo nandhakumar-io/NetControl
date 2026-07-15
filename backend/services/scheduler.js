@@ -4,6 +4,7 @@ const { query, execute } = require('../db');
 const { decrypt } = require('./crypto');
 const audit = require('./audit');
 const webhook = require('./webhook');
+const { isUnderMaintenance, maintenanceBlockedReason } = require('./maintenance');
 
 const activeTasks = new Map();
 
@@ -32,6 +33,15 @@ async function executeScheduledAction(schedule) {
     const built = buildDevice(device);
     let result = 'success';
     let details = '';
+    if (isUnderMaintenance(device)) {
+      result = 'skipped';
+      details = maintenanceBlockedReason(device);
+      await audit.log({
+        username: 'scheduler', action: `scheduled_${schedule.action}`, targetType: 'device',
+        targetId: device.id, targetName: device.name, ipSource: 'scheduler', result, details,
+      });
+      continue;
+    }
     try {
       if (schedule.action === 'wake') {
         const { wakeSmart } = require('./wol');

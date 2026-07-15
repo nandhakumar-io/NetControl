@@ -96,18 +96,25 @@ async function restart(device) {
 }
 
 async function execCommand(device, command) {
-  return withFallback(
-    device,
-    () => {
-      const parts = command.trim().split(/\s+/);
-      const cred = rpcCredString(device);
-      const args = parts[0] === 'rpc'
-        ? [...parts, '-I', device.ip_address, '-U', cred]
-        : ['rpc', ...parts, '-I', device.ip_address, '-U', cred];
-      return netRpc(args);
-    },
-    command
-  );
+  // BUG FIX: this used to go through withFallback() the same as
+  // shutdown/restart — try `net rpc <command>` first, fall back to WinRM.
+  // That's correct for shutdown/restart, which really are `net rpc`
+  // subcommands (rpc "shutdown" is a real Samba RPC pipe operation) — but
+  // it's wrong for execCommand, which runs an arbitrary shell/PowerShell
+  // string. `net rpc` only understands a fixed set of RPC verbs (shutdown,
+  // registry, rap, ...), not general command execution, so prefixing an
+  // arbitrary command with "rpc" was guaranteed to fail every time. Worse,
+  // that guaranteed failure still cost up to RPC_TIMEOUT (15s) before
+  // falling back to WinRM (up to another WINRM_TIMEOUT, 20s) — up to 35s
+  // total before the real error was even available. That's longer than
+  // bulkCommand.js's own default 30s per-device timeout, so its outer race
+  // almost always won first and reported its own generic "timed out after
+  // 30s" instead of ever surfacing the actual RPC/WinRM failure reason.
+  // Going straight to WinRM fixes both problems: no wasted attempt against
+  // a command syntax that could never have worked, and the real error
+  // (auth failure, WinRM not enabled, unreachable, etc.) now returns well
+  // within any reasonable timeout instead of being masked by it.
+  return winrmExec(device, command);
 }
 
 module.exports = { shutdown, restart, execCommand };

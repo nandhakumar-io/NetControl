@@ -14,6 +14,7 @@ const { requireAuth, requireActionPin, requireRole } = require('../middleware/au
 const { requireOrgContext } = require('../middleware/tenant');
 const { actionLimiter } = require('../middleware/rateLimiter');
 const { decrypt } = require('../services/crypto');
+const { isUnderMaintenance, maintenanceBlockedReason } = require('../services/maintenance');
 const bulkCommand = require('../services/bulkCommand');
 
 const router = express.Router();
@@ -118,6 +119,14 @@ router.post('/run',
           [req.user.id, device.group_id]
         );
         if (!access) { skipped.push({ deviceId: id, deviceName: device.name, reason: 'Access denied' }); continue; }
+      }
+      // Maintenance lock: devices flagged maintenance_mode=1 (see
+      // routes/devices.js's POST /:id/maintenance) are off-limits to every
+      // action, including bulk commands, until someone explicitly marks
+      // them active/healthy again — skip rather than fail the whole run.
+      if (isUnderMaintenance(device)) {
+        skipped.push({ deviceId: id, deviceName: device.name, reason: maintenanceBlockedReason(device) });
+        continue;
       }
       accessible.push(device);
     }

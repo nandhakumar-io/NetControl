@@ -11,6 +11,7 @@ const ssh = require('../services/ssh');
 const winrm = require('../services/winrm');
 const audit = require('../services/audit');
 const webhook = require('../services/webhook');
+const { isUnderMaintenance, maintenanceBlockedReason } = require('../services/maintenance');
 
 const router = express.Router();
 // SECURITY FIX: requireActionPin checks a single PIN shared by everyone in
@@ -35,6 +36,16 @@ async function loadDevice(id) {
 }
 
 async function performAction(action, device) {
+  // Defense in depth: routes/actions.js's own route handlers already check
+  // this before calling performAction (see actionRoute() below), but
+  // routes/alerts.js's auto-action path (alert rules configured to
+  // auto-wake/restart/shutdown) calls performAction() directly and would
+  // otherwise bypass the lock entirely — a device flagged under
+  // maintenance should be hands-off from *every* caller, not just the ones
+  // that remembered to check first.
+  if (isUnderMaintenance(device)) {
+    throw new Error(maintenanceBlockedReason(device));
+  }
   if (action === 'wake') {
     const result = await wakeSmart(device);
     return result.method === 'relay'
@@ -81,6 +92,12 @@ function actionRoute(action) {
             );
             if (!access) return res.status(403).json({ error: 'Access denied to this device' });
           }
+          // Enforce the maintenance lock: block here, not just in the UI —
+          // this endpoint is what the UI itself calls, and the PIN/API can
+          // be hit directly, so the actual restriction has to live here.
+          if (isUnderMaintenance(d)) {
+            return res.status(409).json({ error: maintenanceBlockedReason(d), code: 'DEVICE_UNDER_MAINTENANCE' });
+          }
           devices = [d];
         } else {
           const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
@@ -116,6 +133,16 @@ function actionRoute(action) {
 
       for (const device of devices) {
         let result = 'success', details = '';
+        if (isUnderMaintenance(device)) {
+          result = 'skipped';
+          details = maintenanceBlockedReason(device);
+          if (overall === 'success') overall = 'partial';
+          await audit.log({ userId: req.user.id, username: req.user.username,
+            action, targetType: 'device', targetId: device.id,
+            targetName: device.name, ipSource: req.realIp, result: 'skipped', details });
+          results.push({ device: device.name, id: device.id, result, details });
+          continue;
+        }
         try {
           details = await performAction(action, device);
         } catch (e) {
@@ -172,6 +199,10 @@ router.post('/exec',
         [req.user.id, device.group_id]
       );
       if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+    }
+
+    if (isUnderMaintenance(device)) {
+      return res.status(409).json({ error: maintenanceBlockedReason(device), code: 'DEVICE_UNDER_MAINTENANCE' });
     }
 
     let result = 'success', output = '';
