@@ -87,12 +87,18 @@ router.get('/:id/usage', requireOrgContext, async (req, res) => {
     if (req.orgId !== req.params.id && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Access denied' });
     }
+    // req.org (from requireOrgContext) reflects the caller's own resolved
+    // org; for the global-admin bypass path that can be a different org
+    // than req.params.id, so re-fetch the actual target rather than
+    // reporting the wrong org's plan/device_limit.
+    const org = req.orgId === req.params.id ? req.org : await queryOne('SELECT * FROM organizations WHERE id = ?', [req.params.id]);
+    if (!org) return res.status(404).json({ error: 'Organization not found' });
     const [{ device_count }] = await query('SELECT COUNT(*) AS device_count FROM devices WHERE org_id = ?', [req.params.id]);
     res.json({
       device_count,
-      device_limit: req.org.device_limit,
-      plan: req.org.plan,
-      over_limit: device_count > req.org.device_limit,
+      device_limit: org.device_limit,
+      plan: org.plan,
+      over_limit: device_count > org.device_limit,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -100,6 +106,18 @@ router.get('/:id/usage', requireOrgContext, async (req, res) => {
 // ── GET /api/orgs/:id/members ────────────────────────────────────────────────
 router.get('/:id/members', requireOrgContext, async (req, res) => {
   try {
+    // SECURITY FIX: requireOrgContext only validates membership of req.orgId
+    // (resolved from the X-Org-Id header or the caller's OWN active org) —
+    // it never checks that req.orgId actually matches req.params.id. Every
+    // route below queried by req.params.id directly, so a user who is a
+    // member of ANY org (even a free trial org they made themselves) could
+    // list the member roster of ANY OTHER org just by putting that org's id
+    // in the URL; requireOrgContext's membership check would pass against
+    // their own org while the query ran against the target org. Same rule
+    // already used correctly by GET /:id/usage below.
+    if (req.orgId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     const rows = await query(
       `SELECT u.id, u.username, m.org_role, m.created_at
          FROM org_members m JOIN users u ON u.id = m.user_id
@@ -114,6 +132,18 @@ router.get('/:id/members', requireOrgContext, async (req, res) => {
 //    this client org with a given org-scoped role ──────────────────────────
 router.post('/:id/members', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
   try {
+    // SECURITY FIX (critical — cross-tenant privilege escalation): same gap
+    // as GET /:id/members above, but far worse here. requireOrgRole('admin')
+    // checks req.orgRole, which was derived from req.orgId (the caller's OWN
+    // org via X-Org-Id/active_org_id) — NOT from req.params.id. An admin of
+    // their own throwaway/trial org could call this with :id set to ANY
+    // other org's UUID and a body naming themselves, and requireOrgRole
+    // would happily pass (they're admin — of their own org), while the
+    // INSERT below ran against the target org, granting them 'admin' there.
+    // That's a full cross-tenant takeover of any org whose UUID is known.
+    if (req.orgId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     const { username, org_role = 'operator' } = req.body;
     if (!['admin', 'operator', 'viewer'].includes(org_role)) {
       return res.status(400).json({ error: 'invalid org_role' });
@@ -136,6 +166,12 @@ router.post('/:id/members', requireOrgContext, requireOrgRole('admin'), async (r
 // ── DELETE /api/orgs/:id/members/:userId ─────────────────────────────────────
 router.delete('/:id/members/:userId', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
   try {
+    // SECURITY FIX: same class of bug as the routes above — verify the
+    // target org in the URL actually matches the org membership/role that
+    // was checked, so an admin of one org can't remove members from another.
+    if (req.orgId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     await execute('DELETE FROM org_members WHERE org_id = ? AND user_id = ?', [req.params.id, req.params.userId]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -144,7 +180,19 @@ router.delete('/:id/members/:userId', requireOrgContext, requireOrgRole('admin')
 // ── PUT /api/orgs/:id — rename / change plan / device limit ─────────────────
 router.put('/:id', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
   try {
-    const existing = req.org;
+    // SECURITY FIX: same class of bug — without this, an admin of one org
+    // could rename, replan, or change the device_limit of any other org by
+    // id, since requireOrgRole('admin') only reflects the caller's own org.
+    if (req.orgId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    // req.org (from requireOrgContext) reflects the CALLER's resolved org,
+    // which only equals the target org when the check above passed via
+    // req.orgId matching. For the global-admin bypass path they can differ,
+    // so re-fetch the actual target explicitly rather than defaulting
+    // possibly-omitted fields from the wrong org's row.
+    const existing = req.orgId === req.params.id ? req.org : await queryOne('SELECT * FROM organizations WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Organization not found' });
     const { name = existing.name, plan = existing.plan, device_limit = existing.device_limit } = req.body;
     await execute('UPDATE organizations SET name = ?, plan = ?, device_limit = ? WHERE id = ?',
       [name, plan, device_limit, req.params.id]);
@@ -212,6 +260,12 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
 //    db/migrate-agent-enrollment.js for why this exists. ────────────────────
 router.get('/:id/enrollment-token', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
   try {
+    // SECURITY FIX: same class of bug — without this, an admin of one org
+    // could read the agent-enrollment token of any other org and use it to
+    // enroll rogue agents into that org's device pool.
+    if (req.orgId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     const org = await queryOne('SELECT agent_enrollment_token FROM organizations WHERE id = ?', [req.params.id]);
     if (!org) return res.status(404).json({ error: 'Organization not found' });
     res.json({ enrollment_token: org.agent_enrollment_token });
@@ -224,6 +278,13 @@ router.get('/:id/enrollment-token', requireOrgContext, requireOrgRole('admin'), 
 //    enrollments need the updated token. ────────────────────────────────────
 router.post('/:id/enrollment-token/regenerate', requireOrgContext, requireOrgRole('admin'), async (req, res) => {
   try {
+    // SECURITY FIX: same class of bug — without this, an admin of one org
+    // could invalidate and replace another org's enrollment token, breaking
+    // that org's agent enrollment (a denial-of-service against a tenant
+    // that isn't even the caller's own).
+    if (req.orgId !== req.params.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     const crypto = require('crypto');
     let token, collided;
     do {
@@ -235,7 +296,7 @@ router.post('/:id/enrollment-token/regenerate', requireOrgContext, requireOrgRol
 
     await audit.log({ userId: req.user.id, username: req.user.username,
       action: 'regenerate_enrollment_token', targetType: 'organization', targetId: req.params.id,
-      targetName: req.org.name, ipSource: req.realIp || req.ip, result: 'success' });
+      targetName: req.orgId === req.params.id ? req.org.name : req.params.id, ipSource: req.realIp || req.ip, result: 'success' });
 
     res.json({ enrollment_token: token });
   } catch (e) { res.status(500).json({ error: e.message }); }

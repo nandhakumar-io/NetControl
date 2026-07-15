@@ -22,8 +22,13 @@ router.use(requireAuth, requireOrgContext);
 // granting one should never silently grant the other.
 const requireManageRunbooks = requirePermission(32768);
 
-async function loadDevice(id) {
-  const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);
+// SECURITY: org_id is filtered in the query itself, not just checked after
+// the fact — see middleware/tenant.js's verifyDeviceOrgAccess() comment for
+// why relying on a call-site check alone is the pattern that caused the
+// cross-tenant device access bug in actions.js/sshProxy.js/webTerminal.js.
+// A device belonging to another org now simply doesn't come back as a row.
+async function loadDevice(id, orgId) {
+  const d = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [id, orgId]);
   if (!d) return null;
   return {
     ...d,
@@ -80,8 +85,8 @@ router.put('/:id', requireManageRunbooks, async (req, res) => {
     } = req.body;
 
     await execute(
-      `UPDATE runbook_actions SET name=?, description=?, os_type=?, command=?, timeout_sec=? WHERE id=?`,
-      [name, description, os_type, command, Math.min(timeout_sec, 300), req.params.id]
+      `UPDATE runbook_actions SET name=?, description=?, os_type=?, command=?, timeout_sec=? WHERE id=? AND org_id=?`,
+      [name, description, os_type, command, Math.min(timeout_sec, 300), req.params.id, req.orgId]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -105,8 +110,8 @@ router.post('/:id/test', requireManageRunbooks, async (req, res) => {
 
     const { deviceId } = req.body;
     if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
-    const device = await loadDevice(deviceId);
-    if (!device || device.org_id !== req.orgId) return res.status(404).json({ error: 'Device not found' });
+    const device = await loadDevice(deviceId, req.orgId);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
 
     const outcome = await runRunbookById(runbook.id, device, { triggeredBy: `manual test by ${req.user.username}` });
 

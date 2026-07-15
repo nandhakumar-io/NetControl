@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { queryOne, execute } = require('../db');
+const bus = require('../services/bus');
 require('dotenv').config();
 
 // ── Personal/automation API keys ─────────────────────────────────────────────
@@ -221,10 +222,95 @@ function requirePermission(bit) {
 }
 
 /**
- * Middleware: Verify action PIN from request body.
+ * Action-PIN attempt limiter — deliberately separate from services/bruteForce.js.
+ * That module bans by IP and its lockout also blocks *login*; reusing it here
+ * would mean a handful of wrong action-PIN guesses locks a legitimate operator
+ * out of signing in entirely, which is a worse outage than the problem being
+ * solved. This tracks failures per-user (not per-IP, since a shared office IP
+ * shouldn't lock out everyone) via the same Redis client bus.js already
+ * manages, so the count is consistent across every worker — same reasoning
+ * as bruteForce.js's own fix for that. Falls back to an in-memory Map when
+ * Redis isn't configured (single-process/dev).
+ */
+const PIN_THRESHOLD   = parseInt(process.env.PIN_ATTEMPT_THRESHOLD || '5', 10);
+const PIN_WINDOW_SEC  = parseInt(process.env.PIN_ATTEMPT_WINDOW_SEC || '300', 10);   // 5 min
+const PIN_LOCKOUT_SEC = parseInt(process.env.PIN_LOCKOUT_SEC || '900', 10);          // 15 min
+
+const pinRedis = bus.getClient(); // null in single-process fallback mode
+const pinAttemptsLocal = new Map();  // userId -> [timestamp, ...]
+const pinLockoutsLocal = new Map();  // userId -> expiresAtEpochSec
+
+function cleanLocalPinAttempts(userId) {
+  const cutoff = Math.floor(Date.now() / 1000) - PIN_WINDOW_SEC;
+  const fresh = (pinAttemptsLocal.get(userId) || []).filter(ts => ts > cutoff);
+  if (fresh.length) pinAttemptsLocal.set(userId, fresh);
+  else pinAttemptsLocal.delete(userId);
+  return fresh;
+}
+
+async function isPinLocked(userId) {
+  const now = Math.floor(Date.now() / 1000);
+  if (pinRedis) {
+    const expiresAt = await pinRedis.get(`pinlock:${userId}`).catch(() => null);
+    if (!expiresAt) return { locked: false };
+    return { locked: true, remaining: parseInt(expiresAt, 10) - now };
+  }
+  const expiresAt = pinLockoutsLocal.get(userId);
+  if (!expiresAt || expiresAt <= now) { pinLockoutsLocal.delete(userId); return { locked: false }; }
+  return { locked: true, remaining: expiresAt - now };
+}
+
+async function recordPinFailure(userId) {
+  const now = Math.floor(Date.now() / 1000);
+  let count;
+  if (pinRedis) {
+    const key = `pinattempts:${userId}`;
+    count = await pinRedis.incr(key);
+    if (count === 1) await pinRedis.expire(key, PIN_WINDOW_SEC);
+  } else {
+    const fresh = cleanLocalPinAttempts(userId);
+    fresh.push(now);
+    pinAttemptsLocal.set(userId, fresh);
+    count = fresh.length;
+  }
+  if (count >= PIN_THRESHOLD) {
+    const expiresAt = now + PIN_LOCKOUT_SEC;
+    if (pinRedis) {
+      await pinRedis.set(`pinlock:${userId}`, String(expiresAt), 'EX', PIN_LOCKOUT_SEC);
+      await pinRedis.del(`pinattempts:${userId}`).catch(() => {});
+    } else {
+      pinLockoutsLocal.set(userId, expiresAt);
+      pinAttemptsLocal.delete(userId);
+    }
+    console.warn(`[ActionPin] Locked out user ${userId} for ${Math.round(PIN_LOCKOUT_SEC / 60)}min after ${count} bad PIN attempts`);
+  }
+}
+
+async function clearPinFailures(userId) {
+  if (pinRedis) { await pinRedis.del(`pinattempts:${userId}`).catch(() => {}); return; }
+  pinAttemptsLocal.delete(userId);
+}
+
+/**
+ * Middleware: Verify action PIN from request body, with lockout after
+ * repeated bad guesses so the shared PIN can't be brute-forced by a
+ * logged-in-but-untrusted session (e.g. a stolen/leaked JWT with a valid
+ * role but no PIN knowledge).
  */
 async function requireActionPin(req, res, next) {
   const { actionPin } = req.body;
+  const userId = req.user?.id;
+
+  if (userId) {
+    const lock = await isPinLocked(userId);
+    if (lock.locked) {
+      return res.status(429).json({
+        error: `Too many incorrect PIN attempts. Try again in ${Math.ceil(lock.remaining / 60)} minute(s).`,
+        code: 'PIN_LOCKED',
+      });
+    }
+  }
+
   if (!actionPin || typeof actionPin !== 'string') {
     return res.status(403).json({ error: 'Action PIN required' });
   }
@@ -236,9 +322,11 @@ async function requireActionPin(req, res, next) {
 
   const valid = await bcrypt.compare(actionPin, pinHash);
   if (!valid) {
+    if (userId) await recordPinFailure(userId);
     return res.status(403).json({ error: 'Invalid action PIN' });
   }
 
+  if (userId) await clearPinFailures(userId);
   next();
 }
 

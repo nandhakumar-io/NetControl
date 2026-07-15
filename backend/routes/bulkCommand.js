@@ -68,8 +68,13 @@ async function recordLastRun(userId, runId, orgId) {
   }
 }
 
-async function loadDevice(id) {
-  const d = await queryOne('SELECT * FROM devices WHERE id = ?', [id]);
+// SECURITY: org_id is filtered in the query itself, not just checked after
+// the fact — see middleware/tenant.js's verifyDeviceOrgAccess() comment for
+// why relying on a call-site check alone is the pattern that caused the
+// cross-tenant device access bug in actions.js/sshProxy.js/webTerminal.js.
+// A device belonging to another org now simply doesn't come back as a row.
+async function loadDevice(id, orgId) {
+  const d = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [id, orgId]);
   if (!d) return null;
   return {
     ...d,
@@ -111,8 +116,8 @@ router.post('/run',
     const accessible = [];
     const skipped = [];
     for (const id of [...new Set(deviceIds)]) {
-      const device = await loadDevice(id);
-      if (!device || device.org_id !== req.orgId) { skipped.push({ deviceId: id, reason: 'Device not found' }); continue; }
+      const device = await loadDevice(id, req.orgId);
+      if (!device) { skipped.push({ deviceId: id, reason: 'Device not found' }); continue; }
       if (req.user.role !== 'admin') {
         const access = await queryOne(
           'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',

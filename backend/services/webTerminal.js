@@ -372,7 +372,7 @@ router.get('/session/:sessionId/output', async (req, res) => {
   if (!token) { res.status(401).end(); return; }
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    const liveUser = await queryOne('SELECT enabled FROM users WHERE id = ?', [payload.id]).catch(() => null);
+    const liveUser = await queryOne('SELECT enabled, role FROM users WHERE id = ?', [payload.id]).catch(() => null);
     if (!liveUser || !liveUser.enabled) { res.status(403).end(); return; }
   }
   catch { res.status(403).end(); return; }
@@ -380,6 +380,19 @@ router.get('/session/:sessionId/output', async (req, res) => {
   const { sessionId } = req.params;
   const s = await getSession(sessionId);
   if (!s) return res.status(404).json({ error: 'Session not found' });
+
+  // SECURITY FIX: this route checked the JWT was valid and the account
+  // enabled, but never that the session actually belonged to that user —
+  // unlike POST /session/:sessionId/input and DELETE /session/:sessionId
+  // right below, which both do this check. sessionId is `${userId}:
+  // ${deviceId}`, so any authenticated user who can see or guess another
+  // user's session id could read that user's live terminal output (device
+  // shell command results, file listings, credentials typed at a prompt,
+  // etc.) on any device, including a device in another org. Same rule as
+  // the sibling routes: the session owner, or a global admin.
+  if (payload.id !== s.userId && liveUser.role !== 'admin') {
+    return res.status(403).json({ error: 'Not your session' });
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');

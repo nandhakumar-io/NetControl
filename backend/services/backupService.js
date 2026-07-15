@@ -212,8 +212,16 @@ function archiveFilePath(archiveName) {
 // line per mount, no locale/column-width surprises).
 function getLocalDiskInfo() {
   try {
-    const { execSync } = require('child_process');
-    const out = execSync(`df -PB1 "${BACKUP_ROOT}" 2>/dev/null`).toString();
+    // SECURITY: was execSync(`df -PB1 "${BACKUP_ROOT}" 2>/dev/null`), a shell
+    // string build. BACKUP_ROOT is server-config (env/default), not user
+    // input, so this wasn't reachable by a request today — but it's the one
+    // place in the codebase that shelled out via string interpolation
+    // instead of execFile with a fixed argv, unlike discoveryService.js and
+    // winrm.js. Switched to execFileSync so there's no shell involved at
+    // all, removing the injection shape entirely rather than relying on
+    // BACKUP_ROOT staying non-attacker-controlled forever.
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('df', ['-PB1', BACKUP_ROOT], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
     const line = out.trim().split('\n')[1]; // header, then the one line we asked for
     if (!line) return null;
     const parts = line.trim().split(/\s+/);
