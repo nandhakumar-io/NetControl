@@ -332,8 +332,17 @@ export default function GroupsPage() {
 
   const executeAction = async (pin) => {
     const { type, group } = actionModal
-    await api.post(`/actions/${type}`, { groupId: group.id, actionPin: pin })
-    toast.success(`${type} sent to ${group.name}`)
+    const { data } = await api.post(`/actions/${type}`, { groupId: group.id, actionPin: pin })
+    // Previously this ignored the response entirely and always toasted
+    // success — even when some (or every) device in the group failed, or
+    // was skipped for being under maintenance. The backend returns HTTP
+    // 200 regardless of `overall` (failure/partial devices aren't a
+    // request-level error), so nothing here would have caught it. Return
+    // the real per-device results so ActionConfirmModal renders its actual
+    // outcome breakdown, same as the single-device and DevicesPage bulk
+    // paths already do, instead of a toast that's right by coincidence.
+    if (data.overall === 'success') toast.success(`${type} sent to ${group.name}`)
+    return data
   }
 
   const getGroupDevices = useCallback((id) => devices.filter(d => d.group_id === id), [devices])
