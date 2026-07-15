@@ -113,13 +113,21 @@ router.get('/devices', async (req, res) => {
     const rows = await query(
       `SELECT id, name, ip_address, os_type, status,
               (os_type = 'linux' AND ssh_username IS NOT NULL
-               AND (ssh_password IS NOT NULL OR ssh_key IS NOT NULL)) AS sshCapable
+               AND (ssh_password IS NOT NULL OR ssh_key IS NOT NULL)) AS sshCapable,
+              (SELECT GROUP_CONCAT(dt.tag ORDER BY dt.tag SEPARATOR ',')
+                 FROM device_tags dt WHERE dt.device_id = devices.id) AS tags_csv
        FROM devices WHERE org_id = ? ORDER BY name`,
       [req.orgId]
     );
+    const tagFilter = (req.query.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    let mapped = rows.map(r => ({
+      ...r, isLocal: false, sshCapable: !!r.sshCapable,
+      tags: r.tags_csv ? r.tags_csv.split(',') : [], tags_csv: undefined,
+    }));
+    if (tagFilter.length) mapped = mapped.filter(d => d.tags.some(t => tagFilter.includes(t)));
     res.json([
-      { id: LOCAL_DEVICE_ID, name: 'This server (local)', ip_address: null, os_type: null, status: 'online', isLocal: true, sshCapable: true },
-      ...rows.map(r => ({ ...r, isLocal: false, sshCapable: !!r.sshCapable })),
+      { id: LOCAL_DEVICE_ID, name: 'This server (local)', ip_address: null, os_type: null, status: 'online', isLocal: true, sshCapable: true, tags: [] },
+      ...mapped,
     ]);
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -190,12 +190,108 @@ router.get('/triggered', async (req, res) => {
 });
 
 // ── GET /api/alerts/rules ──────────────────────────────────────────────────────
+// ── Rule templates ────────────────────────────────────────────────────────────
+// A small library of common alert rules an admin can enable in one click,
+// instead of building every rule from scratch by hand. Deliberately not
+// stored in the DB — this is static, versioned-with-the-code content, same
+// spirit as the default runbooks seed. Enabling a template just creates a
+// normal alert_rules row scoped to whatever the admin picked (a single
+// device, a whole group, or every device in the org) — after that it's a
+// completely ordinary rule, editable/deletable the same as any other.
+const RULE_TEMPLATES = [
+  {
+    key: 'disk-90',
+    name: 'Disk usage > 90%',
+    description: 'Warns when any disk/partition on a device crosses 90% used — the classic "ran out of space" early warning.',
+    metric: 'disk', operator: 'gt', threshold: 90, severity: 'warning',
+    cooldown_sec: 3600, min_duration_sec: 0,
+  },
+  {
+    key: 'disk-critical-97',
+    name: 'Disk usage > 97% (critical)',
+    description: 'Pages immediately once a disk is nearly completely full — little runway left before writes start failing.',
+    metric: 'disk', operator: 'gt', threshold: 97, severity: 'critical',
+    cooldown_sec: 1800, min_duration_sec: 0,
+  },
+  {
+    key: 'cpu-sustained-90',
+    name: 'CPU sustained high (>90% for 10 min)',
+    description: 'Ignores brief spikes — only notifies once CPU has stayed above 90% continuously for 10 minutes.',
+    metric: 'cpu', operator: 'gt', threshold: 90, severity: 'warning',
+    cooldown_sec: 1800, min_duration_sec: 600,
+  },
+  {
+    key: 'ram-90',
+    name: 'RAM usage > 90%',
+    description: 'Warns when memory usage crosses 90% — useful for catching a slow leak before it OOMs the box.',
+    metric: 'ram', operator: 'gt', threshold: 90, severity: 'warning',
+    cooldown_sec: 1800, min_duration_sec: 0,
+  },
+  {
+    key: 'offline-5min',
+    name: 'Offline for more than 5 minutes',
+    description: 'Suppresses the flicker of a quick reboot or a single missed poll — only notifies once a device has stayed unreachable for 5+ minutes.',
+    metric: 'offline', operator: 'gt', threshold: 0, severity: 'critical',
+    cooldown_sec: 1800, min_duration_sec: 300,
+  },
+  {
+    key: 'process-count-high',
+    name: 'Process count spike (>400 processes)',
+    description: 'Flags a runaway fork bomb or a stuck cron loop before it exhausts PIDs/memory.',
+    metric: 'process_count', operator: 'gt', threshold: 400, severity: 'warning',
+    cooldown_sec: 1800, min_duration_sec: 0,
+  },
+];
+
+// ── GET /api/alerts/rule-templates ─────────────────────────────────────────────
+router.get('/rule-templates', (req, res) => res.json(RULE_TEMPLATES));
+
+// ── POST /api/alerts/rule-templates/:key/enable ────────────────────────────────
+// Body: { group_id? , device_id? } — omit both for an org-wide rule.
+router.post('/rule-templates/:key/enable', requireRole('admin', 'operator'), async (req, res) => {
+  try {
+    const tpl = RULE_TEMPLATES.find(t => t.key === req.params.key);
+    if (!tpl) return res.status(404).json({ error: 'Unknown template' });
+
+    const { group_id = null, device_id = null } = req.body || {};
+    if (device_id && group_id) return res.status(400).json({ error: 'set device_id or group_id, not both' });
+
+    if (group_id) {
+      const group = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [group_id, req.orgId]);
+      if (!group) return res.status(404).json({ error: 'Group not found' });
+    }
+    if (device_id) {
+      const device = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [device_id, req.orgId]);
+      if (!device) return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const id = uuidv4();
+    const now = Math.floor(Date.now() / 1000);
+    await execute(
+      `INSERT INTO alert_rules
+         (id, org_id, name, metric, operator, threshold, severity, device_id, group_id,
+          actions, notify_admins, cooldown_sec, enabled, min_duration_sec, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)`,
+      [id, req.orgId, tpl.name, tpl.metric, tpl.operator, tpl.threshold, tpl.severity,
+       device_id || null, group_id || null, JSON.stringify(['notify']),
+       tpl.cooldown_sec, tpl.min_duration_sec || 0, req.user.id, now]
+    );
+
+    await audit.log({ userId: req.user.id, username: req.user.username,
+      action: 'create_alert_rule', targetType: 'alert_rule', targetId: id,
+      targetName: `${tpl.name} (from template)`, ipSource: req.realIp || req.ip, result: 'success' });
+
+    res.status(201).json({ id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/rules', async (req, res) => {
   try {
     if (!await tableExists('alert_rules')) return res.json([]);
     const rows = await query(
-      `SELECT ar.*, d.name AS device_name FROM alert_rules ar
+      `SELECT ar.*, d.name AS device_name, g.name AS group_name FROM alert_rules ar
        LEFT JOIN devices d ON ar.device_id = d.id
+       LEFT JOIN \`groups\` g ON ar.group_id = g.id
        WHERE ar.org_id = ? ORDER BY ar.created_at DESC`,
       [req.orgId]
     );
@@ -214,32 +310,33 @@ router.post('/rules', requireRole('admin', 'operator'), async (req, res) => {
   try {
     const {
       name, metric, operator = 'gt', threshold = 90,
-      severity = 'warning', device_id = null,
+      severity = 'warning', device_id = null, group_id = null,
       actions = ['notify'], notify_admins = true,
       cooldown_sec = 300, enabled = true,
       escalate_after_sec = null, escalate_severity = 'critical', escalate_webhook_ids = null,
-      runbook_action_ids = [],
+      runbook_action_ids = [], min_duration_sec = 0,
     } = req.body;
 
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
     if (!['cpu','ram','disk','offline','process_count'].includes(metric))
       return res.status(400).json({ error: 'invalid metric' });
+    if (device_id && group_id) return res.status(400).json({ error: 'set device_id or group_id, not both' });
 
     const id = uuidv4();
     const now = Math.floor(Date.now() / 1000);
     await execute(
       `INSERT INTO alert_rules
-         (id, org_id, name, metric, operator, threshold, severity, device_id,
+         (id, org_id, name, metric, operator, threshold, severity, device_id, group_id,
           actions, notify_admins, cooldown_sec, enabled,
           escalate_after_sec, escalate_severity, escalate_webhook_ids,
-          runbook_action_ids, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          runbook_action_ids, min_duration_sec, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, req.orgId, name.trim(), metric, operator, threshold, severity,
-       device_id || null, JSON.stringify(actions),
+       device_id || null, group_id || null, JSON.stringify(actions),
        notify_admins ? 1 : 0, cooldown_sec, enabled ? 1 : 0,
        escalate_after_sec || null, escalate_severity || 'critical',
        escalate_webhook_ids ? JSON.stringify(escalate_webhook_ids) : null,
-       JSON.stringify(runbook_action_ids || []),
+       JSON.stringify(runbook_action_ids || []), min_duration_sec || 0,
        req.user.id, now]
     );
 
@@ -260,7 +357,7 @@ router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
     const {
       name = existing.name, metric = existing.metric, operator = existing.operator,
       threshold = existing.threshold, severity = existing.severity,
-      device_id = existing.device_id,
+      device_id = existing.device_id, group_id = existing.group_id,
       actions = JSON.parse(existing.actions || '[]'),
       notify_admins = existing.notify_admins,
       cooldown_sec = existing.cooldown_sec, enabled = existing.enabled,
@@ -268,18 +365,22 @@ router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
       escalate_severity = existing.escalate_severity || 'critical',
       escalate_webhook_ids = existing.escalate_webhook_ids ? JSON.parse(existing.escalate_webhook_ids) : null,
       runbook_action_ids = existing.runbook_action_ids ? JSON.parse(existing.runbook_action_ids) : [],
+      min_duration_sec = existing.min_duration_sec || 0,
     } = req.body;
+
+    if (device_id && group_id) return res.status(400).json({ error: 'set device_id or group_id, not both' });
 
     await execute(
       `UPDATE alert_rules SET name=?, metric=?, operator=?, threshold=?, severity=?,
-         device_id=?, actions=?, notify_admins=?, cooldown_sec=?, enabled=?,
-         escalate_after_sec=?, escalate_severity=?, escalate_webhook_ids=?, runbook_action_ids=? WHERE id=?`,
+         device_id=?, group_id=?, actions=?, notify_admins=?, cooldown_sec=?, enabled=?,
+         escalate_after_sec=?, escalate_severity=?, escalate_webhook_ids=?, runbook_action_ids=?,
+         min_duration_sec=? WHERE id=?`,
       [name, metric, operator, threshold, severity,
-       device_id || null, JSON.stringify(actions),
+       device_id || null, group_id || null, JSON.stringify(actions),
        notify_admins ? 1 : 0, cooldown_sec, enabled ? 1 : 0,
        escalate_after_sec || null, escalate_severity || 'critical',
        escalate_webhook_ids ? JSON.stringify(escalate_webhook_ids) : null,
-       JSON.stringify(runbook_action_ids || []),
+       JSON.stringify(runbook_action_ids || []), min_duration_sec || 0,
        req.params.id]
     );
     res.json({ ok: true });
@@ -428,19 +529,25 @@ async function evaluateAlerts(deviceId, snapshot) {
   try {
     if (!await tableExists('alert_rules')) return;
 
-    const device = await queryOne('SELECT id, name, org_id, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
+    const device = await queryOne('SELECT id, name, org_id, group_id, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
     if (!device) return;
     // Device is under maintenance — suppress alerts (no log entry, no admin
     // notification, no webhook) until it's marked ok again.
     if (device.maintenance_mode) return;
 
-    // Scoped to the device's own org — a "global" rule (device_id IS NULL)
-    // still only fires for devices belonging to the same tenant, so one
-    // client's blanket "CPU > 90%" rule never evaluates against another
-    // client's devices.
+    // Scoped to the device's own org — a "global" rule (device_id IS NULL
+    // AND group_id IS NULL) still only fires for devices belonging to the
+    // same tenant, so one client's blanket "CPU > 90%" rule never evaluates
+    // against another client's devices. A group-scoped rule (group_id set)
+    // fires for every device currently in that group — dynamic, so a
+    // device added to the group later is automatically covered without
+    // needing the rule re-enabled.
     const rules = await query(
-      `SELECT * FROM alert_rules WHERE enabled = 1 AND org_id = ? AND (device_id IS NULL OR device_id = ?)`,
-      [device.org_id, deviceId]
+      `SELECT * FROM alert_rules
+        WHERE enabled = 1 AND org_id = ?
+          AND (device_id IS NULL OR device_id = ?)
+          AND (group_id IS NULL OR group_id = ?)`,
+      [device.org_id, deviceId, device.group_id]
     );
     if (!rules.length) return;
 
@@ -523,6 +630,13 @@ async function evaluateAlerts(deviceId, snapshot) {
           await execute('UPDATE alert_triggered_log SET resolved_at = ? WHERE id = ?', [now, state.last_log_id]);
         }
 
+        // A duration-gated incident that cleared before ever reaching
+        // min_duration_sec was never announced as breached in the first
+        // place (notify_count stayed 0) — so there's nothing to resolve
+        // from the admin's perspective. Sending a "back to normal" message
+        // for a condition they were never told about is just confusing noise.
+        if (state.notify_count === 0 && rule.min_duration_sec) continue;
+
         const openedFor = state.first_breached_at ? formatDuration(now - state.first_breached_at) : null;
         const resolvedMsg = `${rule.name} on ${device.name} is back to normal${openedFor ? ` (was breached for ${openedFor})` : ''}`;
 
@@ -539,6 +653,30 @@ async function evaluateAlerts(deviceId, snapshot) {
       // ── OK -> BREACHED (new incident) ────────────────────────────────────
       if (!state.is_active) {
         const flap = advanceFlapTracking(state, now);
+        const minDuration = rule.min_duration_sec || 0;
+
+        // Duration-gated rules (e.g. the "offline > 5 min" / "CPU sustained
+        // high" templates) shouldn't notify on the very first breached poll
+        // — that's the whole point of "sustained". Record the incident as
+        // active (so BREACHED->BREACHED below can tell it's still ongoing
+        // and check the elapsed time) but skip the log entry, notification,
+        // and auto-actions until it's actually been breached that long.
+        // notify_count stays 0 as the "hasn't graduated yet" marker.
+        if (minDuration > 0) {
+          await execute(
+            `INSERT INTO alert_state (rule_id, device_id, is_active, first_breached_at, last_notified_at, notify_count,
+                                       last_log_id, flap_count, flap_window_start, flapping, last_transition_at)
+             VALUES (?, ?, 1, ?, NULL, 0, NULL, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE is_active=1, first_breached_at=VALUES(first_breached_at),
+               last_notified_at=NULL, notify_count=0, last_log_id=NULL,
+               flap_count=VALUES(flap_count), flap_window_start=VALUES(flap_window_start),
+               flapping=VALUES(flapping), last_transition_at=VALUES(last_transition_at)`,
+            [rule.id, deviceId, now, flap.flap_count, flap.flap_window_start, flap.flapping ? 1 : 0, now]
+          );
+          console.log(`[Alert] PENDING (duration-gated) — ${rule.name} on ${device.name}: waiting for ${minDuration}s before first notification`);
+          continue;
+        }
+
         const logId = uuidv4();
 
         await execute(
@@ -598,6 +736,43 @@ async function evaluateAlerts(deviceId, snapshot) {
       if (state.flapping) continue;
 
       const openSec = now - (state.first_breached_at || now);
+
+      // Graduate a duration-gated incident (see the pending-state comment
+      // above) into an actual first notification once it's persisted past
+      // min_duration_sec. notify_count === 0 is exactly that "still
+      // pending" marker — an already-notified incident never re-enters
+      // this branch.
+      if (rule.min_duration_sec && state.notify_count === 0 && openSec >= rule.min_duration_sec) {
+        const logId = uuidv4();
+        await execute(
+          `INSERT INTO alert_triggered_log (id, rule_id, device_id, triggered_at, severity, details, actions_taken)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [logId, rule.id, deviceId, now, rule.severity, details, JSON.stringify(actions)]
+        );
+        await execute(
+          'UPDATE alert_state SET notify_count = 1, last_notified_at = ?, last_log_id = ? WHERE rule_id = ? AND device_id = ?',
+          [now, logId, rule.id, deviceId]
+        );
+        if (rule.notify_admins) {
+          await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name} (sustained for ${formatDuration(openSec)})`, now, logId);
+        }
+        const autoActions = await performAlertActions(rule, deviceId, device.name, actions).catch(() => []);
+        const actionSummary = autoActions.length
+          ? ' — ' + autoActions.map(a => `${a.action}: ${a.result === 'success' ? (a.detail || 'ok') : `failed (${a.detail})`}`).join(', ')
+          : '';
+        const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
+        webhook.fire(webhookEvent, {
+          device_id: deviceId, device_name: device.name, rule_name: rule.name,
+          metric: rule.metric, severity: rule.severity, details: details + actionSummary,
+          message: `${rule.name}: ${details} on ${device.name} (sustained for ${formatDuration(openSec)})${actionSummary}`,
+        }).catch(() => {});
+        console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name} graduated after ${formatDuration(openSec)}: ${details}`);
+        continue;
+      }
+      // Still pending (hasn't reached min_duration_sec yet) — stay quiet,
+      // same as the initial OK->BREACHED gate above.
+      if (rule.min_duration_sec && state.notify_count === 0) continue;
+
       const logRow = state.last_log_id
         ? await queryOne('SELECT acknowledged_at, snoozed_until FROM alert_triggered_log WHERE id = ?', [state.last_log_id])
         : null;

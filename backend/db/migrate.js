@@ -879,6 +879,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  default runbooks:', e.message);
     }
+    try {
+      const { migrateAlertTemplatesAndTags } = require('./migrate-alert-templates-and-tags');
+      await migrateAlertTemplatesAndTags();
+      console.log('  ✓ alert_rules.group_id / min_duration_sec + device_tags table');
+    } catch (e) {
+      console.warn('  ⚠  alert-templates-and-tags:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

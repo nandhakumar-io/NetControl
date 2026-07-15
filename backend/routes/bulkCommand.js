@@ -208,12 +208,17 @@ router.delete('/history/:id', param('id').isUUID(), async (req, res) => {
 router.get('/devices', async (req, res) => {
   try {
     const rows = await query(
-      `SELECT d.id, d.name, d.ip_address, d.os_type, d.status, d.group_id, g.name AS group_name
+      `SELECT d.id, d.name, d.ip_address, d.os_type, d.status, d.group_id, g.name AS group_name,
+              (SELECT GROUP_CONCAT(dt.tag ORDER BY dt.tag SEPARATOR ',')
+                 FROM device_tags dt WHERE dt.device_id = d.id) AS tags_csv
          FROM devices d LEFT JOIN \`groups\` g ON g.id = d.group_id
         WHERE d.org_id = ? ORDER BY d.name`,
       [req.orgId]
     );
-    res.json(rows);
+    const tagFilter = (req.query.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    let out = rows.map(r => ({ ...r, tags: r.tags_csv ? r.tags_csv.split(',') : [], tags_csv: undefined }));
+    if (tagFilter.length) out = out.filter(d => d.tags.some(t => tagFilter.includes(t)));
+    res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -9,6 +9,7 @@ const EMPTY = {
   os_type: 'linux', group_id: '',
   ssh_username: '', ssh_password: '', ssh_key: '',
   winrm_username: '', winrm_password: '',
+  tags: [],
 }
 
 const F = ({ label, id, errors, children }) => (
@@ -378,6 +379,51 @@ function ImportPanel({ groups, onImported }) {
   )
 }
 
+// ── Tag chip editor ───────────────────────────────────────────────────────────
+// Freeform ad-hoc labels — type a word and hit Enter/comma to add it as a
+// chip, click the × to remove. Deliberately not tied to any fixed list;
+// autocomplete-from-existing-tags would be a nice follow-up but isn't
+// required for the core "slice the fleet without restructuring groups" use case.
+function TagInput({ tags, onChange }) {
+  const [draft, setDraft] = useState('')
+  const TAG_RE = /^[a-z0-9][a-z0-9_-]{0,49}$/i
+
+  const addTag = () => {
+    const t = draft.trim().toLowerCase()
+    setDraft('')
+    if (!t || tags.includes(t)) return
+    if (!TAG_RE.test(t)) return
+    onChange([...tags, t])
+  }
+  const removeTag = (t) => onChange(tags.filter(x => x !== t))
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1.5 mb-1.5">
+        {tags.map(t => (
+          <span key={t} className="inline-flex items-center gap-1 text-xs font-mono px-2 py-1 rounded-lg"
+            style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
+            {t}
+            <button type="button" onClick={() => removeTag(t)} className="hover:opacity-70">
+              <X size={11} />
+            </button>
+          </span>
+        ))}
+      </div>
+      <input
+        className="input-field"
+        placeholder="Type a tag and press Enter (e.g. prod, k8s-node)"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTag() }
+        }}
+        onBlur={addTag}
+      />
+    </div>
+  )
+}
+
 // ── Main Modal ────────────────────────────────────────────────────────────────
 export default function DeviceModal({ open, onClose, onSaved, device, groups }) {
   const [tab, setTab]         = useState('manual')
@@ -403,6 +449,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
         // on every edit. Fall back to rpc_username, which is what's actually there.
         winrm_username: device.rpc_username || device.winrm_username || '',
         winrm_password: '',
+        tags: device.tags || [],
       } : EMPTY)
       setErrors({})
     }
@@ -433,6 +480,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
     setLoading(true)
     try {
       const payload = { ...form }
+      delete payload.tags // saved separately via PUT /devices/:id/tags below
       if (!payload.group_id) payload.group_id = null
       if (!payload.ssh_password)   delete payload.ssh_password
       if (!payload.ssh_key)        delete payload.ssh_key
@@ -459,12 +507,22 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
         delete payload.winrm_password
       }
 
+      let deviceId = device?.id
       if (device) {
         await api.put(`/devices/${device.id}`, payload)
         toast.success('Device updated')
       } else {
-        await api.post('/devices', payload)
+        const { data } = await api.post('/devices', payload)
+        deviceId = data.id
         toast.success('Device added')
+      }
+      // Tags live in a separate join table (device_tags) rather than on the
+      // device row itself, so they're synced with their own call — cheap
+      // and keeps the main device payload/validation untouched.
+      if (deviceId) {
+        await api.put(`/devices/${deviceId}/tags`, { tags: form.tags }).catch(() => {
+          toast.error('Device saved, but tags failed to update')
+        })
       }
       onSaved(); onClose()
     } catch (err) {
@@ -552,6 +610,12 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
                     {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </F>
+
+                <div className="col-span-2">
+                  <F label="Tags" id="tags" errors={errors}>
+                    <TagInput tags={form.tags} onChange={t => set('tags', t)} />
+                  </F>
+                </div>
 
                 {isLinux ? (<>
                   <F label="SSH Username" id="ssh_username" errors={errors}>

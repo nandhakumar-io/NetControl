@@ -100,6 +100,9 @@ export default function BulkCommandPage() {
   const [loadingDevices, setLoadingDevices] = useState(true)
   const [search, setSearch] = useState('')
   const [groupFilter, setGroupFilter] = useState('all')
+  // Ad-hoc slice on top of the structural group filter — matches ANY of
+  // the selected tags (OR), same semantics as the Devices page tag filter.
+  const [tagFilter, setTagFilter] = useState(new Set())
   const [selected, setSelected] = useState(new Set())
 
   const [command, setCommand] = useState('')
@@ -263,14 +266,27 @@ export default function BulkCommandPage() {
     return [...map.entries()]
   }, [devices])
 
+  const allTags = useMemo(() => {
+    const set = new Set()
+    for (const d of devices) (d.tags || []).forEach(t => set.add(t))
+    return [...set].sort()
+  }, [devices])
+
+  const toggleTagFilter = (tag) => setTagFilter(prev => {
+    const next = new Set(prev)
+    next.has(tag) ? next.delete(tag) : next.add(tag)
+    return next
+  })
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return devices.filter(d => {
       if (groupFilter !== 'all' && (d.group_id || 'ungrouped') !== groupFilter) return false
+      if (tagFilter.size > 0 && !(d.tags || []).some(t => tagFilter.has(t))) return false
       if (!q) return true
       return d.name.toLowerCase().includes(q) || d.ip_address?.toLowerCase().includes(q)
     })
-  }, [devices, search, groupFilter])
+  }, [devices, search, groupFilter, tagFilter])
 
   const toggle = (id) => setSelected(prev => {
     const next = new Set(prev)
@@ -487,6 +503,25 @@ export default function BulkCommandPage() {
                 {groups.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
               </select>
             </div>
+
+            {allTags.length > 0 && (
+              <div className="px-4 pb-3 flex items-center gap-1.5 flex-wrap">
+                {allTags.map(tag => {
+                  const active = tagFilter.has(tag)
+                  return (
+                    <button key={tag} onClick={() => toggleTagFilter(tag)}
+                      className="text-[11px] font-mono px-2 py-1 rounded-lg transition-all"
+                      style={{
+                        background: active ? 'var(--brand-500, #a78bfa)' : 'var(--bg-surface-3)',
+                        color: active ? '#fff' : 'var(--text-muted)',
+                        border: `1px solid ${active ? 'transparent' : 'var(--border-subtle)'}`,
+                      }}>
+                      {tag}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
 
             <div className="px-4 pb-2 flex items-center justify-between">
               <button onClick={toggleAllFiltered} className="flex items-center gap-1.5 text-xs font-body font-medium" style={{ color: 'var(--text-muted)' }}>

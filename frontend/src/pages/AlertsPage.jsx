@@ -39,9 +39,9 @@ const ACTIONS_DEF = [
 ]
 const EMPTY = {
   name:'', metric:'cpu', operator:'gt', threshold:90,
-  severity:'warning', device_id:null, actions:['notify'],
+  severity:'warning', device_id:null, group_id:null, actions:['notify'],
   notify_admins:true, cooldown_sec:300, enabled:true,
-  runbook_action_ids: [],
+  runbook_action_ids: [], min_duration_sec: 0,
 }
 
 // ── Tiny helpers ──────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ function Toggle({ on, onChange }) {
 }
 
 // ── Rule form modal ────────────────────────────────────────────────────────────
-function RuleModal({ open, onClose, onSaved, rule, devices }) {
+function RuleModal({ open, onClose, onSaved, rule, devices, groups }) {
   const [form, setForm]   = useState(EMPTY)
   const [saving, setSaving] = useState(false)
   const [runbooks, setRunbooks] = useState([])
@@ -192,12 +192,28 @@ function RuleModal({ open, onClose, onSaved, rule, devices }) {
             )}
 
             <div className="grid grid-cols-2 gap-4">
-              {/* Target */}
+              {/* Target — a rule applies to exactly one of: a single device,
+                  every device in a group (dynamic — devices added later are
+                  automatically covered), or the whole org. */}
               <div>
                 <label className={lbl}>Apply To</label>
-                <select className={inp} value={form.device_id||''} onChange={e=>set('device_id',e.target.value||null)}>
-                  <option value="">All Devices</option>
-                  {devices.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
+                <select className={inp}
+                  value={form.group_id ? `group:${form.group_id}` : form.device_id ? `device:${form.device_id}` : ''}
+                  onChange={e => {
+                    const v = e.target.value
+                    if (v.startsWith('group:')) { set('group_id', v.slice(6)); set('device_id', null) }
+                    else if (v.startsWith('device:')) { set('device_id', v.slice(7)); set('group_id', null) }
+                    else { set('device_id', null); set('group_id', null) }
+                  }}>
+                  <option value="">All Devices (org-wide)</option>
+                  {groups?.length > 0 && (
+                    <optgroup label="Groups">
+                      {groups.map(g => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}
+                    </optgroup>
+                  )}
+                  <optgroup label="Individual devices">
+                    {devices.map(d => <option key={d.id} value={`device:${d.id}`}>{d.name}</option>)}
+                  </optgroup>
                 </select>
               </div>
 
@@ -208,6 +224,22 @@ function RuleModal({ open, onClose, onSaved, rule, devices }) {
                   {COOLDOWNS.map(c=><option key={c.v} value={c.v}>{c.l}</option>)}
                 </select>
               </div>
+            </div>
+
+            {/* Minimum sustained duration — 0 keeps the old immediate-notify
+                behavior; setting this suppresses the first notification
+                until the condition has held continuously this long (e.g.
+                "offline > 5 min", "CPU sustained high for 10 min"). */}
+            <div>
+              <label className={lbl}>Minimum Duration Before Notifying</label>
+              <select className={inp} value={form.min_duration_sec || 0} onChange={e=>set('min_duration_sec',+e.target.value)}>
+                <option value={0}>Notify immediately (no minimum)</option>
+                <option value={60}>1 minute</option>
+                <option value={300}>5 minutes</option>
+                <option value={600}>10 minutes</option>
+                <option value={900}>15 minutes</option>
+                <option value={1800}>30 minutes</option>
+              </select>
             </div>
 
             {/* Actions */}
@@ -380,10 +412,55 @@ function PushBanner() {
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
+// ── Rule template card ────────────────────────────────────────────────────────
+// Own local state for the scope picker (group vs. org-wide) so selecting a
+// scope on one card never affects any other card's pending selection.
+function TemplateCard({ tpl, groups, onEnable, enabling }) {
+  const [scopeId, setScopeId] = useState('')
+  const metricLabel = { cpu: 'CPU', ram: 'RAM', disk: 'Disk', offline: 'Offline', process_count: 'Process count' }[tpl.metric] || tpl.metric
+
+  return (
+    <div className="glass rounded-2xl p-4 flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-body font-semibold text-slate-100">{tpl.name}</p>
+          <p className="text-xs font-body mt-1 text-slate-400">{tpl.description}</p>
+        </div>
+        <SevBadge v={tpl.severity} sm />
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono text-slate-500">
+        <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">{metricLabel}</span>
+        <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">{tpl.operator === 'gt' ? '>' : '<'} {tpl.threshold}{tpl.metric !== 'offline' && tpl.metric !== 'process_count' ? '%' : ''}</span>
+        {tpl.min_duration_sec > 0 && (
+          <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">sustained {Math.round(tpl.min_duration_sec / 60)}min</span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 mt-auto pt-1">
+        <select className="input-field text-xs py-1.5 flex-1" value={scopeId} onChange={e => setScopeId(e.target.value)}>
+          <option value="">All devices (org-wide)</option>
+          {groups.map(g => <option key={g.id} value={g.id}>Group: {g.name}</option>)}
+        </select>
+        <button
+          onClick={() => onEnable(tpl.key, scopeId || null)}
+          disabled={enabling === tpl.key}
+          className="btn-primary text-xs px-3 py-1.5 shrink-0 disabled:opacity-50"
+        >
+          {enabling === tpl.key ? 'Enabling…' : 'Enable'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function AlertsPage() {
   const [rules,     setRules]     = useState([])
   const [triggered, setTriggered] = useState([])
   const [devices,   setDevices]   = useState([])
+  const [groups,    setGroups]    = useState([])
+  const [templates, setTemplates] = useState([])
+  const [enablingKey, setEnablingKey] = useState(null)
   const [loading,   setLoading]   = useState(true)
   const [tab,       setTab]       = useState('rules')
   const [showModal, setShowModal] = useState(false)
@@ -397,14 +474,18 @@ export default function AlertsPage() {
   const fetchAll = useCallback(async () => {
     try {
       setLoading(true)
-      const [r, t, d] = await Promise.all([
+      const [r, t, d, g, tpl] = await Promise.all([
         api.get('/alerts/rules'),
         api.get('/alerts/triggered?limit=300'),
         api.get('/devices'),
+        api.get('/groups').catch(() => ({ data: [] })),
+        api.get('/alerts/rule-templates').catch(() => ({ data: [] })),
       ])
       setRules(r.data)
       setTriggered(t.data)
       setDevices(d.data)
+      setGroups(g.data)
+      setTemplates(tpl.data)
     } catch (e) {
       toast.error('Failed to load alert data')
       console.error(e)
@@ -418,6 +499,22 @@ export default function AlertsPage() {
     }, 30000)
     return () => clearInterval(t)
   }, [])
+
+  // Enables a template rule scoped to a group (or org-wide if scopeId is
+  // null) — one click instead of building the same "disk > 90%" rule by
+  // hand every time a new client/lab gets onboarded.
+  const handleEnableTemplate = async (key, scopeId) => {
+    setEnablingKey(key)
+    try {
+      await api.post(`/alerts/rule-templates/${key}/enable`, scopeId ? { group_id: scopeId } : {})
+      toast.success('Rule enabled')
+      fetchAll()
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to enable rule')
+    } finally {
+      setEnablingKey(null)
+    }
+  }
 
   const ackAlert = async (id) => {
     setAckBusyId(id)
@@ -547,7 +644,7 @@ export default function AlertsPage() {
       <div className="flex flex-wrap items-center gap-3">
         {/* Tabs */}
         <div className="flex gap-0.5 p-1 rounded-xl glass">
-          {[['rules','Rules'],['history','History']].map(([v,l])=>(
+          {[['rules','Rules'],['templates','Templates'],['history','History']].map(([v,l])=>(
             <button key={v} onClick={()=>setTab(v)}
               className={`px-4 py-2 rounded-lg text-sm font-body font-medium transition-all
                 ${tab===v ? 'bg-brand-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}>
@@ -569,17 +666,19 @@ export default function AlertsPage() {
         )}
 
         {/* Severity filter */}
-        <div className="flex gap-1">
-          {['all','critical','warning','info'].map(s=>(
-            <button key={s} onClick={()=>setSevFilt(s)}
-              className={`chip text-xs ${sevFilt===s?'chip-selected':''}`}>
-              {s==='all'?'All Severity':s.charAt(0).toUpperCase()+s.slice(1)}
-            </button>
-          ))}
-        </div>
+        {tab !== 'templates' && (
+          <div className="flex gap-1">
+            {['all','critical','warning','info'].map(s=>(
+              <button key={s} onClick={()=>setSevFilt(s)}
+                className={`chip text-xs ${sevFilt===s?'chip-selected':''}`}>
+                {s==='all'?'All Severity':s.charAt(0).toUpperCase()+s.slice(1)}
+              </button>
+            ))}
+          </div>
+        )}
 
         <span className="ml-auto text-xs" style={textMuted}>
-          {tab==='rules' ? `${filtRules.length} rule${filtRules.length!==1?'s':''}` : `${filtTriggered.length} events`}
+          {tab==='rules' ? `${filtRules.length} rule${filtRules.length!==1?'s':''}` : tab==='templates' ? `${templates.length} templates` : `${filtTriggered.length} events`}
         </span>
       </div>
 
@@ -639,7 +738,7 @@ export default function AlertsPage() {
                         {m?.label}
                         {m?.hasThresh && ` ${rule.operator==='gt'?'>':'<'} ${rule.threshold}${m?.unit}`}
                         {' · '}cooldown {fmtCd(rule.cooldown_sec)}
-                        {' · '}{rule.device_name ? `📍 ${rule.device_name}` : '🌐 All devices'}
+                        {' · '}{rule.device_name ? `📍 ${rule.device_name}` : rule.group_name ? `👥 ${rule.group_name}` : '🌐 All devices'}
                         {fires > 0 && <span className="ml-2 text-amber-400"> ⚡ {fires} fires</span>}
                       </p>
 
@@ -687,6 +786,15 @@ export default function AlertsPage() {
               )
             })
           )}
+        </div>
+      )}
+
+      {/* ── Templates Tab ────────────────────────────────────────────────── */}
+      {tab === 'templates' && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {templates.map(tpl => (
+            <TemplateCard key={tpl.key} tpl={tpl} groups={groups} onEnable={handleEnableTemplate} enabling={enablingKey} />
+          ))}
         </div>
       )}
 
@@ -788,6 +896,7 @@ export default function AlertsPage() {
         onSaved={fetchAll}
         rule={editRule}
         devices={devices}
+        groups={groups}
       />
     </div>
   )

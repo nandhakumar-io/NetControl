@@ -313,6 +313,26 @@ async function flushToDB(results, nowSec, devices) {
       try {
         const { evaluateOffline } = require('../routes/alerts');
         setImmediate(() => evaluateOffline(r.id, r.name).catch(() => {}));
+
+        // evaluateOffline above only ever fires once, right at the moment
+        // of transition — fine for an immediate-notify rule, but a
+        // duration-gated one (e.g. the "offline > 5 min" template,
+        // min_duration_sec) needs additional chances to notice enough time
+        // has passed while the device is still down. Re-check once a
+        // minute, bailing out the moment it's back online (or after 30
+        // checks / ~30 min, so a device that stays offline for days
+        // doesn't leave a timer running indefinitely — the eventual
+        // online transition is what actually clears the incident anyway).
+        let checks = 0;
+        const recheck = setInterval(async () => {
+          checks++;
+          if (checks > 30) { clearInterval(recheck); return; }
+          try {
+            const current = await queryOne('SELECT status FROM devices WHERE id = ?', [r.id]);
+            if (!current || current.status !== 'offline') { clearInterval(recheck); return; }
+            await evaluateOffline(r.id, r.name);
+          } catch { clearInterval(recheck); }
+        }, 60000);
       } catch {}
       webhook.fire('device.offline', {
         device_id: r.id, device_name: r.name, severity: 'warning',

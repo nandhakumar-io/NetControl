@@ -89,9 +89,35 @@ function validateRow(row, index) {
   return errs;
 }
 
+// ── Tags helper ───────────────────────────────────────────────────────────────
+// device_tags is a separate join table (not a JSON column on devices) so
+// filtering by tag can use a real index instead of a LIKE scan, and so
+// "distinct tags in this org" is a cheap GROUP BY instead of parsing JSON
+// out of every device row.
+const TAG_RE = /^[a-z0-9][a-z0-9_-]{0,49}$/i;
+
+async function attachTags(devices) {
+  if (!devices.length) return devices;
+  const ids = devices.map(d => d.id);
+  const rows = await query(
+    `SELECT device_id, tag FROM device_tags WHERE device_id IN (${ids.map(() => '?').join(',')}) ORDER BY tag`,
+    ids
+  );
+  const byDevice = new Map();
+  for (const r of rows) {
+    if (!byDevice.has(r.device_id)) byDevice.set(r.device_id, []);
+    byDevice.get(r.device_id).push(r.tag);
+  }
+  return devices.map(d => ({ ...d, tags: byDevice.get(d.id) || [] }));
+}
+
 // ── GET /api/devices ─────────────────────────────────────────────────────────
+// ?tags=prod,k8s-node — optional ad-hoc filter, matches devices carrying ANY
+// of the listed tags (tags are freeform labels independent of the group
+// hierarchy, meant for exactly this kind of cross-cutting slice).
 router.get('/', async (req, res) => {
   try {
+    const tagFilter = (req.query.tags || '').split(',').map(t => t.trim()).filter(Boolean);
     let devices;
     if (req.user.role !== 'admin') {
       devices = await query(
@@ -107,8 +133,30 @@ router.get('/', async (req, res) => {
         [req.orgId]
       );
     }
-    const _ = null; // scoping done
+    devices = await attachTags(devices);
+    if (tagFilter.length) {
+      devices = devices.filter(d => d.tags.some(t => tagFilter.includes(t)));
+    }
     res.json(devices.map(sanitizeDevice));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/devices/tags ────────────────────────────────────────────────────
+// Distinct tag list for the org, with usage counts — powers the autocomplete
+// / tag-cloud filter bar. Must stay registered before GET /:id below, or
+// Express would try to match "tags" against the :id param (and 400 it, since
+// it's not a UUID).
+router.get('/tags', async (req, res) => {
+  try {
+    const rows = await query(
+      `SELECT dt.tag, COUNT(*) AS device_count
+         FROM device_tags dt
+         JOIN devices d ON d.id = dt.device_id
+        WHERE d.org_id = ?
+        GROUP BY dt.tag ORDER BY dt.tag`,
+      [req.orgId]
+    );
+    res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -138,7 +186,65 @@ router.get('/:id', param('id').isUUID(), async (req, res) => {
       );
     }
     if (!device) return res.status(404).json({ error: 'Device not found' });
-    res.json(sanitizeDevice(device));
+    const [withTags] = await attachTags([device]);
+    res.json(sanitizeDevice(withTags));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PUT /api/devices/:id/tags — replace the full tag set in one call ────────
+// Body: { tags: ["prod", "needs-review"] }. Simplest shape for a chip-editor
+// UI that just diffs and re-sends the whole set rather than issuing
+// individual add/remove calls per keystroke.
+router.put('/:id/tags', requireRole('admin', 'operator'), param('id').isUUID(), async (req, res) => {
+  if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    const tags = Array.isArray(req.body.tags) ? req.body.tags : [];
+    const clean = [...new Set(tags.map(t => String(t).trim().toLowerCase()).filter(Boolean))];
+    for (const t of clean) {
+      if (!TAG_RE.test(t)) return res.status(400).json({ error: `Invalid tag "${t}" — letters, numbers, "-", "_" only, 1-50 chars` });
+    }
+
+    await execute('DELETE FROM device_tags WHERE device_id = ?', [req.params.id]);
+    for (const t of clean) {
+      await execute(
+        'INSERT INTO device_tags (id, device_id, org_id, tag, created_at) VALUES (?, ?, ?, ?, ?)',
+        [uuidv4(), req.params.id, req.orgId, t, Math.floor(Date.now() / 1000)]
+      );
+    }
+    res.json({ ok: true, tags: clean });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /api/devices/:id/tags — add a single tag without disturbing others ─
+router.post('/:id/tags', requireRole('admin', 'operator'), param('id').isUUID(), async (req, res) => {
+  if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    const tag = String(req.body.tag || '').trim().toLowerCase();
+    if (!TAG_RE.test(tag)) return res.status(400).json({ error: 'Invalid tag — letters, numbers, "-", "_" only, 1-50 chars' });
+
+    await execute(
+      'INSERT IGNORE INTO device_tags (id, device_id, org_id, tag, created_at) VALUES (?, ?, ?, ?, ?)',
+      [uuidv4(), req.params.id, req.orgId, tag, Math.floor(Date.now() / 1000)]
+    );
+    res.status(201).json({ ok: true, tag });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── DELETE /api/devices/:id/tags/:tag ────────────────────────────────────────
+router.delete('/:id/tags/:tag', requireRole('admin', 'operator'), param('id').isUUID(), async (req, res) => {
+  if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    await execute(
+      'DELETE dt FROM device_tags dt JOIN devices d ON d.id = dt.device_id WHERE dt.device_id = ? AND dt.tag = ? AND d.org_id = ?',
+      [req.params.id, String(req.params.tag).toLowerCase(), req.orgId]
+    );
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

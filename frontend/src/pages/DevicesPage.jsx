@@ -255,6 +255,18 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
         </button>
       )}
 
+      {/* Tags — freeform ad-hoc labels, independent of the group hierarchy */}
+      {device.tags?.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-2.5" onClick={e => e.stopPropagation()}>
+          {device.tags.map(tag => (
+            <span key={tag} className="text-[11px] font-mono px-1.5 py-0.5 rounded-md"
+              style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Group tag */}
       {device.group_name && (
         <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid var(--border-subtle)' }}>
@@ -363,6 +375,16 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
       <div className="min-w-0">
         <p className="text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
         {group && <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
+        {device.tags?.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-1">
+            {device.tags.map(tag => (
+              <span key={tag} className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* IP */}
@@ -479,6 +501,11 @@ export default function DevicesPage() {
   const [osFilter, setOsFilter]         = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [groupFilter, setGroupFilter]   = useState('all')
+  // Freeform ad-hoc labels, independent of the group hierarchy — lets
+  // someone slice the fleet by e.g. "prod" + "k8s-node" without having to
+  // restructure groups just to get a temporary view.
+  const [tagFilter, setTagFilter]       = useState(new Set())
+  const [allTags, setAllTags]           = useState([]) // [{ tag, device_count }]
   const [viewMode, setViewMode]         = useState('grid')
   const [selectedIds, setSelectedIds]   = useState(new Set())
   const [deviceModal, setDeviceModal]   = useState(null)
@@ -495,9 +522,10 @@ export default function DevicesPage() {
     if (!quiet) setLoading(true)
     else setRefreshing(true)
     try {
-      const [d, g] = await Promise.all([api.get('/devices'), api.get('/groups')])
+      const [d, g, t] = await Promise.all([api.get('/devices'), api.get('/groups'), api.get('/devices/tags').catch(() => ({ data: [] }))])
       setDevices(d.data)
       setGroups(g.data)
+      setAllTags(t.data)
     } catch { toast.error('Failed to load devices') }
     finally { setLoading(false); setRefreshing(false) }
   }, [])
@@ -660,8 +688,9 @@ export default function DevicesPage() {
     if (osFilter !== 'all' && d.os_type !== osFilter) return false
     if (statusFilter !== 'all' && d.status !== statusFilter) return false
     if (groupFilter !== 'all' && d.group_id !== groupFilter) return false
+    if (tagFilter.size > 0 && !(d.tags || []).some(t => tagFilter.has(t))) return false
     return true
-  }), [manageableDevices, search, osFilter, statusFilter, groupFilter])
+  }), [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter])
 
   // Grouped for grid view
   const grouped = useMemo(() => {
@@ -677,9 +706,16 @@ export default function DevicesPage() {
   const onlineCount  = manageableDevices.filter(d => d.status === 'online').length
   const offlineCount = manageableDevices.filter(d => d.status === 'offline').length
   const unknownCount = manageableDevices.filter(d => !d.status || d.status === 'unknown').length
-  const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all'
+  const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all' || tagFilter.size > 0
 
-  const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all') }
+  const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()) }
+  const toggleTagFilter = (tag) => {
+    setTagFilter(prev => {
+      const next = new Set(prev)
+      next.has(tag) ? next.delete(tag) : next.add(tag)
+      return next
+    })
+  }
 
   // Map a device row (id/name) onto the shape DeviceRegistrationModal expects
   // (device_id/device_name), since the modal is shared with the live agent
@@ -835,6 +871,29 @@ export default function DevicesPage() {
             <option value="all">All Groups</option>
             {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
+        )}
+
+        {/* Tag filter — freeform ad-hoc slicing independent of groups; matches
+            ANY selected tag (OR), so picking "prod" + "k8s-node" shows every
+            device carrying either label rather than requiring both. */}
+        {allTags.length > 0 && (
+          <div className="flex items-center gap-1 flex-wrap">
+            {allTags.map(({ tag, device_count }) => {
+              const active = tagFilter.has(tag)
+              return (
+                <button key={tag} onClick={() => toggleTagFilter(tag)}
+                  title={`${device_count} device${device_count === 1 ? '' : 's'}`}
+                  className="text-xs font-mono px-2 py-1 rounded-lg transition-all"
+                  style={{
+                    background: active ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--bg-surface-3)',
+                    color: active ? '#fff' : 'var(--text-muted)',
+                    border: `1px solid ${active ? 'transparent' : 'var(--border-subtle)'}`,
+                  }}>
+                  {tag}
+                </button>
+              )
+            })}
+          </div>
         )}
 
         <div className="flex-1" />
