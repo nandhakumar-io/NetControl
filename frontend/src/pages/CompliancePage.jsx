@@ -10,6 +10,17 @@ import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import { usePermissions } from '../hooks/usePermissions'
 
+// "2m ago" / "3h ago" — faster to scan a snapshot history with than a full
+// absolute timestamp on every row; the exact time is still one hover away.
+function relativeTime(ts) {
+  if (!ts) return '—'
+  const diff = Math.floor(Date.now() / 1000) - ts
+  if (diff < 60) return 'just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
 // ── Status presentation ───────────────────────────────────────────────────────
 const STATUS_CFG = {
   unconfigured: { color: '#64748b', icon: HelpCircle,   label: 'Not Configured' },
@@ -197,8 +208,8 @@ function SnapshotRow({ snap, deviceId }) {
       <div className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-white/[0.02]" onClick={() => setOpen(o => !o)}>
         {open ? <ChevronDown size={12} style={{ color: 'var(--text-muted)' }} /> : <ChevronRight size={12} style={{ color: 'var(--text-muted)' }} />}
         <StatusPill status={snapStatus} />
-        <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
-          {new Date(snap.taken_at * 1000).toLocaleString()}
+        <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }} title={new Date(snap.taken_at * 1000).toLocaleString()}>
+          {relativeTime(snap.taken_at)}
         </span>
         {snap.error && <span className="text-[11px] font-body truncate" style={{ color: c.color }}>{snap.error}</span>}
       </div>
@@ -701,6 +712,9 @@ export default function CompliancePage() {
           <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
             {devices.length === 0 ? 'No devices to check yet' : 'No devices match this filter'}
           </p>
+          {devices.length > 0 && filter !== 'all' && (
+            <button onClick={() => setFilter('all')} className="btn-ghost text-sm">Clear filter</button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">

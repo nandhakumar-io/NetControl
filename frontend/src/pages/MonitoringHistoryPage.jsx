@@ -376,6 +376,7 @@ export default function MonitoringHistoryPage() {
     const activeId = viewMode === 'group' ? groupId : deviceId
     if (!activeId) return
     setExporting(which)
+    const toastId = toast.loading('Preparing export…')
     try {
       const from = which === 'A' ? rangeAB.fromA : rangeAB.fromB
       const to   = which === 'A' ? rangeAB.toA   : rangeAB.toB
@@ -389,9 +390,9 @@ export default function MonitoringHistoryPage() {
       a.href = url; a.download = filename
       document.body.appendChild(a); a.click(); a.remove()
       URL.revokeObjectURL(url)
-      toast.success('Metrics exported as CSV')
+      toast.success(`Downloaded ${filename}`, { id: toastId })
     } catch {
-      toast.error('Export failed')
+      toast.error('Export failed', { id: toastId })
     } finally {
       setExporting(null)
     }

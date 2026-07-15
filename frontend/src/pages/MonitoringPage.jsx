@@ -409,22 +409,24 @@ function DeviceDetail({ device, m, hist }) {
       {/* Top processes */}
       {m.processes?.length>0 && (
         <div className="rounded-xl overflow-hidden" style={{border:'1px solid var(--border-subtle)'}}>
-          <div className="grid px-4 py-2 text-[9px] font-bold uppercase tracking-wider"
-            style={{gridTemplateColumns:'52px 1fr 64px 64px 80px', background:'var(--bg-input)', borderBottom:'1px solid var(--border-subtle)', color:'var(--text-faint)'}}>
-            <span>PID</span><span>Process</span><span className="text-right">CPU</span><span className="text-right">MEM</span><span className="text-right">CPU Bar</span>
-          </div>
-          {m.processes.slice(0,8).map((p,i)=>(
-            <div key={i} className="grid px-4 py-2 items-center transition-colors"
-              style={{gridTemplateColumns:'52px 1fr 64px 64px 80px', borderBottom:i<m.processes.length-1?'1px solid var(--border-subtle)':'none'}}
-              onMouseEnter={e=>e.currentTarget.style.background='var(--bg-hover)'}
-              onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
-              <span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>{p.pid}</span>
-              <span className="text-[11px] font-mono truncate" style={{color:'var(--text-primary)'}}>{p.name}</span>
-              <span className="text-[10px] font-mono text-right font-bold" style={{color:cpuColor(p.cpu)}}>{(p.cpu||0).toFixed(1)}%</span>
-              <span className="text-[10px] font-mono text-right" style={{color:'var(--text-muted)'}}>{(p.mem||0).toFixed(1)}%</span>
-              <div className="pl-2"><Bar value={p.cpu||0} color={cpuColor(p.cpu)} h={4}/></div>
+          <div className="max-h-64 overflow-y-auto">
+            <div className="sticky top-0 z-10 grid px-4 py-2 text-[9px] font-bold uppercase tracking-wider"
+              style={{gridTemplateColumns:'52px 1fr 64px 64px 80px', background:'var(--bg-input)', borderBottom:'1px solid var(--border-subtle)', color:'var(--text-faint)'}}>
+              <span>PID</span><span>Process</span><span className="text-right">CPU</span><span className="text-right">MEM</span><span className="text-right">CPU Bar</span>
             </div>
-          ))}
+            {m.processes.slice(0,40).map((p,i)=>(
+              <div key={i} className="grid px-4 py-2 items-center transition-colors"
+                style={{gridTemplateColumns:'52px 1fr 64px 64px 80px', borderBottom:i<m.processes.length-1?'1px solid var(--border-subtle)':'none'}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-hover)'}
+                onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                <span className="text-[9px] font-mono" style={{color:'var(--text-faint)'}}>{p.pid}</span>
+                <span className="text-[11px] font-mono truncate" style={{color:'var(--text-primary)'}}>{p.name}</span>
+                <span className="text-[10px] font-mono text-right font-bold" style={{color:cpuColor(p.cpu)}}>{(p.cpu||0).toFixed(1)}%</span>
+                <span className="text-[10px] font-mono text-right" style={{color:'var(--text-muted)'}}>{(p.mem||0).toFixed(1)}%</span>
+                <div className="pl-2"><Bar value={p.cpu||0} color={cpuColor(p.cpu)} h={4}/></div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
