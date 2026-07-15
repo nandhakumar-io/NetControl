@@ -58,6 +58,15 @@ function formatDate(secOrIso) {
   return d.toLocaleString()
 }
 
+function formatDuration(startSec, endSec) {
+  if (!startSec || !endSec) return null
+  const secs = Math.max(0, endSec - startSec)
+  if (secs < 60) return `${secs}s`
+  const mins = Math.floor(secs / 60)
+  const rem  = secs % 60
+  return rem ? `${mins}m ${rem}s` : `${mins}m`
+}
+
 const STATUS_META = {
   completed: { icon: CheckCircle2, color: 'text-accent-green', bg: 'bg-accent-green/10 border-accent-green/20' },
   pending:   { icon: Loader2,      color: 'text-accent-yellow', bg: 'bg-accent-yellow/10 border-accent-yellow/20' },
@@ -319,6 +328,7 @@ export default function BackupsPage() {
       toast.error(`This backup was written to ${destLabel(row.destination_type)} — download it from there.`)
       return
     }
+    const toastId = toast.loading(`Preparing ${row.archive_name}…`)
     api.get(`/backup/${row.id}/download`, { responseType: 'blob' })
       .then(({ data }) => {
         const url = window.URL.createObjectURL(data)
@@ -326,8 +336,9 @@ export default function BackupsPage() {
         a.href = url; a.download = row.archive_name
         document.body.appendChild(a); a.click(); a.remove()
         window.URL.revokeObjectURL(url)
+        toast.success(`Downloaded ${row.archive_name}`, { id: toastId })
       })
-      .catch(() => toast.error('Download failed'))
+      .catch(() => toast.error('Download failed', { id: toastId }))
   }
 
   const handleDelete = async () => {
@@ -620,7 +631,9 @@ export default function BackupsPage() {
                         {b.archive_name || b.source_path}
                       </p>
                       <p className="text-xs font-mono truncate flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
-                        <Clock size={10} /> {formatDate(b.created_at)} · {b.format} · {formatBytes(b.size_bytes)} · by {b.created_by_name || 'unknown'}
+                        <Clock size={10} /> {formatDate(b.created_at)} · {b.format} · {formatBytes(b.size_bytes)}
+                        {formatDuration(b.created_at, b.completed_at) && ` · ${formatDuration(b.created_at, b.completed_at)}`}
+                        {` · by ${b.created_by_name || 'unknown'}`}
                       </p>
                       <p className="text-xs font-mono truncate flex items-center gap-1.5 mt-0.5" style={{ color: 'var(--text-muted)' }}>
                         <Server size={10} /> {b.device_name || 'This server'}
