@@ -37,6 +37,7 @@ const { agentRelayLimiter } = require('../middleware/rateLimiter');
 const jwt    = require('jsonwebtoken');
 const crypto = require('crypto');
 const bus    = require('./bus');
+const { redisReady: _redisReady, withRedisTimeout } = require('./redisSafe');
 require('dotenv').config();
 
 const router = express.Router();
@@ -44,13 +45,26 @@ const router = express.Router();
 const SESSION_TTL_SEC = 10 * 60;     // idle window before a session is reaped — matches services/sshProxy.js
 const CLOSED_TTL_SEC  = 30;          // grace period so in-flight polls still see `closed`
 const BUFFER_MAX_CHUNKS = 500;       // capped scrollback replay log, same approach as services/sshProxy.js
-const redis = bus.getClient();       // null in single-process fallback mode
+const redis = bus.getClient();       // non-null even if Redis is unreachable — see services/redisSafe.js
+function redisReady() { return _redisReady(redis, bus); }
 
 // ── Durable session state (Map when no Redis, Redis hash/lists when there is) ─
 //
 // In-memory fallback mirrors the exact shape/behavior of the original
 // implementation, so single-process dev is unchanged.
 const memSessions = new Map(); // sessionId -> { deviceId, deviceName, userId, inputQueue[], created, lastActive, agentConnected, closed }
+
+// Lazily creates a memSessions entry if one doesn't exist yet — needed
+// because a session can start out fully on Redis and only need the local
+// fallback later, mid-flight, if Redis becomes unreachable partway through.
+function ensureLocal(sessionId, defaults = {}) {
+  let s = memSessions.get(sessionId);
+  if (!s) {
+    s = { inputQueue: [], buffer: [], created: Date.now(), lastActive: Date.now(), agentConnected: false, closed: false, ...defaults };
+    memSessions.set(sessionId, s);
+  }
+  return s;
+}
 
 function sKey(id)  { return `term:session:${id}`; }
 function iKey(id)  { return `term:input:${id}`; }
@@ -60,77 +74,103 @@ function bKey(id)  { return `term:buf:${id}`; }
 
 async function createSession(sessionId, { deviceId, deviceName, userId }) {
   const now = Date.now();
-  if (redis) {
-    await redis.hset(sKey(sessionId), {
-      deviceId, deviceName, userId, created: now, lastActive: now,
-      agentConnected: '0', closed: '0',
-    });
-    await redis.expire(sKey(sessionId), SESSION_TTL_SEC);
-    await redis.sadd(aKey(), sessionId);
-  } else {
-    memSessions.set(sessionId, {
-      deviceId, deviceName, userId, inputQueue: [], buffer: [], created: now, lastActive: now,
-      agentConnected: false, closed: false,
-    });
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.hset(sKey(sessionId), {
+        deviceId, deviceName, userId, created: now, lastActive: now,
+        agentConnected: '0', closed: '0',
+      }));
+      await withRedisTimeout(redis.expire(sKey(sessionId), SESSION_TTL_SEC));
+      await withRedisTimeout(redis.sadd(aKey(), sessionId));
+      return;
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable creating session ${sessionId}, using local fallback:`, e.message);
+    }
   }
+  ensureLocal(sessionId, { deviceId, deviceName, userId, created: now, lastActive: now });
 }
 
 async function getSession(sessionId) {
-  if (redis) {
-    const h = await redis.hgetall(sKey(sessionId));
-    if (!h || !h.deviceId) return null;
-    return {
-      deviceId: h.deviceId, deviceName: h.deviceName, userId: h.userId,
-      created: Number(h.created), lastActive: Number(h.lastActive),
-      agentConnected: h.agentConnected === '1', closed: h.closed === '1',
-    };
+  if (redisReady()) {
+    try {
+      const h = await withRedisTimeout(redis.hgetall(sKey(sessionId)));
+      if (h && h.deviceId) {
+        return {
+          deviceId: h.deviceId, deviceName: h.deviceName, userId: h.userId,
+          created: Number(h.created), lastActive: Number(h.lastActive),
+          agentConnected: h.agentConnected === '1', closed: h.closed === '1',
+        };
+      }
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable reading session ${sessionId}, checking local fallback:`, e.message);
+    }
   }
   return memSessions.get(sessionId) || null;
 }
 
 async function touchSession(sessionId) {
   const now = Date.now();
-  if (redis) {
-    const exists = await redis.exists(sKey(sessionId));
-    if (!exists) return;
-    await redis.hset(sKey(sessionId), 'lastActive', now);
-    await redis.expire(sKey(sessionId), SESSION_TTL_SEC);
-  } else {
-    const s = memSessions.get(sessionId);
-    if (s) s.lastActive = now;
+  if (redisReady()) {
+    try {
+      const exists = await withRedisTimeout(redis.exists(sKey(sessionId)));
+      if (exists) {
+        await withRedisTimeout(redis.hset(sKey(sessionId), 'lastActive', now));
+        await withRedisTimeout(redis.expire(sKey(sessionId), SESSION_TTL_SEC));
+      }
+      return;
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable touching session ${sessionId}, using local fallback:`, e.message);
+    }
   }
+  const s = memSessions.get(sessionId);
+  if (s) s.lastActive = now;
 }
 
 async function markAgentConnected(sessionId) {
-  if (redis) await redis.hset(sKey(sessionId), 'agentConnected', '1');
-  else { const s = memSessions.get(sessionId); if (s) s.agentConnected = true; }
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.hset(sKey(sessionId), 'agentConnected', '1'));
+      return;
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable marking agent connected for ${sessionId}, using local fallback:`, e.message);
+    }
+  }
+  const s = memSessions.get(sessionId);
+  if (s) s.agentConnected = true;
 }
 
 async function closeSession(sessionId) {
-  if (redis) {
-    const key = sKey(sessionId);
-    if (await redis.exists(key)) await redis.hset(key, 'closed', '1');
-    await redis.expire(key, CLOSED_TTL_SEC);
-    await redis.del(iKey(sessionId));
-    await redis.del(bKey(sessionId));
-    await redis.srem(aKey(), sessionId);
-  } else {
-    const s = memSessions.get(sessionId);
-    if (s) s.closed = true;
-    memSessions.delete(sessionId);
+  if (redisReady()) {
+    try {
+      const key = sKey(sessionId);
+      if (await withRedisTimeout(redis.exists(key))) await withRedisTimeout(redis.hset(key, 'closed', '1'));
+      await withRedisTimeout(redis.expire(key, CLOSED_TTL_SEC));
+      await withRedisTimeout(redis.del(iKey(sessionId)));
+      await withRedisTimeout(redis.del(bKey(sessionId)));
+      await withRedisTimeout(redis.srem(aKey(), sessionId));
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable closing session ${sessionId}:`, e.message);
+    }
   }
+  const s = memSessions.get(sessionId);
+  if (s) s.closed = true;
+  memSessions.delete(sessionId);
 }
 
 async function listSessions() {
-  if (redis) {
-    const ids = await redis.smembers(aKey());
-    const out = [];
-    for (const id of ids) {
-      const s = await getSession(id);
-      if (!s) { redis.srem(aKey(), id).catch(() => {}); continue; }
-      out.push({ sessionId: id, deviceId: s.deviceId, deviceName: s.deviceName, agentConnected: s.agentConnected, created: s.created, lastActive: s.lastActive });
+  if (redisReady()) {
+    try {
+      const ids = await withRedisTimeout(redis.smembers(aKey()));
+      const out = [];
+      for (const id of ids) {
+        const s = await getSession(id);
+        if (!s) { redis.srem(aKey(), id).catch(() => {}); continue; }
+        out.push({ sessionId: id, deviceId: s.deviceId, deviceName: s.deviceName, agentConnected: s.agentConnected, created: s.created, lastActive: s.lastActive });
+      }
+      return out;
+    } catch (e) {
+      console.error('[WebTerminal] Redis unreachable listing sessions, falling back to local:', e.message);
     }
-    return out;
   }
   return Array.from(memSessions.entries()).map(([id, s]) => ({
     sessionId: id, deviceId: s.deviceId, deviceName: s.deviceName,
@@ -144,42 +184,58 @@ async function listSessions() {
 // hiccuped — see everything it missed instead of a blank terminal, without
 // needing the agent to resend anything.
 async function appendBuffer(sessionId, data) {
-  if (redis) {
-    await redis.rpush(bKey(sessionId), data);
-    await redis.ltrim(bKey(sessionId), -BUFFER_MAX_CHUNKS, -1);
-    await redis.expire(bKey(sessionId), SESSION_TTL_SEC);
-  } else {
-    const s = memSessions.get(sessionId);
-    if (s) {
-      s.buffer.push(data);
-      if (s.buffer.length > BUFFER_MAX_CHUNKS) s.buffer.splice(0, s.buffer.length - BUFFER_MAX_CHUNKS);
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.rpush(bKey(sessionId), data));
+      await withRedisTimeout(redis.ltrim(bKey(sessionId), -BUFFER_MAX_CHUNKS, -1));
+      await withRedisTimeout(redis.expire(bKey(sessionId), SESSION_TTL_SEC));
+      return;
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable buffering output for ${sessionId}, using local fallback:`, e.message);
     }
   }
+  const s = ensureLocal(sessionId);
+  s.buffer.push(data);
+  if (s.buffer.length > BUFFER_MAX_CHUNKS) s.buffer.splice(0, s.buffer.length - BUFFER_MAX_CHUNKS);
 }
 
 async function getBuffer(sessionId) {
-  if (redis) return (await redis.lrange(bKey(sessionId), 0, -1)).join('');
+  if (redisReady()) {
+    try {
+      return (await withRedisTimeout(redis.lrange(bKey(sessionId), 0, -1))).join('');
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable reading buffer for ${sessionId}, using local fallback:`, e.message);
+    }
+  }
   return (memSessions.get(sessionId)?.buffer || []).join('');
 }
 
 // ── Input queue (browser keystrokes -> waiting agent poll) ────────────────────
 async function pushInput(sessionId, data) {
-  if (redis) {
-    await redis.rpush(iKey(sessionId), data);
-    await redis.expire(iKey(sessionId), SESSION_TTL_SEC);
-  } else {
-    const s = memSessions.get(sessionId);
-    if (s) s.inputQueue.push(data);
+  let usedRedis = false;
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.rpush(iKey(sessionId), data));
+      await withRedisTimeout(redis.expire(iKey(sessionId), SESSION_TTL_SEC));
+      usedRedis = true;
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable queuing input for ${sessionId}, using local fallback:`, e.message);
+    }
   }
+  if (!usedRedis) ensureLocal(sessionId).inputQueue.push(data);
   bus.publish(`term:input-ready:${sessionId}`, {});
 }
 
 async function drainInput(sessionId) {
-  if (redis) {
-    const key = iKey(sessionId);
-    const items = await redis.lrange(key, 0, -1);
-    if (items.length) await redis.del(key);
-    return items.join('');
+  if (redisReady()) {
+    try {
+      const key = iKey(sessionId);
+      const items = await withRedisTimeout(redis.lrange(key, 0, -1));
+      if (items.length) await withRedisTimeout(redis.del(key));
+      return items.join('');
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable draining input for ${sessionId}, using local fallback:`, e.message);
+    }
   }
   const s = memSessions.get(sessionId);
   if (!s || !s.inputQueue.length) return '';
@@ -188,20 +244,29 @@ async function drainInput(sessionId) {
 
 // ── Pending-for-agent queue (one per device — "a browser is waiting for you") ─
 async function enqueuePending(deviceId, sessionId) {
-  if (redis) {
-    await redis.rpush(pKey(deviceId), sessionId);
-    await redis.expire(pKey(deviceId), 60);
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.rpush(pKey(deviceId), sessionId));
+      await withRedisTimeout(redis.expire(pKey(deviceId), 60));
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable enqueuing pending session for device ${deviceId} — agent poll will still pick it up via local fallback:`, e.message);
+    }
   }
   bus.publish(`term:pending-ready:${deviceId}`, {});
 }
 
 async function dequeuePending(deviceId) {
-  if (redis) {
-    while (true) {
-      const id = await redis.lpop(pKey(deviceId));
-      if (!id) return null;
-      const s = await getSession(id);
-      if (s && !s.closed && !s.agentConnected) return id;
+  if (redisReady()) {
+    try {
+      while (true) {
+        const id = await withRedisTimeout(redis.lpop(pKey(deviceId)));
+        if (!id) break;
+        const s = await getSession(id);
+        if (s && !s.closed && !s.agentConnected) return id;
+      }
+      return null;
+    } catch (e) {
+      console.error(`[WebTerminal] Redis unreachable dequeuing pending for device ${deviceId}, checking local fallback:`, e.message);
     }
   }
   for (const [id, s] of memSessions.entries()) {
@@ -214,7 +279,7 @@ async function dequeuePending(deviceId) {
 setInterval(async () => {
   try {
     const cutoff = Date.now() - SESSION_TTL_SEC * 1000;
-    const sessions = redis ? await listSessions() : Array.from(memSessions.entries()).map(([id, s]) => ({ sessionId: id, lastActive: s.lastActive }));
+    const sessions = await listSessions();
     for (const s of sessions) {
       if (s.lastActive < cutoff) {
         bus.publish(`term:output:${s.sessionId}`, { type: 'closed', data: '\r\n[Session expired — no activity for 5 min]\r\n' });

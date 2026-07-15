@@ -40,6 +40,7 @@ const { verifyDeviceOrgAccess } = require('../middleware/tenant');
 const { decrypt }         = require('./crypto');
 const { tofuVerifier }    = require('./sshHostKeys');
 const bus                 = require('./bus');
+const { redisReady: _redisReady, withRedisTimeout } = require('./redisSafe');
 require('dotenv').config();
 
 const IDLE_TTL_SEC   = 10 * 60; // no attached client + no activity for this long -> reaped
@@ -47,7 +48,8 @@ const CLOSED_TTL_SEC = 30;      // grace period so a browser mid-reconnect still
 const BUFFER_MAX_CHUNKS = 500;  // capped scrollback replay log, mirrors bulkCommand.js's event log approach
 const LOCK_TTL_MS    = 5000;    // ownership race guard while two workers' 'connect' race each other
 
-const redis = bus.getClient(); // null in single-process fallback mode
+const redis = bus.getClient(); // non-null even if Redis is unreachable — see services/redisSafe.js
+function redisReady() { return _redisReady(redis, bus); }
 
 // ── Local (per-worker) state ────────────────────────────────────────────────
 // Only the worker that actually owns the ssh2.Client for a session has an
@@ -55,7 +57,19 @@ const redis = bus.getClient(); // null in single-process fallback mode
 // browser also tracks a bus-unsubscribe handle per (key, ws) so it can
 // clean up on ws close.
 const owned = new Map();          // key -> { conn, stream, device, sweepTimer }
-const localSessions = new Map();  // key -> { device, cols, rows, buffer:[], lastActive, status } — Redis-less fallback only
+const localSessions = new Map();  // key -> { device, cols, rows, buffer:[], lastActive, status } — Redis-less/fallback state
+
+// Lazily creates a localSessions entry if one doesn't exist yet — needed
+// because a session can start out fully on Redis and only need the local
+// fallback later, mid-flight, if Redis becomes unreachable partway through.
+function ensureLocal(key, defaults = {}) {
+  let s = localSessions.get(key);
+  if (!s) {
+    s = { buffer: [], lastActive: Date.now(), status: 'connecting', cols: 80, rows: 24, ...defaults };
+    localSessions.set(key, s);
+  }
+  return s;
+}
 
 function sessKey(userId, deviceId) { return `${userId}:${deviceId}`; }
 function mKey(key) { return `sshterm:meta:${key}`; }
@@ -67,67 +81,88 @@ function ctlChan(key) { return `sshterm:control:${key}`; }
 
 // ── Durable session metadata ────────────────────────────────────────────────
 async function getMeta(key) {
-  if (redis) {
-    const h = await redis.hgetall(mKey(key));
-    if (!h || !h.status) return null;
-    return { ...h, cols: Number(h.cols) || 80, rows: Number(h.rows) || 24, lastActive: Number(h.lastActive) };
+  if (redisReady()) {
+    try {
+      const h = await withRedisTimeout(redis.hgetall(mKey(key)));
+      if (h && h.status) return { ...h, cols: Number(h.cols) || 80, rows: Number(h.rows) || 24, lastActive: Number(h.lastActive) };
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable reading session ${key}, checking local fallback:`, e.message);
+    }
   }
   const s = localSessions.get(key);
   if (!s) return null;
-  return { deviceId: s.device.id, deviceName: s.device.name, cols: s.cols, rows: s.rows, status: s.status, lastActive: s.lastActive };
+  return { deviceId: s.device?.id, deviceName: s.device?.name, cols: s.cols, rows: s.rows, status: s.status, lastActive: s.lastActive };
 }
 
 async function setMeta(key, fields) {
-  if (redis) {
-    await redis.hset(mKey(key), fields);
-    await redis.expire(mKey(key), IDLE_TTL_SEC);
-  } else {
-    const s = localSessions.get(key);
-    if (s) Object.assign(s, fields);
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.hset(mKey(key), fields));
+      await withRedisTimeout(redis.expire(mKey(key), IDLE_TTL_SEC));
+      return;
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable writing session ${key}, using local fallback:`, e.message);
+    }
   }
+  Object.assign(ensureLocal(key), fields);
 }
 
 async function touchMeta(key) {
   const now = Date.now();
-  if (redis) {
-    if (await redis.exists(mKey(key))) {
-      await redis.hset(mKey(key), 'lastActive', now);
-      await redis.expire(mKey(key), IDLE_TTL_SEC);
-      await redis.expire(bKey(key), IDLE_TTL_SEC);
+  if (redisReady()) {
+    try {
+      if (await withRedisTimeout(redis.exists(mKey(key)))) {
+        await withRedisTimeout(redis.hset(mKey(key), 'lastActive', now));
+        await withRedisTimeout(redis.expire(mKey(key), IDLE_TTL_SEC));
+        await withRedisTimeout(redis.expire(bKey(key), IDLE_TTL_SEC));
+      }
+      return;
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable touching session ${key}, using local fallback:`, e.message);
     }
-  } else {
-    const s = localSessions.get(key);
-    if (s) s.lastActive = now;
   }
+  const s = localSessions.get(key);
+  if (s) s.lastActive = now;
 }
 
 async function appendBuffer(key, chunk) {
-  if (redis) {
-    await redis.rpush(bKey(key), chunk);
-    await redis.ltrim(bKey(key), -BUFFER_MAX_CHUNKS, -1);
-    await redis.expire(bKey(key), IDLE_TTL_SEC);
-  } else {
-    const s = localSessions.get(key);
-    if (s) {
-      s.buffer.push(chunk);
-      if (s.buffer.length > BUFFER_MAX_CHUNKS) s.buffer.splice(0, s.buffer.length - BUFFER_MAX_CHUNKS);
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.rpush(bKey(key), chunk));
+      await withRedisTimeout(redis.ltrim(bKey(key), -BUFFER_MAX_CHUNKS, -1));
+      await withRedisTimeout(redis.expire(bKey(key), IDLE_TTL_SEC));
+      return;
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable buffering output for ${key}, using local fallback:`, e.message);
     }
   }
+  const s = ensureLocal(key);
+  s.buffer.push(chunk);
+  if (s.buffer.length > BUFFER_MAX_CHUNKS) s.buffer.splice(0, s.buffer.length - BUFFER_MAX_CHUNKS);
 }
 
 async function getBuffer(key) {
-  if (redis) return (await redis.lrange(bKey(key), 0, -1)).join('');
+  if (redisReady()) {
+    try {
+      return (await withRedisTimeout(redis.lrange(bKey(key), 0, -1))).join('');
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable reading buffer for ${key}, using local fallback:`, e.message);
+    }
+  }
   return (localSessions.get(key)?.buffer || []).join('');
 }
 
 async function clearSession(key) {
-  if (redis) {
-    await redis.hset(mKey(key), 'status', 'closed');
-    await redis.expire(mKey(key), CLOSED_TTL_SEC);
-    await redis.del(bKey(key));
-  } else {
-    localSessions.delete(key);
+  if (redisReady()) {
+    try {
+      await withRedisTimeout(redis.hset(mKey(key), 'status', 'closed'));
+      await withRedisTimeout(redis.expire(mKey(key), CLOSED_TTL_SEC));
+      await withRedisTimeout(redis.del(bKey(key)));
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable clearing session ${key}:`, e.message);
+    }
   }
+  localSessions.delete(key);
 }
 
 // Cheap mutual-exclusion so two WebSockets connecting to the same
@@ -137,9 +172,15 @@ async function clearSession(key) {
 // session exists yet" and each open a duplicate SSH connection. Loses the
 // race gracefully: the loser just attaches as a relay client instead.
 async function acquireOwnerLock(key) {
-  if (!redis) return true; // single-process: local Map access is already synchronous/atomic enough
-  const ok = await redis.set(lKey(key), '1', 'NX', 'PX', LOCK_TTL_MS);
-  return ok === 'OK';
+  if (redisReady()) {
+    try {
+      const ok = await withRedisTimeout(redis.set(lKey(key), '1', 'NX', 'PX', LOCK_TTL_MS));
+      return ok === 'OK';
+    } catch (e) {
+      console.error(`[SSHProxy] Redis unreachable acquiring owner lock for ${key}, proceeding as sole owner:`, e.message);
+    }
+  }
+  return true; // single-process/fallback: local Map access is already synchronous/atomic enough
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -272,7 +313,7 @@ async function becomeOwner(key, device, cols, rows) {
     deviceId: device.id, deviceName: device.name, cols, rows,
     status: 'connecting', lastActive: Date.now(),
   });
-  if (!redis) localSessions.set(key, { device, cols, rows, buffer: [], lastActive: Date.now(), status: 'connecting' });
+  Object.assign(ensureLocal(key), { device, cols, rows, status: 'connecting' });
 
   bus.publish(outChan(key), { type: 'status', data: `Connecting to ${device.ip_address}…` });
 

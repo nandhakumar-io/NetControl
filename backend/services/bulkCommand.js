@@ -34,6 +34,7 @@ const ssh = require('./ssh');
 const winrm = require('./winrm');
 const audit = require('./audit');
 const bus = require('./bus');
+const { redisReady: _redisReady, withRedisTimeout } = require('./redisSafe');
 
 const MAX_CONCURRENCY = 8;       // don't open 40 simultaneous SSH/WinRM connections at once
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -47,26 +48,11 @@ const redis = bus.getClient(); // non-null object even if Redis is unreachable �
                                 // presence does NOT mean commands will actually succeed.
 const memJobs = new Map();     // runId -> job, used whenever Redis isn't actually usable
 
-// Whether Redis is not just configured but actually reachable right now.
-// bus.js already tracks this (it pings/reconnects continuously) — reuse
-// that instead of hanging on a redis.hset() call that may never resolve
-// because ioredis queues commands while disconnected rather than failing
-// fast. This is exactly what made a misconfigured REDIS_URL (e.g. pointing
-// at "localhost" from inside a container where Redis is a separate
-// container) look like "the run just sits there forever, nothing
-// executes" instead of a loud, obvious connection error.
+// Whether Redis is not just configured but actually reachable right now —
+// see services/redisSafe.js for why this check (not just `!!redis`)
+// matters, and why every Redis call below is wrapped in withRedisTimeout.
 function redisReady() {
-  return !!redis && bus.getStatus().connected === true;
-}
-
-// Wraps a Redis call so a slow/hung connection can't stall a run — if it
-// doesn't settle quickly, or throws, the caller falls back to the
-// in-memory path for that operation instead of the whole run hanging.
-function withRedisTimeout(promise, ms = 3000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Redis call timed out')), ms)),
-  ]);
+  return _redisReady(redis, bus);
 }
 
 function jKey(id) { return `bulk:job:${id}`; }
