@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Building2, Plus, X, Loader2, Users, ArrowRightLeft, Trash2,
-  Crown, Eye, Wrench, Gauge, Check, KeyRound,
+  Crown, Eye, Wrench, Gauge, Check, KeyRound, HardDrive,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -20,11 +20,41 @@ import EnrollmentTokenModal from '../components/modals/EnrollmentTokenModal'
 
 const ROLE_ICON = { admin: Crown, operator: Wrench, viewer: Eye }
 
+// Small "340 / 500 devices" bar shown per org card. Purely a visibility
+// feature today (no enforcement change) — the limit already exists on
+// `organizations.device_limit` and GET /orgs/:id/usage already computes
+// over_limit server-side; this just surfaces it instead of the raw number
+// silently sitting in the org's settings, which is the natural first step
+// before any billing/upsell hook goes in front of it.
+function UsageBar({ usage, deviceLimit }) {
+  if (!usage) {
+    return (
+      <p className="text-xs text-slate-500 mt-0.5">limit {deviceLimit} devices</p>
+    )
+  }
+  const pctUsed = deviceLimit > 0 ? Math.min(100, (usage.device_count / deviceLimit) * 100) : 0
+  const barColor = usage.over_limit ? 'bg-accent-red' : pctUsed >= 85 ? 'bg-amber-400' : 'bg-brand-400'
+  return (
+    <div className="mt-1 max-w-[220px]">
+      <div className="flex items-center justify-between mb-0.5">
+        <span className={`text-[11px] font-mono ${usage.over_limit ? 'text-accent-red font-semibold' : 'text-slate-500'}`}>
+          {usage.device_count} / {usage.device_limit} devices
+        </span>
+        {usage.over_limit && <span className="text-[10px] uppercase font-bold text-accent-red">Over limit</span>}
+      </div>
+      <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+        <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pctUsed}%` }} />
+      </div>
+    </div>
+  )
+}
+
 export default function OrganizationsPage() {
   const user = useAuthStore(s => s.user)
   const [orgs, setOrgs] = useState([])
   const [activeOrgId, setActiveOrgId] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [usageByOrg, setUsageByOrg] = useState({})
   const [showCreate, setShowCreate] = useState(false)
   const [managingOrg, setManagingOrg] = useState(null)
   const [tokenOrg, setTokenOrg] = useState(null)
@@ -35,6 +65,19 @@ export default function OrganizationsPage() {
       const { data } = await api.get('/orgs')
       setOrgs(data.orgs)
       setActiveOrgId(data.active_org_id)
+
+      // GET /orgs/:id/usage requires *membership* in that org, not that it
+      // be the caller's currently-active one — requireOrgContext accepts an
+      // X-Org-Id header for exactly this ("look at another org I belong to
+      // without switching into it"). Fetching every membership's usage in
+      // parallel here means a user with several client orgs sees all their
+      // fleet-vs-limit numbers at a glance, not just the active one.
+      const results = await Promise.allSettled(
+        data.orgs.map(o => api.get(`/orgs/${o.id}/usage`, { headers: { 'X-Org-Id': o.id } }))
+      )
+      const usage = {}
+      results.forEach((r, i) => { if (r.status === 'fulfilled') usage[data.orgs[i].id] = r.value.data })
+      setUsageByOrg(usage)
     } catch (e) {
       toast.error(e.response?.data?.error || 'Failed to load organizations')
     } finally {
@@ -88,13 +131,17 @@ export default function OrganizationsPage() {
       />
 
       {activeOrg && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
           <StatCard icon={Building2} label="Active organization" value={activeOrg.name}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
           <StatCard icon={Gauge} label="Plan" value={activeOrg.plan}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
           <StatCard icon={Users} label="Your role here" value={activeOrg.org_role}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
+          <StatCard icon={HardDrive} label="Devices used"
+            value={usageByOrg[activeOrg.id] ? `${usageByOrg[activeOrg.id].device_count} / ${usageByOrg[activeOrg.id].device_limit}` : '—'}
+            iconBg={usageByOrg[activeOrg.id]?.over_limit ? 'bg-accent-red/15 border-accent-red/25' : 'bg-brand-500/15 border-brand-500/25'}
+            iconColor={usageByOrg[activeOrg.id]?.over_limit ? 'text-accent-red' : 'text-brand-400'} />
         </div>
       )}
 
@@ -125,8 +172,9 @@ export default function OrganizationsPage() {
                         {org.suspended ? <span className="text-[10px] uppercase font-bold text-accent-red">Suspended</span> : null}
                       </p>
                       <p className="text-xs text-slate-500 flex items-center gap-1">
-                        <RoleIcon size={11} /> {org.org_role} · {org.plan} plan · limit {org.device_limit} devices
+                        <RoleIcon size={11} /> {org.org_role} · {org.plan} plan
                       </p>
+                      <UsageBar usage={usageByOrg[org.id]} deviceLimit={org.device_limit} />
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">

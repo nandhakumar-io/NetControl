@@ -265,6 +265,105 @@ function FleetOverview({ devices, metrics, groups }) {
 }
 
 // ─── Expanded device detail ───────────────────────────────────────────────────
+// ─── 24h Bandwidth history (durable metrics_history, not the live sparkline) ──
+// The Network I/O card above only shows the last ~25 min from the in-memory
+// per-worker store — gone on refresh/restart. This panel instead reads the
+// durable GET /api/metrics/:deviceId/history?range=24h endpoint (backed by
+// metrics_history / metrics_history_daily), so it survives restarts and is
+// long enough to spot an odd pattern — a backup job saturating the NIC at
+// 3am, or a host quietly pushing far more data out than the rest of its
+// group, which is exactly the kind of thing a 25-minute window can't show.
+function BandwidthHistoryPanel({ deviceId }) {
+  const [open, setOpen]       = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState(null)
+  const [points, setPoints]   = useState([])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoading(true); setError(null)
+    api.get(`/metrics/${deviceId}/history`, { params: { range: '24h' } })
+      .then(({ data }) => { if (!cancelled) setPoints(data.points || []) })
+      .catch(e => { if (!cancelled) setError(e?.response?.data?.error || 'Failed to load history') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open, deviceId])
+
+  const chartData = useMemo(() => points.map(p => ({
+    t: new Date(p.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    rx: p.net_rx_avg != null ? p.net_rx_avg / 1024 : null,   // B/s -> KB/s
+    tx: p.net_tx_avg != null ? p.net_tx_avg / 1024 : null,
+  })), [points])
+
+  // Rough total transferred over the window: avg bytes/sec * bucket width,
+  // summed across buckets — good enough to answer "how much did this move
+  // in the last day", not meant to be billing-accurate.
+  const totals = useMemo(() => {
+    if (!points.length) return null
+    const bucketSec = points.length > 1 ? (points[1].ts - points[0].ts) : 300
+    const toGB = bytesPerSec => bytesPerSec.reduce((s, v) => s + (v || 0), 0) * bucketSec / (1024 ** 3)
+    return {
+      rxGB: toGB(points.map(p => p.net_rx_avg || 0)),
+      txGB: toGB(points.map(p => p.net_tx_avg || 0)),
+    }
+  }, [points])
+
+  return (
+    <div className="rounded-xl" style={{background:'var(--bg-input)',border:'1px solid var(--border-subtle)'}}>
+      <button onClick={()=>setOpen(o=>!o)}
+        className="w-full flex items-center justify-between px-3 py-2.5">
+        <div className="flex items-center gap-1.5">
+          <History size={11} style={{color:'#06b6d4'}}/>
+          <span className="text-[9px] font-bold uppercase tracking-wider" style={{color:'var(--text-muted)'}}>24h Bandwidth History</span>
+        </div>
+        {open ? <ChevronUp size={13} style={{color:'var(--text-faint)'}}/> : <ChevronDown size={13} style={{color:'var(--text-faint)'}}/>}
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3">
+          {loading && <p className="text-[10px] font-mono py-4 text-center opacity-40" style={{color:'var(--text-muted)'}}>Loading 24h history…</p>}
+          {error && <p className="text-[10px] font-mono py-4 text-center" style={{color:'#ef4444'}}>{error}</p>}
+          {!loading && !error && chartData.length === 0 && (
+            <p className="text-[10px] font-mono py-4 text-center opacity-40" style={{color:'var(--text-muted)'}}>No history yet for this window</p>
+          )}
+          {!loading && !error && chartData.length > 0 && (
+            <>
+              {totals && (
+                <div className="flex gap-5 mb-2 px-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <ArrowDown size={9} style={{color:'#22c55e'}}/>
+                    <span className="text-[10px] font-mono" style={{color:'var(--text-faint)'}}>24h total in:</span>
+                    <span className="text-[11px] font-mono font-bold" style={{color:'#22c55e'}}>{totals.rxGB.toFixed(2)} GB</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <ArrowUp size={9} style={{color:'#f97316'}}/>
+                    <span className="text-[10px] font-mono" style={{color:'var(--text-faint)'}}>24h total out:</span>
+                    <span className="text-[11px] font-mono font-bold" style={{color:'#f97316'}}>{totals.txGB.toFixed(2)} GB</span>
+                  </div>
+                </div>
+              )}
+              <div style={{height:120}}>
+                <ResponsiveContainer width="100%" height={120}>
+                  <LineChart data={chartData} margin={{top:4,right:4,left:0,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" vertical={false}/>
+                    <XAxis dataKey="t" tick={{fontSize:9, fill:'var(--text-faint)'}} interval="preserveStartEnd" axisLine={false} tickLine={false}/>
+                    <YAxis tick={{fontSize:9, fill:'var(--text-faint)'}} width={40} axisLine={false} tickLine={false}
+                      tickFormatter={v => v>=1024 ? `${(v/1024).toFixed(0)}MB` : `${v.toFixed(0)}KB`}/>
+                    <Tooltip content={<ChartTT/>}/>
+                    <Line type="monotone" dataKey="rx" name="RX (KB/s)" stroke="#22c55e" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
+                    <Line type="monotone" dataKey="tx" name="TX (KB/s)" stroke="#f97316" strokeWidth={1.5} dot={false} isAnimationActive={false}/>
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DeviceDetail({ device, m, hist }) {
   const cpuVal  = m?.cpu ?? null
   const ramPct  = m?.ram ? pct(m.ram.used,m.ram.total) : null
@@ -405,6 +504,9 @@ function DeviceDetail({ device, m, hist }) {
           </div>
         </div>
       </div>
+
+      {/* 24h bandwidth (durable history, distinct from the live sparkline above) */}
+      <BandwidthHistoryPanel deviceId={device.id}/>
 
       {/* Top processes */}
       {m.processes?.length>0 && (
