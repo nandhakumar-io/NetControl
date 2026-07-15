@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Bookmark, Plus, X, Check, ChevronDown } from 'lucide-react'
 import api from '../../lib/api'
-import { useAuthStore } from '../store/authStore'
+import { useAuthStore } from '../../store/authStore'
 
 export default function SavedViews({ page, filters, onApply, isLight }) {
   const user = useAuthStore(s => s.user)
