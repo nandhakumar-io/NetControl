@@ -814,12 +814,22 @@ router.post('/:id/approve-registration', requireRole('admin'), param('id').isUUI
 // ── PUT /api/devices/bulk-update — Edit shared fields across many devices ───
 //
 //  Accepts: { deviceIds: [uuid, ...], updates: { group_id?, os_type?,
-//             ssh_username?, ssh_password?, ssh_key?, rpc_username?, rpc_password? } }
+//             ssh_username?, ssh_password?, ssh_key?, rpc_username?, rpc_password?,
+//             tags?, tagsMode? } }
 //
 //  Only keys PRESENT in `updates` are touched — this lets the caller change
 //  just the group, or just credentials, without clobbering every device's
 //  other fields. This must be registered before PUT /:id, otherwise Express
 //  would match "bulk-update" as an :id param and 400 on the UUID check.
+//
+//  tags is handled separately from the SET-clause fields above because tags
+//  live in device_tags (a join table, same reasoning as the single-device
+//  tag routes above), not a column on devices. tagsMode controls how the
+//  given tags combine with whatever a device already has:
+//    - 'add' (default): union — non-destructive, safe as the default for a
+//      bulk action so it can't silently wipe tags nobody meant to touch.
+//    - 'replace': every selected device ends up with exactly this tag set,
+//      same semantics as PUT /:id/tags on a single device.
 //
 //  Security: admin-only (same as single-device edit). Credentials are
 //  encrypted the same way as the single-device PUT route below.
@@ -835,6 +845,9 @@ router.put('/bulk-update',
   body('updates.ssh_key').optional({ nullable: true }).isLength({ max: 10000 }),
   body('updates.rpc_username').optional({ nullable: true }).trim().isLength({ max: 100 }),
   body('updates.rpc_password').optional({ nullable: true }).isLength({ max: 500 }),
+  body('updates.tags').optional().isArray({ max: 20 }).withMessage('At most 20 tags'),
+  body('updates.tags.*').optional().isString().isLength({ max: 50 }),
+  body('updates.tagsMode').optional().isIn(['add', 'replace']),
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -842,7 +855,8 @@ router.put('/bulk-update',
     const { deviceIds, updates } = req.body;
     const ALLOWED = ['group_id', 'os_type', 'ssh_username', 'ssh_password', 'ssh_key', 'rpc_username', 'rpc_password'];
     const fields = Object.keys(updates || {}).filter(k => ALLOWED.includes(k));
-    if (fields.length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+    const hasTags = Array.isArray(updates.tags) && updates.tags.length > 0;
+    if (fields.length === 0 && !hasTags) return res.status(400).json({ error: 'No valid fields to update' });
 
     try {
       if (updates.group_id) {
@@ -875,6 +889,42 @@ router.put('/bulk-update',
         `UPDATE devices SET ${setClauses.join(', ')} WHERE id IN (${placeholders}) AND org_id = ?`,
         [...values, ...deviceIds, req.orgId]
       );
+
+      if (hasTags) {
+        const clean = [...new Set(updates.tags.map(t => String(t).trim().toLowerCase()).filter(Boolean))].slice(0, 20);
+        const mode = updates.tagsMode === 'replace' ? 'replace' : 'add';
+
+        // Re-scope to devices that actually belong to this org — same
+        // tenant-isolation reasoning as the SECURITY FIX above, applied to
+        // the tag writes too.
+        const orgRows = await query(
+          `SELECT id FROM devices WHERE id IN (${placeholders}) AND org_id = ?`,
+          [...deviceIds, req.orgId]
+        );
+        const orgDeviceIds = orgRows.map(r => r.id);
+
+        if (orgDeviceIds.length) {
+          if (mode === 'replace') {
+            const delPlaceholders = orgDeviceIds.map(() => '?').join(',');
+            await execute(`DELETE FROM device_tags WHERE device_id IN (${delPlaceholders})`, orgDeviceIds);
+          }
+          if (clean.length) {
+            const rows = [];
+            for (const deviceId of orgDeviceIds) {
+              for (const tag of clean) rows.push(uuidv4(), deviceId, req.orgId, tag, now);
+            }
+            const rowPlaceholders = orgDeviceIds.flatMap(() => clean.map(() => '(?, ?, ?, ?, ?)')).join(', ');
+            // INSERT IGNORE — 'add' mode is a union with whatever a device
+            // already has, so re-adding a tag it's already carrying should
+            // be a harmless no-op, not a duplicate-key error that aborts
+            // the whole batch.
+            await execute(
+              `INSERT IGNORE INTO device_tags (id, device_id, org_id, tag, created_at) VALUES ${rowPlaceholders}`,
+              rows
+            );
+          }
+        }
+      }
 
       await audit.log({
         userId: req.user.id, username: req.user.username,

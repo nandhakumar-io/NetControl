@@ -75,7 +75,7 @@ export default function SavedViews({ page, filters, onApply, isLight }) {
       </button>
 
       {open && (
-        <div className="absolute right-0 sm:left-0 mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-xl shadow-xl z-50 overflow-hidden"
+        <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-xl shadow-xl z-50 overflow-hidden"
           style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
 
           <div className="max-h-64 overflow-y-auto">

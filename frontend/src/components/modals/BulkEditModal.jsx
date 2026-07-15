@@ -1,191 +1,133 @@
-// components/modals/BulkEditModal.jsx
-// Edit shared fields (group, SSH/Windows credentials) across many selected
-// devices in one request. Only the sections the user turns on get sent —
-// everything else on each device is left untouched.
-import React, { useState } from 'react'
-import { Users, X, Loader2, FolderInput, KeyRound, ShieldCheck } from 'lucide-react'
-import api from '../../lib/api'
-import toast from 'react-hot-toast'
+// components/SavedViews.jsx — "save this filter combo as a named view",
+// same idea as the Bulk Command console's favorite commands
+// (bulk_command_history), generalized for any filter-driven list page via
+// routes/savedViews.js. Org-scoped and shared with the whole team — for an
+// MSP running one org per client, a view like "Client X — offline Windows
+// boxes" is exactly the kind of thing every operator should be able to
+// jump to, not just whoever made it.
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { Bookmark, Plus, X, Check, ChevronDown } from 'lucide-react'
+import api from '../lib/api'
+import { useAuthStore } from '../store/authStore'
 
-function Section({ icon: Icon, title, hint, enabled, onToggle, children }) {
+export default function SavedViews({ page, filters, onApply, isLight }) {
+  const user = useAuthStore(s => s.user)
+  const canManage = user?.role === 'admin' || user?.role === 'operator'
+
+  const [views, setViews]   = useState([])
+  const [open, setOpen]     = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [name, setName]     = useState('')
+  const [error, setError]   = useState('')
+  const boxRef = useRef(null)
+
+  const load = useCallback(() => {
+    api.get('/saved-views', { params: { page } })
+      .then(({ data }) => setViews(data))
+      .catch(() => {})
+  }, [page])
+
+  useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    const onDocClick = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) { setOpen(false); setSaving(false) } }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [])
+
+  const apply = async (view) => {
+    onApply(view.filters)
+    setOpen(false)
+    api.patch(`/saved-views/${view.id}/use`).catch(() => {}) // fire-and-forget — bumps it up the "recently used" order
+  }
+
+  const remove = async (id, e) => {
+    e.stopPropagation()
+    try {
+      await api.delete(`/saved-views/${id}`)
+      setViews(v => v.filter(x => x.id !== id))
+    } catch { /* no-op — view list just won't shrink, not worth surfacing */ }
+  }
+
+  const saveCurrent = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    try {
+      await api.post('/saved-views', { page, name: trimmed, filters })
+      setName(''); setSaving(false); setError('')
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not save view')
+    }
+  }
+
+  const accent = isLight ? '#6c5ce7' : '#a78bfa'
+
   return (
-    <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${enabled ? 'rgba(167,139,250,0.35)' : 'var(--border-subtle)'}` }}>
-      <button type="button" onClick={onToggle}
-        className="w-full flex items-center gap-3 px-4 py-3 text-left transition-colors"
-        style={{ background: enabled ? 'rgba(167,139,250,0.08)' : 'var(--bg-surface-2)' }}>
-        <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-          style={{ background: enabled ? 'rgba(167,139,250,0.18)' : 'var(--bg-surface-3)', color: enabled ? '#a78bfa' : 'var(--text-faint)' }}>
-          <Icon size={14} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <p className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</p>
-          <p className="text-sm" style={{ color: 'var(--text-faint)' }}>{hint}</p>
-        </span>
-        <span className="w-10 h-6 rounded-full flex items-center shrink-0 transition-all px-0.5"
-          style={{ background: enabled ? '#a78bfa' : 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)' }}>
-          <span className="w-5 h-5 rounded-full bg-white transition-transform"
-            style={{ transform: enabled ? 'translateX(16px)' : 'translateX(0)' }} />
-        </span>
+    <div className="relative" ref={boxRef}>
+      <button onClick={() => setOpen(v => !v)}
+        className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg transition-all"
+        style={{ color: 'var(--text-muted)', border: '1px solid var(--border-subtle)', background: open ? 'var(--bg-surface-3)' : 'transparent' }}>
+        <Bookmark size={12} />
+        <span className="hidden sm:inline">Views</span>
+        {views.length > 0 && <span className="text-xs font-mono opacity-60">({views.length})</span>}
+        <ChevronDown size={11} />
       </button>
-      {enabled && (
-        <div className="px-4 py-4 space-y-3" style={{ borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-surface-1)' }}>
-          {children}
+
+      {open && (
+        <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-xl shadow-xl z-50 overflow-hidden"
+          style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
+
+          <div className="max-h-64 overflow-y-auto">
+            {views.length === 0 && !saving && (
+              <p className="text-xs font-body px-3 py-3" style={{ color: 'var(--text-faint)' }}>
+                No saved views yet{canManage ? ' — save your current filters below.' : '.'}
+              </p>
+            )}
+            {views.map(v => (
+              <button key={v.id} onClick={() => apply(v)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--bg-surface-3)]"
+                style={{ color: 'var(--text-primary)' }}>
+                <span className="truncate">{v.name}</span>
+                {canManage && (
+                  <span onClick={(e) => remove(v.id, e)} title="Delete view"
+                    className="shrink-0 p-1 rounded hover:bg-red-500/10 text-[var(--text-faint)] hover:text-red-400">
+                    <X size={11} />
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {canManage && (
+            <div className="border-t p-2" style={{ borderColor: 'var(--border-subtle)' }}>
+              {!saving ? (
+                <button onClick={() => setSaving(true)}
+                  className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold px-2 py-1.5 rounded-lg transition-all"
+                  style={{ color: accent, background: isLight ? 'rgba(108,92,231,0.08)' : 'rgba(167,139,250,0.08)' }}>
+                  <Plus size={12} /> Save current filters as a view
+                </button>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <input autoFocus value={name} onChange={e => setName(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && saveCurrent()}
+                      placeholder="View name…" maxLength={100}
+                      className="input-field h-8 text-xs flex-1" />
+                    <button onClick={saveCurrent} title="Save" className="p-1.5 rounded-lg" style={{ color: accent }}>
+                      <Check size={14} />
+                    </button>
+                    <button onClick={() => { setSaving(false); setError('') }} title="Cancel" className="p-1.5 rounded-lg" style={{ color: 'var(--text-faint)' }}>
+                      <X size={14} />
+                    </button>
+                  </div>
+                  {error && <p className="text-[11px] font-body" style={{ color: '#ef4444' }}>{error}</p>}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
-    </div>
-  )
-}
-
-const F = ({ label, children }) => (
-  <div>
-    <label className="text-sm font-semibold block mb-1.5" style={{ color: 'var(--text-muted)' }}>{label}</label>
-    {children}
-  </div>
-)
-
-export default function BulkEditModal({ open, onClose, onSaved, deviceIds, devices, groups }) {
-  const [groupOn, setGroupOn]   = useState(false)
-  const [groupId, setGroupId]   = useState('')
-
-  const [sshOn, setSshOn]       = useState(false)
-  const [sshUser, setSshUser]   = useState('')
-  const [sshPass, setSshPass]   = useState('')
-
-  const [rpcOn, setRpcOn]       = useState(false)
-  const [rpcUser, setRpcUser]   = useState('')
-  const [rpcPass, setRpcPass]   = useState('')
-
-  const [saving, setSaving]     = useState(false)
-
-  const reset = () => {
-    setGroupOn(false); setGroupId('')
-    setSshOn(false); setSshUser(''); setSshPass('')
-    setRpcOn(false); setRpcUser(''); setRpcPass('')
-    setSaving(false)
-  }
-
-  const handleClose = () => { reset(); onClose() }
-
-  if (!open) return null
-
-  const selected = devices.filter(d => deviceIds.includes(d.id))
-  const count = deviceIds.length
-
-  const canSave =
-    (groupOn) ||
-    (sshOn && (sshUser.trim() || sshPass.trim())) ||
-    (rpcOn && (rpcUser.trim() || rpcPass.trim()))
-
-  const handleSave = async () => {
-    if (!canSave || saving) return
-    const updates = {}
-    if (groupOn) updates.group_id = groupId || null
-    if (sshOn) {
-      if (sshUser.trim()) updates.ssh_username = sshUser.trim()
-      if (sshPass.trim()) updates.ssh_password = sshPass
-    }
-    if (rpcOn) {
-      if (rpcUser.trim()) updates.rpc_username = rpcUser.trim()
-      if (rpcPass.trim()) updates.rpc_password = rpcPass
-    }
-
-    setSaving(true)
-    try {
-      const { data } = await api.put('/devices/bulk-update', { deviceIds, updates })
-      toast.success(`Updated ${data.updated} device${data.updated === 1 ? '' : 's'}`)
-      reset()
-      onSaved ? onSaved() : onClose()
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Bulk update failed')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={handleClose}>
-      <div className="absolute inset-0 modal-backdrop" />
-      <div className="relative z-10 w-full max-w-lg animate-slide-up" onClick={e => e.stopPropagation()}>
-        <div className="rounded-2xl overflow-hidden flex flex-col max-h-[88vh]"
-          style={{ background: 'var(--bg-surface-1)', border: '1px solid var(--border-subtle)', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
-
-          {/* Header */}
-          <div className="flex items-center gap-3 px-6 py-4 shrink-0" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center"
-              style={{ background: 'rgba(167,139,250,0.15)', border: '1px solid rgba(167,139,250,0.25)' }}>
-              <Users size={16} className="text-brand-400" />
-            </div>
-            <div className="min-w-0">
-              <h3 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>
-                Edit {count} selected device{count === 1 ? '' : 's'}
-              </h3>
-              <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>
-                {selected.slice(0, 3).map(d => d.name).join(', ')}{count > 3 ? `, +${count - 3} more` : ''}
-              </p>
-            </div>
-            <button onClick={handleClose} className="ml-auto icon-btn p-1.5"><X size={15} /></button>
-          </div>
-
-          {/* Body */}
-          <div className="px-6 py-5 space-y-3 overflow-y-auto">
-            <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-              Turn on a section to apply a new value to every selected device. Sections left off are untouched, and blank fields inside an
-              enabled section are also left untouched.
-            </p>
-
-            <Section icon={FolderInput} title="Group / Lab" hint="Move all selected devices into a group"
-              enabled={groupOn} onToggle={() => setGroupOn(o => !o)}>
-              <F label="Group">
-                <select className="input-field" value={groupId} onChange={e => setGroupId(e.target.value)}>
-                  <option value="">No Group</option>
-                  {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-                </select>
-              </F>
-            </Section>
-
-            <Section icon={KeyRound} title="SSH Credentials (Linux)" hint="Update username and/or password for Linux devices"
-              enabled={sshOn} onToggle={() => setSshOn(o => !o)}>
-              <F label="SSH Username">
-                <input className="input-field" placeholder="Leave blank to keep existing"
-                  value={sshUser} onChange={e => setSshUser(e.target.value)} />
-              </F>
-              <F label="SSH Password">
-                <input type="password" className="input-field" placeholder="Leave blank to keep existing"
-                  value={sshPass} onChange={e => setSshPass(e.target.value)} autoComplete="off" />
-              </F>
-            </Section>
-
-            <Section icon={ShieldCheck} title="Windows Credentials (RPC)" hint="Update username and/or password for Windows devices"
-              enabled={rpcOn} onToggle={() => setRpcOn(o => !o)}>
-              <F label="Username">
-                <input className="input-field" placeholder="Leave blank to keep existing"
-                  value={rpcUser} onChange={e => setRpcUser(e.target.value)} />
-              </F>
-              <F label="Password">
-                <input type="password" className="input-field" placeholder="Leave blank to keep existing"
-                  value={rpcPass} onChange={e => setRpcPass(e.target.value)} autoComplete="off" />
-              </F>
-            </Section>
-
-            <div className="px-3 py-2.5 rounded-xl" style={{ background: 'rgba(124,92,245,0.07)', border: '1px solid rgba(167,139,250,0.15)' }}>
-              <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-                <span className="font-semibold" style={{ color: 'var(--text-secondary)' }}>Security: </span>
-                Credentials are AES-256 encrypted at rest and never sent back to the browser.
-              </p>
-            </div>
-          </div>
-
-          {/* Footer */}
-          <div className="flex gap-3 px-6 py-4 shrink-0" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-            <button onClick={handleClose} className="btn-ghost flex-1 justify-center" disabled={saving}>Cancel</button>
-            <button onClick={handleSave} className="btn-primary flex-1 justify-center"
-              disabled={!canSave || saving}
-              style={!canSave ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}>
-              {saving ? <><Loader2 size={14} className="animate-spin" /> Saving…</> : `Save to ${count} device${count === 1 ? '' : 's'}`}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   )
 }
