@@ -36,6 +36,7 @@ const metricsRollup        = require('./services/metricsRollup');
 const scheduledJobs        = require('./services/scheduledJobs');
 const digestService        = require('./services/digestService');
 const syntheticCheckRunner = require('./services/syntheticCheckRunner');
+const auditRetention       = require('./services/auditRetention');
 
 console.log(`\n🛰️  NetControl poller process starting (pid ${process.pid})`);
 console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
@@ -56,6 +57,12 @@ syntheticCheckRunner.start();
 metricsRollup.start();
 console.log(`   Metrics retention: ${metricsRollup.COMPRESS_AFTER_DAYS}d raw -> compressed to daily -> kept ${metricsRollup.DAILY_RETENTION_DAYS}d total\n`);
 
+// ── audit_log retention ─────────────────────────────────────────────────────
+// See services/auditRetention.js — rows older than AUDIT_LOG_RETENTION_DAYS
+// (default 365) are pruned daily. Set to 0 to keep audit_log forever.
+auditRetention.start();
+console.log(`   Audit log retention: ${auditRetention.RETENTION_DAYS ? auditRetention.RETENTION_DAYS + 'd' : 'disabled (kept forever)'}\n`);
+
 // Keep the process alive; all the real work happens on setInterval timers
 // inside the services above.
 process.on('SIGTERM', () => {
@@ -64,5 +71,6 @@ process.on('SIGTERM', () => {
   scheduledJobs.stop();
   digestService.stop();
   syntheticCheckRunner.stop();
+  auditRetention.stop();
   process.exit(0);
 });

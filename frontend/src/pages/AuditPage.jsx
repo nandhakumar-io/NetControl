@@ -830,9 +830,13 @@ export default function AuditPage() {
   // The Sync column only earns its place once syslog forwarding is (or has
   // ever been) relevant — otherwise it's a column of dashes wasting space.
   const showSync = !!(syslogStatus?.enabled || tallies.synced > 0)
+  // minmax(floor, share) instead of a hard px width: each column still can't
+  // shrink below a readable floor, but above that it flexes with whatever
+  // room the viewport actually has, so the table only needs its horizontal
+  // scrollbar on genuinely narrow screens instead of on every screen.
   const gridCols = showSync
-    ? '190px 160px 150px 1fr 150px 110px 76px'
-    : '200px 175px 160px 1fr 160px 110px'
+    ? 'minmax(120px,0.9fr) minmax(110px,1fr) minmax(120px,1fr) minmax(160px,2.2fr) minmax(100px,1fr) 110px 64px'
+    : 'minmax(130px,0.9fr) minmax(120px,1fr) minmax(130px,1fr) minmax(180px,2.2fr) minmax(110px,1fr) 110px'
 
   const handleExport = async (format) => {
     setExportFormat(format)
@@ -969,9 +973,12 @@ export default function AuditPage() {
       <div className="glass rounded-xl border border-white/8 px-4 py-3.5 mb-5 space-y-3">
 
         {/* Row 1: search + date range, side by side since both are "narrow the
-            time/entity window" controls */}
+            time/entity window" controls. This row no longer also carries the
+            stat pills (moved to their own row below) — cramming both into
+            one flex-wrap line was the main source of messy, unpredictable
+            wrapping on anything narrower than a wide desktop. */}
         <div className="flex flex-wrap items-center gap-3">
-          <div className="relative min-w-[220px] max-w-sm flex-1">
+          <div className="relative min-w-[220px] flex-1">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-brand-400 pointer-events-none" />
             <input
               className="input-field pl-9 h-9 text-sm w-full"
@@ -984,7 +991,7 @@ export default function AuditPage() {
           {/* Date range — filters the table and scopes CSV/TXT export to a
               particular date (or from/to range). Both ends are optional and
               inclusive of the full calendar day selected. */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <Calendar size={16} className="text-brand-400 shrink-0" />
             <input
               type="date"
@@ -1007,7 +1014,7 @@ export default function AuditPage() {
               <button
                 onClick={() => { setFromDate(''); setToDate('') }}
                 title="Clear date range"
-                className="p-1.5 rounded-md transition-colors"
+                className="p-1.5 rounded-md transition-colors shrink-0"
                 style={{ color: 'var(--text-muted)' }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)' }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)' }}
@@ -1016,34 +1023,37 @@ export default function AuditPage() {
               </button>
             )}
           </div>
-
-          {/* Count moves up here so it's not fighting the chips for space */}
-          <div className="ml-auto flex items-center gap-3">
-          {!loading && (
-            <>
-              <span className="flex items-center gap-1.5 text-sm text-accent-green font-body">
-                <CheckCircle2 size={14} /> {tallies.success} ok
-              </span>
-              <span className="flex items-center gap-1.5 text-sm text-accent-red font-body">
-                <XCircle size={14} /> {tallies.failure} failed
-              </span>
-              {syslogStatus?.enabled && (
-                <span className="flex items-center gap-1.5 text-sm text-accent-cyan font-body">
-                  <Radio size={14} /> {tallies.synced} synced
-                </span>
-              )}
-              <span style={{ color: 'var(--text-faint)' }}>·</span>
-            </>
-          )}
-            <span className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>{total} total events</span>
-          </div>
         </div>
 
-        {/* Row 2: categorical filters, each group clearly labeled so it
-            doesn't read as one undifferentiated wall of chips */}
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pt-3 border-t border-white/6">
+        {/* Row 1b: result stat pills, own line so they're never competing
+            with search/date for horizontal room. Wraps cleanly on its own
+            if the viewport is narrow enough that not all pills fit. */}
+        {!loading && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-1">
+            <span className="flex items-center gap-1.5 text-sm text-accent-green font-body">
+              <CheckCircle2 size={14} /> {tallies.success} ok
+            </span>
+            <span className="flex items-center gap-1.5 text-sm text-accent-red font-body">
+              <XCircle size={14} /> {tallies.failure} failed
+            </span>
+            {syslogStatus?.enabled && (
+              <span className="flex items-center gap-1.5 text-sm text-accent-cyan font-body">
+                <Radio size={14} /> {tallies.synced} synced
+              </span>
+            )}
+            <span className="text-sm font-body ml-auto" style={{ color: 'var(--text-muted)' }}>{total} total events</span>
+          </div>
+        )}
+
+        {/* Row 2: categorical filters. Each group now gets its own full-width
+            line (flex-wrap on a w-full container) instead of sharing one row
+            via a single flex-wrap + ml-auto — that made wrapping order
+            unpredictable (Saved Views could land mid-way through the Result
+            chips depending on exact viewport width). Predictable stacking:
+            Action chips, then Result chips + Saved Views. */}
+        <div className="space-y-2.5 pt-3 border-t border-white/6">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-secondary)' }}>Action</span>
+            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5 shrink-0" style={{ color: 'var(--text-secondary)' }}>Action</span>
             {FILTER_ACTIONS.map(a => {
               const count = a === 'all' ? total : (tallies.byAction?.[a] ?? 0)
               return (
@@ -1056,53 +1066,54 @@ export default function AuditPage() {
             })}
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-secondary)' }}>Result</span>
-            {FILTER_RESULTS.map(r => {
-              const count = r === 'all' ? total : (tallies[r] ?? 0)
-              return (
-                <button key={r} onClick={() => setResultFilter(r)}
-                  className={`chip h-8 px-3 text-sm capitalize ${resultFilter === r ? 'chip-selected' : ''}`}>
-                  {r === 'all' ? 'All' : r.charAt(0).toUpperCase() + r.slice(1)}
-                  <span className="ml-1 opacity-60 tabular-nums">({count})</span>
-                </button>
-              )
-            })}
-          </div>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5 shrink-0" style={{ color: 'var(--text-secondary)' }}>Result</span>
+              {FILTER_RESULTS.map(r => {
+                const count = r === 'all' ? total : (tallies[r] ?? 0)
+                return (
+                  <button key={r} onClick={() => setResultFilter(r)}
+                    className={`chip h-8 px-3 text-sm capitalize ${resultFilter === r ? 'chip-selected' : ''}`}>
+                    {r === 'all' ? 'All' : r.charAt(0).toUpperCase() + r.slice(1)}
+                    <span className="ml-1 opacity-60 tabular-nums">({count})</span>
+                  </button>
+                )
+              })}
+            </div>
 
-          <div className="ml-auto flex items-center gap-2.5">
-            {appliedView && (
-              <span
-                className="flex items-center gap-1.5 text-xs font-body px-2.5 py-1 rounded-lg border"
-                style={
-                  isViewDirty
-                    ? { color: 'var(--accent-yellow, #eab308)', background: 'rgba(234,179,8,0.08)', borderColor: 'rgba(234,179,8,0.25)' }
-                    : { color: '#a78bfa', background: 'rgba(167,139,250,0.08)', borderColor: 'rgba(167,139,250,0.25)' }
-                }
-                title={isViewDirty ? `Filters no longer match "${appliedView.name}"` : `Showing saved view "${appliedView.name}"`}
-              >
-                <Bookmark size={12} />
-                {appliedView.name}
-                {isViewDirty && <span className="opacity-80">· edited</span>}
-              </span>
-            )}
-            <SavedViews page="audit" filters={currentFilters} onApply={applyView} />
+            <div className="flex items-center gap-2.5 ml-auto">
+              {appliedView && (
+                <span
+                  className="flex items-center gap-1.5 text-xs font-body px-2.5 py-1 rounded-lg border shrink-0"
+                  style={
+                    isViewDirty
+                      ? { color: 'var(--accent-yellow, #eab308)', background: 'rgba(234,179,8,0.08)', borderColor: 'rgba(234,179,8,0.25)' }
+                      : { color: '#a78bfa', background: 'rgba(167,139,250,0.08)', borderColor: 'rgba(167,139,250,0.25)' }
+                  }
+                  title={isViewDirty ? `Filters no longer match "${appliedView.name}"` : `Showing saved view "${appliedView.name}"`}
+                >
+                  <Bookmark size={12} />
+                  {appliedView.name}
+                  {isViewDirty && <span className="opacity-80">· edited</span>}
+                </span>
+              )}
+              <SavedViews page="audit" filters={currentFilters} onApply={applyView} />
+            </div>
           </div>
         </div>
       </div>
 
       {/* ── Table ───────────────────────────────────────────────────────── */}
-      {/* overflow-x-auto: the grid below uses fixed pixel column widths
-          (timestamp/user/action/IP all need a stable width for the eye to
-          scan down a column), which don't have anywhere to shrink to on a
-          phone. Letting the table scroll horizontally — with the header
-          scrolling in lockstep since it's inside the same scroll container
-          — beats either clipping content or squeezing seven columns
-          unreadably thin. min-w-[720px] keeps every column at a readable
-          width no matter the viewport; the outer page can still scroll
-          vertically as normal since only this element scrolls sideways. */}
+      {/* overflow-x-auto is a fallback, not the primary strategy: each grid
+          column below is minmax(floor, share) — it flexes with whatever
+          width the viewport actually has above its floor, so on a normal
+          desktop the table fills the available width with no scrollbar at
+          all. Only once the viewport genuinely can't fit every column at
+          its floor width (phones, or a very narrow sidebar layout) does
+          this container scroll horizontally, with the sticky header
+          scrolling in lockstep since it's inside the same scroll box. */}
       <div className="glass rounded-xl border border-white/8 overflow-x-auto">
-        <div className="min-w-[720px]">
+        <div className="min-w-[620px]">
 
         {/* Table header — sticky so column labels stay visible once a
             filtered result set scrolls past a screen's height */}
