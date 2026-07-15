@@ -62,6 +62,13 @@ const EVENTS = {
   // sees the result in the UI immediately.
   'sla_report.generated':        'Scheduled SLA report generated',
   'sla_report.failed':           'Scheduled SLA report generation failed',
+  // Capacity forecast (services/capacityForecast.js) — a device's disk/RAM
+  // trend crossing into "warning" or "critical" days-to-full previously
+  // only surfaced as an in-app bell + web push, never through the same
+  // Slack/Telegram/generic-webhook pipeline every other alert type uses.
+  'capacity.warning':            'Capacity forecast: approaching full',
+  'capacity.critical':           'Capacity forecast: critical — filling up very soon',
+  'capacity.resolved':           'Capacity forecast: no longer at risk',
 };
 
 module.exports.EVENTS = EVENTS;

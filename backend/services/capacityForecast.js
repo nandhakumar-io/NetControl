@@ -151,6 +151,7 @@ function getThresholds() {
 async function checkAndNotify() {
   const { pushNotification } = require('../routes/alerts');
   const webPush = require('./webPush');
+  const webhook = require('./webhook');
 
   for (const metric of Object.keys(METRIC_COLUMNS)) {
     const forecasts = await computeAllForecasts(metric, 14, null);
@@ -167,15 +168,21 @@ async function checkAndNotify() {
       // cooldown window has passed, or the forecast got meaningfully worse
       // (at least a day sooner) since the last warning — otherwise a
       // slowly-filling disk would just re-page every single tick forever.
+      // This is this feature's equivalent of alert_rules' flap suppression:
+      // a real trend line moves slowly, so "don't re-page on every tick" is
+      // enough on its own — there's no separate breach/OK state machine to
+      // reuse here without inventing one for a fundamentally different
+      // (continuous trend vs. discrete threshold) kind of check.
       const worseByADay = last && (last.days_to_full - f.days_to_full) >= 1;
       const cooldownExpired = !last || (now - last.last_notified_at) >= RENOTIFY_COOLDOWN_SEC;
       if (last && !cooldownExpired && !worseByADay) continue;
 
       const admins = await query('SELECT id FROM users WHERE role = ? AND enabled = 1', ['admin']);
       const message = `${f.device_name}: ${metric === 'disk' ? 'disk' : 'RAM'} usage at ${f.current_pct}% and rising ~${f.slope_per_day}%/day — projected full in ~${Math.round(f.days_to_full)} day${Math.round(f.days_to_full) === 1 ? '' : 's'}`;
+      const severity = f.days_to_full <= CRITICAL_DAYS ? 'critical' : 'warning';
 
       pushNotification(admins.map(a => a.id), {
-        type: 'capacity', severity: f.days_to_full <= CRITICAL_DAYS ? 'critical' : 'warning',
+        type: 'capacity', severity,
         rule_name: `Capacity forecast (${metric})`, device_id: f.device_id,
         device_name: f.device_name, metric, message, triggered_at: now,
       });
@@ -184,6 +191,18 @@ async function checkAndNotify() {
         body: message,
         tag: `nc-capacity-${f.device_id}-${metric}`,
         data: { type: 'capacity', deviceId: f.device_id, metric, url: '/capacity' },
+      }).catch(() => {});
+
+      // Same trigger, same severity, now also reaching Telegram/Slack/
+      // generic webhooks — fire() already handles per-webhook min_severity
+      // filtering (so a Telegram bot subscribed at "critical" only pages
+      // for the real emergencies, not every warning) and device-under-
+      // maintenance suppression, so a disk that's expected to fill during
+      // planned work doesn't page anyone.
+      webhook.fire(severity === 'critical' ? 'capacity.critical' : 'capacity.warning', {
+        device_id: f.device_id, device_name: f.device_name, metric, severity,
+        current_pct: f.current_pct, slope_per_day: f.slope_per_day,
+        days_to_full: f.days_to_full, message,
       }).catch(() => {});
 
       await execute(
@@ -196,8 +215,28 @@ async function checkAndNotify() {
 
     // Clear the notice once a device is no longer at risk, so if it fills
     // up again later (new growth after cleanup, etc.) it's treated as a
-    // fresh warning rather than being stuck on the old cooldown.
+    // fresh warning rather than being stuck on the old cooldown. Also fire
+    // capacity.resolved for any device that just dropped off the at-risk
+    // list — same "the incident is over" signal alert.resolved gives for
+    // regular alert rules, so a Slack channel watching capacity.* sees the
+    // full arc (warning/critical → resolved) instead of pages that never
+    // get an all-clear.
     const stillAtRiskIds = atRisk.map(f => f.device_id);
+    const clearing = await query(
+      `SELECT n.device_id, n.metric, d.name AS device_name
+         FROM capacity_forecast_notices n
+         JOIN devices d ON d.id = n.device_id
+        WHERE n.metric = ? AND n.device_id NOT IN (${
+          stillAtRiskIds.length ? stillAtRiskIds.map(() => '?').join(',') : 'NULL'
+        })`,
+      [metric, ...stillAtRiskIds]
+    ).catch(() => []);
+    for (const c of clearing) {
+      webhook.fire('capacity.resolved', {
+        device_id: c.device_id, device_name: c.device_name, metric, severity: 'info',
+        message: `${c.device_name}: ${metric === 'disk' ? 'disk' : 'RAM'} usage is no longer trending toward full`,
+      }).catch(() => {});
+    }
     await execute(
       `DELETE FROM capacity_forecast_notices WHERE metric = ? AND device_id NOT IN (${
         stillAtRiskIds.length ? stillAtRiskIds.map(() => '?').join(',') : 'NULL'
