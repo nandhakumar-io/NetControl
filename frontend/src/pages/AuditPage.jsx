@@ -359,7 +359,7 @@ function DeviceChangesPanel() {
   return (
     <div className="animate-fade-in">
       {/* Mode toggle */}
-      <div className="flex items-center gap-2 mb-5">
+      <div className="flex flex-wrap items-center gap-2 mb-5">
         <button
           onClick={() => setMode('timeline')}
           className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
@@ -842,7 +842,7 @@ export default function AuditPage() {
       </div>
 
       {/* ── Tabs ────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-2 mb-5">
+      <div className="flex flex-wrap items-center gap-2 mb-5">
         <button
           onClick={() => setTab('events')}
           className={`flex items-center gap-2 h-9 px-3.5 rounded-lg text-sm font-body font-medium border transition-colors ${
@@ -1013,7 +1013,17 @@ export default function AuditPage() {
       </div>
 
       {/* ── Table ───────────────────────────────────────────────────────── */}
-      <div className="glass rounded-xl border border-white/8 overflow-visible">
+      {/* overflow-x-auto: the grid below uses fixed pixel column widths
+          (timestamp/user/action/IP all need a stable width for the eye to
+          scan down a column), which don't have anywhere to shrink to on a
+          phone. Letting the table scroll horizontally — with the header
+          scrolling in lockstep since it's inside the same scroll container
+          — beats either clipping content or squeezing seven columns
+          unreadably thin. min-w-[720px] keeps every column at a readable
+          width no matter the viewport; the outer page can still scroll
+          vertically as normal since only this element scrolls sideways. */}
+      <div className="glass rounded-xl border border-white/8 overflow-x-auto">
+        <div className="min-w-[720px]">
 
         {/* Table header */}
         <div
@@ -1145,6 +1155,7 @@ export default function AuditPage() {
             })}
           </div>
         )}
+        </div>
       </div>
 
       {/* ── Pagination ───────────────────────────────────────────────────── */}
