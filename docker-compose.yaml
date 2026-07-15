@@ -111,6 +111,11 @@ services:
       - netcontrol-net
     volumes:
       - netcontrol_db_data_local:/var/lib/mysql
+      # Runs once on a brand-new/empty datadir — switches DB_USER to
+      # mysql_native_password so mysqldump (via the backend container's
+      # mariadb-client) can authenticate. See the script itself for why,
+      # and for the one-liner to run by hand against an already-existing DB.
+      - ./backend/db/mysql-init:/docker-entrypoint-initdb.d:ro
 
 volumes:
   netcontrol_db_data_local:
