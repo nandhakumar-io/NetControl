@@ -42,15 +42,24 @@ router.get('/',
     const categories = {};
 
     // ── Devices (bit 1 — view_devices) ─────────────────────────────────────
+    // Matches on name/IP as before, plus device_tags — so typing a freeform
+    // label like "prod" or "k8s-node" jumps straight to every device
+    // carrying it, the same ad-hoc slice the tag filter on the Devices page
+    // gives you, just reachable from anywhere via Cmd+K.
     if (hasBit(req, 1)) {
       tasks.push(
         query(
-          `SELECT id, name, ip_address, status FROM devices
-            WHERE org_id = ? AND (name LIKE ? OR ip_address LIKE ?)
-            ORDER BY name LIMIT ${RESULT_LIMIT_PER_CATEGORY}`,
-          [req.orgId, like, like]
+          `SELECT d.id, d.name, d.ip_address, d.status,
+                  (SELECT GROUP_CONCAT(dt2.tag ORDER BY dt2.tag SEPARATOR ', ')
+                     FROM device_tags dt2 WHERE dt2.device_id = d.id) AS all_tags
+             FROM devices d
+             LEFT JOIN device_tags dt ON dt.device_id = d.id AND dt.tag LIKE ?
+            WHERE d.org_id = ? AND (d.name LIKE ? OR d.ip_address LIKE ? OR dt.tag IS NOT NULL)
+            GROUP BY d.id
+            ORDER BY d.name LIMIT ${RESULT_LIMIT_PER_CATEGORY}`,
+          [like, req.orgId, like, like]
         ).then(rows => { categories.devices = rows.map(d => ({
-          id: d.id, label: d.name, sublabel: d.ip_address, status: d.status,
+          id: d.id, label: d.name, sublabel: d.all_tags ? `${d.ip_address} · ${d.all_tags}` : d.ip_address, status: d.status,
           type: 'device', path: `/devices?highlight=${d.id}`,
         })); }).catch(() => { categories.devices = []; })
       );
