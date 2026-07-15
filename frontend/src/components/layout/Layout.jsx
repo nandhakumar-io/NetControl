@@ -5,7 +5,7 @@ import {
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
-  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2
+  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -14,6 +14,7 @@ import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import TwoFactorModal from '../modals/TwoFactorModal'
 import OrgSwitcher from './OrgSwitcher'
+import CommandPalette from './CommandPalette'
 
 // ── Notification bell — SSE listener only, no nav ─────────────────────────────
 // This component handles LIVE notifications (toasts + badge count).
@@ -326,6 +327,25 @@ export default function Layout() {
   // had no home. This was the only reason 2FA was invisible even though
   // the whole backend flow already worked end to end.
   const [show2FA, setShow2FA] = useState(false)
+  // Command palette (Cmd+K / Ctrl+K) — a single fast "jump to" search across
+  // devices/groups/runbooks/schedules/users instead of navigating through
+  // the sidebar to find one specific thing. See CommandPalette.jsx and the
+  // backend's GET /api/search.
+  const [showPalette, setShowPalette] = useState(false)
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const isMeta = e.metaKey || e.ctrlKey
+      if (isMeta && e.key.toLowerCase() === 'k') {
+        // Don't hijack Cmd/Ctrl+K while it's already open (let Escape inside
+        // the palette handle closing) or while focus is in a contentEditable
+        // area that might have its own use for the shortcut.
+        e.preventDefault()
+        setShowPalette(v => !v)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
   const logout   = useAuthStore(s => s.logout)
   const user     = useAuthStore(s => s.user)
   const navigate = useNavigate()
@@ -543,6 +563,26 @@ export default function Layout() {
             </div>
           )}
 
+          {/* Command palette trigger — Cmd+K/Ctrl+K works from anywhere, but
+              the shortcut alone isn't discoverable, so this gives it a
+              visible home too (same idea as GitHub/Linear's search bar). */}
+          <button
+            onClick={() => setShowPalette(true)}
+            title="Search (Ctrl+K)"
+            className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg transition-all duration-150 w-full
+              ${isLight ? 'text-slate-500 hover:bg-black/[0.04] hover:text-[#1a1a2e]' : 'text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+          >
+            <Search size={16} className="shrink-0" />
+            {!collapsed && (
+              <>
+                <span className="text-sm font-body font-medium flex-1 text-left">Search</span>
+                <kbd className={`text-[11px] px-1.5 py-0.5 rounded border ${isLight ? 'border-black/10 text-slate-400' : 'border-white/10 text-slate-500'}`}>
+                  ⌘K
+                </kbd>
+              </>
+            )}
+          </button>
+
           {/* Notification bell — live alerts badge, dropdown for quick view */}
           <NotificationBell collapsed={collapsed} isLight={isLight} />
 
@@ -605,6 +645,15 @@ export default function Layout() {
           {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
         </button>
       </aside>
+
+      {/* Mounted outside <aside> deliberately: that element gets a CSS
+          transform (translate-x-full) on mobile when the drawer is closed,
+          and a transform on an ancestor creates a new containing block for
+          position:fixed descendants — a modal mounted inside it would end
+          up positioned relative to the (offscreen) sidebar instead of the
+          viewport. Keeping it here means Cmd+K works identically whether
+          the mobile drawer happens to be open or closed. */}
+      <CommandPalette open={showPalette} onClose={() => setShowPalette(false)} />
 
       {/* Mobile top bar — the sidebar is off-canvas by default under md, so
           this is the only way to reach it (hamburger) and to know which

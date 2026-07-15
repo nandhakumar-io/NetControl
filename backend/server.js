@@ -264,6 +264,7 @@ app.use('/api',           rejectDisabled);
 app.use('/api/orgs',      require('./routes/orgs'));
 app.use('/api/runbooks',  require('./routes/runbooks'));
 app.use('/api/devices',   require('./routes/devices'));
+app.use('/api/search',    require('./routes/search'));
 app.use('/api/groups',    require('./routes/groups'));
 app.use('/api/actions',   require('./routes/actions'));
 app.use('/api/schedules', require('./routes/schedules'));
