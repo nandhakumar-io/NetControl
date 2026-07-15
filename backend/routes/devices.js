@@ -3,7 +3,7 @@ const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const { query, queryOne, execute } = require('../db');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireRole } = require('../middleware/auth');
 const { requireOrgContext } = require('../middleware/tenant');
 const { encrypt } = require('../services/crypto');
 const audit = require('../services/audit');
@@ -250,9 +250,9 @@ router.delete('/:id/tags/:tag', requireRole('admin', 'operator'), param('id').is
 
 // ── POST /api/devices (single) ───────────────────────────────────────────────
 // SECURITY FIX: Only admins can add/edit/delete devices
-// (requireRole is declared once here and used for every admin-only route
-// below, including approve-registration and PUT further down the file.)
-const { requireRole } = require('../middleware/auth');
+// requireRole is imported once at the top of the file (alongside requireAuth)
+// and used for every admin-only route below, including approve-registration
+// and PUT further down the file, as well as the tag routes above.
 router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
