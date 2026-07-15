@@ -36,7 +36,7 @@ export default function SavedViews({ page, filters, onApply, isLight }) {
   }, [])
 
   const apply = async (view) => {
-    onApply(view.filters)
+    onApply(view.filters, view)
     setOpen(false)
     api.patch(`/saved-views/${view.id}/use`).catch(() => {}) // fire-and-forget — bumps it up the "recently used" order
   }

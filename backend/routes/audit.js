@@ -11,7 +11,7 @@ router.use(requireAuth);
 // Shared query-building logic reused by both the list endpoint and the
 // export endpoint so the exported file always matches whatever filters
 // are currently applied on screen.
-function buildAuditQuery(req) {
+function buildAuditQuery(req, excludeKeys = []) {
   const where  = [];
   const params = [];
 
@@ -41,8 +41,8 @@ function buildAuditQuery(req) {
     params.push(req.user.id, req.user.id, req.user.id);
   }
 
-  if (req.query.action) { where.push('action = ?'); params.push(req.query.action); }
-  if (req.query.result) { where.push('result = ?'); params.push(req.query.result); }
+  if (req.query.action && !excludeKeys.includes('action')) { where.push('action = ?'); params.push(req.query.action); }
+  if (req.query.result && !excludeKeys.includes('result')) { where.push('result = ?'); params.push(req.query.result); }
   if (req.query.search) {
     where.push('(username LIKE ? OR target_name LIKE ?)');
     params.push(`%${req.query.search}%`, `%${req.query.search}%`);
@@ -78,9 +78,23 @@ router.get('/', requirePermission(128), requireOrgContext, async (req, res) => {
       params
     );
 
-    const [successRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} result = 'success'`, params);
-    const [failureRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} result = 'failure'`, params);
-    const [partialRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${whereClause}${whereClause ? ' AND' : ' WHERE'} result = 'partial'`, params);
+    // Chip counts: each count excludes *its own* filter dimension (action or
+    // result) but keeps every other active filter (search, date range), so
+    // the number shown on a chip answers "if I click this, given my other
+    // filters, how many events would that be" — not just a tally of the
+    // currently-applied result.
+    const { whereClause: actionScopeWhere, params: actionScopeParams } = buildAuditQuery(req, ['action']);
+    const [actionRows] = await pool.execute(
+      `SELECT action, COUNT(*) as c FROM audit_log ${actionScopeWhere}${actionScopeWhere ? ' AND' : ' WHERE'} action IS NOT NULL GROUP BY action`,
+      actionScopeParams
+    );
+    const actionTallies = {};
+    for (const row of actionRows) actionTallies[row.action] = row.c;
+
+    const { whereClause: resultScopeWhere, params: resultScopeParams } = buildAuditQuery(req, ['result']);
+    const [successRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${resultScopeWhere}${resultScopeWhere ? ' AND' : ' WHERE'} result = 'success'`, resultScopeParams);
+    const [failureRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${resultScopeWhere}${resultScopeWhere ? ' AND' : ' WHERE'} result = 'failure'`, resultScopeParams);
+    const [partialRow]  = await pool.execute(`SELECT COUNT(*) as c FROM audit_log ${resultScopeWhere}${resultScopeWhere ? ' AND' : ' WHERE'} result = 'partial'`, resultScopeParams);
 
     // syslog_synced is added by a separate migration (db/migrate-syslog.js)
     // that may not have been run yet on every environment — don't let a
@@ -104,6 +118,7 @@ router.get('/', requirePermission(128), requireOrgContext, async (req, res) => {
         failure: failureRow[0]?.c || 0,
         partial: partialRow[0]?.c || 0,
         synced,
+        byAction: actionTallies,
       },
     });
   } catch (e) {

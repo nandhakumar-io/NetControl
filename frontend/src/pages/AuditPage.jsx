@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ScrollText, Search, RefreshCw, Zap, Power, RotateCcw,
   Shield, ChevronLeft, ChevronRight, UserCheck,
   Plus, Pencil, Trash2, Clock, CheckCircle2, XCircle, AlertCircle,
   Radio, Download, FileSpreadsheet, FileText, ChevronDown, Settings2, MinusCircle,
   Calendar, X as XIcon, ArrowUpCircle, ArrowDownCircle, GitCompare, History,
-  Server, Minus, ArrowRight, Loader2
+  Server, Minus, ArrowRight, Loader2, Bookmark
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -86,78 +86,114 @@ function getResultAccent(result) {
   return RESULT_ACCENT[result] || 'transparent'
 }
 
-// ── Expandable cell ─────────────────────────────────────────────────────────
+// ── Table cell ───────────────────────────────────────────────────────────────
 // Content stays truncated so the table stays tidy and never grows a row's
-// height. If (and only if) it actually overflows its column, hovering (or
-// focusing, for keyboard users) reveals the full value in a small floating
-// card that sits *above* the layout — nothing ever reflows or pushes rows.
+// height. The full, untruncated value lives in the row's detail drawer
+// (click anywhere on the row) rather than a per-cell hover tooltip — that
+// reads better on mobile, where hover doesn't exist, and gives every field a
+// permanent place to land instead of a floating card that disappears.
 function ExpandableCell({ text, className = '', mono = false, sub = null }) {
-  const ref = useRef(null)
-  const [overflowing, setOverflowing] = useState(false)
-  const [hovered, setHovered] = useState(false)
-
-  useLayoutEffect(() => {
-    setHovered(false)
-    const el = ref.current
-    if (!el) return
-    setOverflowing(el.scrollWidth > el.clientWidth + 1)
-  }, [text])
-
   if (text === null || text === undefined || text === '') {
     return <span className="text-sm" style={{ color: 'var(--text-faint)' }}>—</span>
   }
 
   return (
-    <div
-      className="relative min-w-0"
-      onMouseEnter={() => overflowing && setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div
-        tabIndex={overflowing ? 0 : undefined}
-        onFocus={() => overflowing && setHovered(true)}
-        onBlur={() => setHovered(false)}
-        className={[
-          'text-sm truncate rounded outline-none',
-          mono ? 'font-mono' : 'font-body',
-          className,
-          overflowing ? 'cursor-help underline decoration-dotted decoration-1 underline-offset-4 focus-visible:ring-2 focus-visible:ring-brand-400/50' : '',
-        ].join(' ')}
-        style={overflowing ? { textDecorationColor: 'var(--border-strong)' } : undefined}
-      >
-        <span ref={ref} className="block truncate">{text}</span>
+    <div className="min-w-0">
+      <div className={['text-sm truncate rounded', mono ? 'font-mono' : 'font-body', className].join(' ')}>
+        <span className="block truncate">{text}</span>
       </div>
       {sub && (
         <p className="text-xs font-body truncate mt-0.5 capitalize" style={{ color: 'var(--text-muted)' }}>
           {sub}
         </p>
       )}
+    </div>
+  )
+}
 
-      {/* Floating "expanded" card — only ever rendered on hover/focus, so it
-          never affects the height of the row or the columns around it. */}
-      {hovered && (
-        <div
-          role="tooltip"
-          className="absolute left-0 top-full mt-1.5 z-30 w-max max-w-[22rem] rounded-lg px-3 py-2 animate-fade-in"
-          style={{
-            background: 'var(--bg-surface-1)',
-            border: '1px solid var(--border-mid)',
-            boxShadow: 'var(--glass-shadow)',
-          }}
-        >
-          <p
-            className={`text-sm break-words ${mono ? 'font-mono' : 'font-body'}`}
-            style={{ color: 'var(--text-primary)' }}
-          >
-            {text}
-          </p>
-          {sub && (
-            <p className="text-xs font-body capitalize mt-1 break-words" style={{ color: 'var(--text-muted)' }}>
-              {sub}
-            </p>
+// ── Row detail drawer ────────────────────────────────────────────────────────
+// Slide-in panel showing every field of an event with nothing truncated.
+// Opened by clicking (or Enter/Space-ing) anywhere on a row.
+function DetailField({ label, value, mono = false }) {
+  if (value === null || value === undefined || value === '') return null
+  return (
+    <div>
+      <p className="text-xs font-body font-semibold uppercase tracking-widest mb-1" style={{ color: 'var(--text-muted)' }}>
+        {label}
+      </p>
+      <p className={`text-sm break-words ${mono ? 'font-mono' : 'font-body'}`} style={{ color: 'var(--text-primary)' }}>
+        {value}
+      </p>
+    </div>
+  )
+}
+
+function AuditDetailDrawer({ log, showSync, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  if (!log) return null
+
+  const meta    = getMeta(log.action)
+  const ActionIcon = meta.icon
+  const result  = log.result || 'unknown'
+  const resMeta = RESULT_META[result]
+  const ResIcon = resMeta?.icon ?? AlertCircle
+
+  return (
+    <div className="fixed inset-0 z-50 animate-fade-in">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+
+      {/* Panel */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Event details"
+        className="absolute right-0 top-0 bottom-0 w-full sm:w-[420px] overflow-y-auto animate-slide-in-right"
+        style={{ background: 'var(--bg-surface-2)', borderLeft: '1px solid var(--border-mid)' }}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: 'var(--border-subtle)' }}>
+          <div className="flex items-center gap-2.5">
+            <span className={`w-9 h-9 rounded-md border flex items-center justify-center shrink-0 ${meta.bg}`}>
+              <ActionIcon size={17} className={meta.color} />
+            </span>
+            <div>
+              <p className={`text-sm font-medium ${meta.color}`}>{meta.label}</p>
+              <p className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>{formatTime(log.timestamp)}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="icon-btn" aria-label="Close details">
+            <XIcon size={16} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <DetailField label="Result" value={
+            <span className={`inline-flex items-center gap-1.5 w-fit px-2.5 py-1 rounded-md text-sm font-body font-medium border ${resMeta?.cls || 'text-slate-500 bg-surface-4 border-white/10'}`}>
+              <ResIcon size={14} /> {resMeta?.label || result}
+            </span>
+          } />
+          <DetailField label="User" value={log.username} />
+          <DetailField label="User ID" value={log.user_id} mono />
+          <DetailField label="Target" value={getTarget(log)} mono />
+          <DetailField label="Target Type" value={getTargetSub(log)} />
+          <DetailField label="Details" value={log.details} />
+          <DetailField label="Source IP" value={log.ip_source} mono />
+          <DetailField label="Timestamp (absolute)" value={formatTime(log.timestamp)} mono />
+          <DetailField label="Timestamp (relative)" value={relativeTime(log.timestamp)} />
+          {showSync && (
+            <DetailField label="Syslog Sync" value={
+              log.syslog_synced === 1 || log.syslog_synced === true ? 'Forwarded'
+                : log.syslog_synced === 0 || log.syslog_synced === false ? 'Failed'
+                : 'Not forwarded'
+            } />
           )}
         </div>
-      )}
+      </div>
     </div>
   )
 }
@@ -666,7 +702,7 @@ function ScheduledExportsPanel({ schedules, loading, destinations, syslogConfigu
 export default function AuditPage() {
   const [logs, setLogs]               = useState([])
   const [total, setTotal]             = useState(0)
-  const [tallies, setTallies]         = useState({ success: 0, failure: 0, partial: 0, synced: 0 })
+  const [tallies, setTallies]         = useState({ success: 0, failure: 0, partial: 0, synced: 0, byAction: {} })
   const [loading, setLoading]         = useState(true)
   const [page, setPage]               = useState(1)
   const [search, setSearch]           = useState('')
@@ -679,16 +715,35 @@ export default function AuditPage() {
   const [syslogModalOpen, setSyslogModalOpen] = useState(false)
   const { isAdmin } = usePermissions()
   const [tab, setTab] = useState('events') // 'events' | 'changes' | 'schedules'
+  const [selectedLog, setSelectedLog] = useState(null) // row clicked -> open detail drawer
   const LIMIT = 25
+  // Virtualization: only kicks in once a page's row count gets large enough
+  // that rendering every row would actually cost something — at the current
+  // 25/page default every row renders as before. If LIMIT is ever raised (or
+  // an "unpaginated" mode is added) this keeps scrolling smooth without
+  // rendering hundreds of offscreen rows.
+  const ROW_HEIGHT = 68
+  const VIRTUALIZE_THRESHOLD = 60
+  const OVERSCAN = 6
+  const [rowsScrollTop, setRowsScrollTop] = useState(0)
+  const rowsContainerRef = useRef(null)
   const currentFilters = { search, actionFilter, resultFilter, fromDate, toDate }
-  const applyView = (f) => {
+  const [appliedView, setAppliedView] = useState(null) // { id, name, filters } | null
+  const applyView = (f, view) => {
     setSearch(f.search || '')
     setActionFilter(f.actionFilter || 'all')
     setResultFilter(f.resultFilter || 'all')
     setFromDate(f.fromDate || '')
     setToDate(f.toDate || '')
     setPage(1)
+    setAppliedView(view ? { id: view.id, name: view.name, filters: f } : null)
   }
+  // Once a view is applied, any further tweak to the filters makes it "dirty"
+  // — still shown as the active view, but flagged as no longer matching
+  // exactly what was saved, so it stays legible instead of silently stale.
+  const isViewDirty = appliedView
+    ? Object.keys(currentFilters).some(k => (currentFilters[k] || '') !== (appliedView.filters[k] || ''))
+    : false
 
   // ── Scheduled log exports ──────────────────────────────────────────────
   const [schedules, setSchedules]         = useState([])
@@ -781,6 +836,7 @@ export default function AuditPage() {
 
   const handleExport = async (format) => {
     setExportFormat(format)
+    const toastId = toast.loading('Preparing export…')
     try {
       const params = buildParams({ format })
       const res = await api.get(`/audit/export?${params}`, { responseType: 'blob' })
@@ -796,9 +852,9 @@ export default function AuditPage() {
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
-      toast.success(`Audit log exported as ${format.toUpperCase()}`)
+      toast.success(`Downloaded ${filename}`, { id: toastId })
     } catch {
-      toast.error('Export failed')
+      toast.error('Export failed', { id: toastId })
     } finally {
       setExportFormat(null)
     }
@@ -988,25 +1044,48 @@ export default function AuditPage() {
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pt-3 border-t border-white/6">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-secondary)' }}>Action</span>
-            {FILTER_ACTIONS.map(a => (
-              <button key={a} onClick={() => setActionFilter(a)}
-                className={`chip h-8 px-3 text-sm capitalize ${actionFilter === a ? 'chip-selected' : ''}`}>
-                {a === 'all' ? 'All' : (ACTION_META[a]?.label ?? a)}
-              </button>
-            ))}
+            {FILTER_ACTIONS.map(a => {
+              const count = a === 'all' ? total : (tallies.byAction?.[a] ?? 0)
+              return (
+                <button key={a} onClick={() => setActionFilter(a)}
+                  className={`chip h-8 px-3 text-sm capitalize ${actionFilter === a ? 'chip-selected' : ''}`}>
+                  {a === 'all' ? 'All' : (ACTION_META[a]?.label ?? a)}
+                  <span className="ml-1 opacity-60 tabular-nums">({count})</span>
+                </button>
+              )
+            })}
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-xs font-body font-semibold uppercase tracking-widest mr-0.5" style={{ color: 'var(--text-secondary)' }}>Result</span>
-            {FILTER_RESULTS.map(r => (
-              <button key={r} onClick={() => setResultFilter(r)}
-                className={`chip h-8 px-3 text-sm capitalize ${resultFilter === r ? 'chip-selected' : ''}`}>
-                {r === 'all' ? 'All' : r.charAt(0).toUpperCase() + r.slice(1)}
-              </button>
-            ))}
+            {FILTER_RESULTS.map(r => {
+              const count = r === 'all' ? total : (tallies[r] ?? 0)
+              return (
+                <button key={r} onClick={() => setResultFilter(r)}
+                  className={`chip h-8 px-3 text-sm capitalize ${resultFilter === r ? 'chip-selected' : ''}`}>
+                  {r === 'all' ? 'All' : r.charAt(0).toUpperCase() + r.slice(1)}
+                  <span className="ml-1 opacity-60 tabular-nums">({count})</span>
+                </button>
+              )
+            })}
           </div>
 
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2.5">
+            {appliedView && (
+              <span
+                className="flex items-center gap-1.5 text-xs font-body px-2.5 py-1 rounded-lg border"
+                style={
+                  isViewDirty
+                    ? { color: 'var(--accent-yellow, #eab308)', background: 'rgba(234,179,8,0.08)', borderColor: 'rgba(234,179,8,0.25)' }
+                    : { color: '#a78bfa', background: 'rgba(167,139,250,0.08)', borderColor: 'rgba(167,139,250,0.25)' }
+                }
+                title={isViewDirty ? `Filters no longer match "${appliedView.name}"` : `Showing saved view "${appliedView.name}"`}
+              >
+                <Bookmark size={12} />
+                {appliedView.name}
+                {isViewDirty && <span className="opacity-80">· edited</span>}
+              </span>
+            )}
             <SavedViews page="audit" filters={currentFilters} onApply={applyView} />
           </div>
         </div>
@@ -1025,9 +1104,10 @@ export default function AuditPage() {
       <div className="glass rounded-xl border border-white/8 overflow-x-auto">
         <div className="min-w-[720px]">
 
-        {/* Table header */}
+        {/* Table header — sticky so column labels stay visible once a
+            filtered result set scrolls past a screen's height */}
         <div
-          className="grid items-center gap-4 pl-4 pr-5 py-3 border-b border-white/10 bg-surface-2/60"
+          className="sticky top-0 z-10 grid items-center gap-4 pl-4 pr-5 py-3 border-b border-white/10 bg-surface-2/95 backdrop-blur-sm"
           style={{ gridTemplateColumns: gridCols }}
         >
           {['Timestamp', 'User', 'Action', 'Target', 'Source IP'].map(h => (
@@ -1056,11 +1136,38 @@ export default function AuditPage() {
             </div>
             <p className="font-body text-sm" style={{ color: 'var(--text-secondary)' }}>No audit events found</p>
             <p className="font-body text-sm" style={{ color: 'var(--text-muted)' }}>Try adjusting your filters</p>
+            {(search || actionFilter !== 'all' || resultFilter !== 'all' || fromDate || toDate) && (
+              <button
+                onClick={() => { setSearch(''); setActionFilter('all'); setResultFilter('all'); setFromDate(''); setToDate('') }}
+                className="btn-ghost mt-1 text-sm"
+              >
+                <XIcon size={14} className="text-brand-400" />
+                Clear all filters
+              </button>
+            )}
           </div>
 
         ) : (
-          <div className="divide-y divide-white/5">
-            {logs.map((log, i) => {
+          <div
+            ref={rowsContainerRef}
+            className={logs.length > VIRTUALIZE_THRESHOLD ? 'divide-y divide-white/5 overflow-y-auto max-h-[70vh]' : 'divide-y divide-white/5'}
+            onScroll={logs.length > VIRTUALIZE_THRESHOLD ? (e) => setRowsScrollTop(e.currentTarget.scrollTop) : undefined}
+          >
+            {(() => {
+              const virtualize = logs.length > VIRTUALIZE_THRESHOLD
+              const containerHeight = 70 * (window.innerHeight / 100) // 70vh in px
+              const startIdx = virtualize ? Math.max(0, Math.floor(rowsScrollTop / ROW_HEIGHT) - OVERSCAN) : 0
+              const endIdx = virtualize
+                ? Math.min(logs.length, Math.ceil((rowsScrollTop + containerHeight) / ROW_HEIGHT) + OVERSCAN)
+                : logs.length
+              const topPad = virtualize ? startIdx * ROW_HEIGHT : 0
+              const bottomPad = virtualize ? (logs.length - endIdx) * ROW_HEIGHT : 0
+
+              return (
+                <>
+                  {topPad > 0 && <div style={{ height: topPad }} />}
+                  {logs.slice(startIdx, endIdx).map((log, si) => {
+              const i = startIdx + si
               const meta       = getMeta(log.action)
               const ActionIcon = meta.icon
               // ── result comes from `result` column, not `status` ──
@@ -1071,7 +1178,11 @@ export default function AuditPage() {
               return (
                 <div
                   key={log.id ?? i}
-                  className="relative grid items-start gap-4 pl-4 pr-5 py-3.5 hover:bg-surface-3/60 transition-colors group"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedLog(log)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedLog(log) } }}
+                  className="relative grid items-start gap-4 pl-4 pr-5 py-3.5 hover:bg-surface-3/60 transition-colors group cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-brand-400/50"
                   style={{
                     gridTemplateColumns: gridCols,
                     background: i % 2 === 1 ? 'var(--bg-surface-1, rgba(255,255,255,0.015))' : 'transparent',
@@ -1084,10 +1195,10 @@ export default function AuditPage() {
                     style={{ background: getResultAccent(result), opacity: result === 'success' ? 0.35 : 0.8 }}
                   />
 
-                  {/* Timestamp */}
-                  <div className="flex items-center gap-2 min-w-0">
+                  {/* Timestamp — relative for fast scanning, absolute on hover */}
+                  <div className="flex items-center gap-2 min-w-0" title={formatTime(log.timestamp)}>
                     <Clock size={14} className="text-brand-400 shrink-0" />
-                    <ExpandableCell text={formatTime(log.timestamp)} mono className="text-slate-400 tabular-nums" />
+                    <ExpandableCell text={relativeTime(log.timestamp)} mono className="text-slate-400 tabular-nums" />
                   </div>
 
                   {/* User */}
@@ -1152,7 +1263,11 @@ export default function AuditPage() {
                   )}
                 </div>
               )
-            })}
+                  })}
+                  {bottomPad > 0 && <div style={{ height: bottomPad }} />}
+                </>
+              )
+            })()}
           </div>
         )}
         </div>
@@ -1203,6 +1318,10 @@ export default function AuditPage() {
         </div>
       )}
       </>
+      )}
+
+      {selectedLog && (
+        <AuditDetailDrawer log={selectedLog} showSync={showSync} onClose={() => setSelectedLog(null)} />
       )}
 
       <ScheduleLogExportModal
