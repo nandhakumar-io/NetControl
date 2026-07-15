@@ -13,6 +13,7 @@ import PageHeader from '../components/ui/PageHeader'
 import SyslogSettingsModal from '../components/modals/SyslogSettingsModal'
 import ScheduleLogExportModal from '../components/modals/ScheduleLogExportModal'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
+import SavedViews from '../components/SavedViews'
 import { usePermissions } from '../hooks/usePermissions'
 import { format } from 'date-fns'
 
@@ -679,6 +680,15 @@ export default function AuditPage() {
   const { isAdmin } = usePermissions()
   const [tab, setTab] = useState('events') // 'events' | 'changes' | 'schedules'
   const LIMIT = 25
+  const currentFilters = { search, actionFilter, resultFilter, fromDate, toDate }
+  const applyView = (f) => {
+    setSearch(f.search || '')
+    setActionFilter(f.actionFilter || 'all')
+    setResultFilter(f.resultFilter || 'all')
+    setFromDate(f.fromDate || '')
+    setToDate(f.toDate || '')
+    setPage(1)
+  }
 
   // ── Scheduled log exports ──────────────────────────────────────────────
   const [schedules, setSchedules]         = useState([])
@@ -994,6 +1004,10 @@ export default function AuditPage() {
                 {r === 'all' ? 'All' : r.charAt(0).toUpperCase() + r.slice(1)}
               </button>
             ))}
+          </div>
+
+          <div className="ml-auto">
+            <SavedViews page="audit" filters={currentFilters} onApply={applyView} />
           </div>
         </div>
       </div>

@@ -793,7 +793,7 @@ export default function MonitoringPage() {
     <div className="p-4 sm:p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
 
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-lg font-display font-bold" style={{color:'var(--text-primary)'}}>Live Monitoring</h1>
           <p className="text-[11px] font-mono mt-0.5" style={{color:'var(--text-muted)'}}>
@@ -804,11 +804,11 @@ export default function MonitoringPage() {
         <div className="flex items-center gap-2">
           <button onClick={()=>setShowOverview(v=>!v)}
             className={`text-xs px-3 py-1.5 rounded-lg font-body transition-all ${showOverview?'bg-brand-500/15 text-brand-400 border border-brand-500/25':'btn-ghost'}`}>
-            Fleet Overview
+            <span className="hidden sm:inline">Fleet </span>Overview
           </button>
           <button onClick={()=>navigate('/monitoring/history')}
             className="text-xs px-3 py-1.5 rounded-lg font-body transition-all btn-ghost flex items-center gap-1.5">
-            <History size={12}/> Metrics History
+            <History size={12}/> <span className="hidden sm:inline">Metrics </span>History
           </button>
           <button onClick={()=>load(true)} disabled={refreshing} className="icon-btn">
             <RefreshCw size={13} className={refreshing?'animate-spin':''}/>

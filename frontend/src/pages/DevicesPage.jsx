@@ -14,6 +14,7 @@ import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import FilePushModal from '../components/modals/FilePushModal'
 import DeviceRegistrationModal from '../components/modals/DeviceRegistrationModal'
 import BulkEditModal from '../components/modals/BulkEditModal'
+import SavedViews from '../components/SavedViews'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
 
@@ -709,6 +710,14 @@ export default function DevicesPage() {
   const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all' || tagFilter.size > 0
 
   const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()) }
+  const currentFilters = { search, osFilter, statusFilter, groupFilter, tagFilter: [...tagFilter] }
+  const applyView = (f) => {
+    setSearch(f.search || '')
+    setOsFilter(f.osFilter || 'all')
+    setStatusFilter(f.statusFilter || 'all')
+    setGroupFilter(f.groupFilter || 'all')
+    setTagFilter(new Set(f.tagFilter || []))
+  }
   const toggleTagFilter = (tag) => {
     setTagFilter(prev => {
       const next = new Set(prev)
@@ -897,6 +906,9 @@ export default function DevicesPage() {
         )}
 
         <div className="flex-1" />
+
+        {/* Saved views */}
+        <SavedViews page="devices" filters={currentFilters} onApply={applyView} isLight={isLight} />
 
         {/* Clear filters */}
         {hasFilters && (

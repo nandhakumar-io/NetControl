@@ -873,6 +873,13 @@ run()
       console.warn('  ⚠  user_last_bulk_run:', e.message);
     }
     try {
+      const { migrateSavedViews } = require('./migrate-saved-views');
+      await migrateSavedViews();
+      console.log('  ✓ saved_views (named filter combos for Devices / Audit list pages)');
+    } catch (e) {
+      console.warn('  ⚠  saved_views:', e.message);
+    }
+    try {
       const { migrateDefaultRunbooks } = require('./migrate-default-runbooks');
       await migrateDefaultRunbooks();
       console.log('  ✓ default runbooks (seeded starter restart/cleanup/flush actions per org)');
