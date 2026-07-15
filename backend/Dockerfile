@@ -23,12 +23,31 @@ WORKDIR /app
 # (e.g. --cap-drop=ALL, gVisor, or a restrictive Kubernetes securityContext),
 # add back CAP_NET_RAW and CAP_NET_ADMIN or nmap will silently fall back to a
 # connect() scan with no OS detection.
+# ── Database backup tooling ───────────────────────────────────────────────────
+# services/backupService.js's buildDatabaseDumpStream() shells out to
+# `mysqldump` for the one-click "Backup NetControl Database" feature
+# (routes/backup.js's POST /database) — nothing here ever installed it, so
+# that feature failed immediately with "mysqldump failed to start: spawn
+# mysqldump ENOENT" the first time anyone actually used it.
+#
+# Alpine dropped the `mysql-client` package name years ago; `mariadb-client`
+# is the current apk package that provides the mysqldump/mysql/mysqladmin
+# binaries. It talks the MySQL wire protocol and its mysqldump supports every
+# flag buildDatabaseDumpStream() passes (--single-transaction, --routines,
+# --triggers, --events) against the mysql:8.4 server this compose file runs.
+# Caveat worth knowing: MariaDB's mysqldump can occasionally choke on very
+# new MySQL-8-only collations/charsets in a CREATE TABLE statement (e.g.
+# utf8mb4_0900_ai_ci showing up as an unrecognized default in older
+# mariadb-client builds) — not an issue for this project's own schema today,
+# but worth remembering if a future migration introduces one and a backup
+# starts failing with a collation-related mysqldump error.
 RUN apk add --no-cache \
       samba-client \
       samba-common-tools \
       nmap \
       nmap-scripts \
       ca-certificates \
+      mariadb-client \
     && mkdir -p /etc/samba /var/lib/samba/private /var/cache/samba /var/log/samba \
     && { \
          echo '[global]'; \
