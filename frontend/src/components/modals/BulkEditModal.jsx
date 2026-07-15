@@ -7,7 +7,7 @@
 // jump to, not just whoever made it.
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Bookmark, Plus, X, Check, ChevronDown } from 'lucide-react'
-import api from '../lib/api'
+import api from '../../lib/api'
 import { useAuthStore } from '../store/authStore'
 
 export default function SavedViews({ page, filters, onApply, isLight }) {
