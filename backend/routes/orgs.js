@@ -81,7 +81,8 @@ router.post('/:id/switch', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── GET /api/orgs/:id/usage — device count vs. plan limit (billing/limits) ──
+// ── GET /api/orgs/:id/usage — device count vs. plan limit, plus a 24h
+//    bandwidth total (billing/limits + the org-usage dashboard) ────────────
 router.get('/:id/usage', requireOrgContext, async (req, res) => {
   try {
     if (req.orgId !== req.params.id && req.user.role !== 'admin') {
@@ -94,11 +95,37 @@ router.get('/:id/usage', requireOrgContext, async (req, res) => {
     const org = req.orgId === req.params.id ? req.org : await queryOne('SELECT * FROM organizations WHERE id = ?', [req.params.id]);
     if (!org) return res.status(404).json({ error: 'Organization not found' });
     const [{ device_count }] = await query('SELECT COUNT(*) AS device_count FROM devices WHERE org_id = ?', [req.params.id]);
+
+    // 24h bandwidth total — metrics_history stores one row per device per
+    // 60s bucket with net_rx_sum/net_tx_sum (sum of that bucket's raw
+    // bytes/sec samples) and net_n (how many samples landed in it), so
+    // avg bytes/sec for a bucket = net_rx_sum / net_n, and bytes actually
+    // moved in that bucket ≈ that average held for the full 60s bucket
+    // width. Summed across every bucket in the last 24h, that's a
+    // reasonable estimate of total transfer per device — not billing-grade
+    // metering, but the same "average rate over the sampling window" logic
+    // metrics.js already uses for CSV export (net_rx_avg_bps), just turned
+    // into a total instead of a rate.
+    const sinceTs = Math.floor(Date.now() / 1000) - 24 * 3600;
+    const [bw] = await query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN mh.net_n > 0 THEN (mh.net_rx_sum / mh.net_n) * 60 ELSE 0 END), 0) AS rx_bytes_24h,
+         COALESCE(SUM(CASE WHEN mh.net_n > 0 THEN (mh.net_tx_sum / mh.net_n) * 60 ELSE 0 END), 0) AS tx_bytes_24h
+       FROM metrics_history mh
+       INNER JOIN devices d ON d.id = mh.device_id
+       WHERE d.org_id = ? AND mh.bucket_ts >= ?`,
+      [req.params.id, sinceTs]
+    );
+
     res.json({
       device_count,
       device_limit: org.device_limit,
       plan: org.plan,
       over_limit: device_count > org.device_limit,
+      bandwidth_24h: {
+        rx_bytes: Math.round(Number(bw.rx_bytes_24h) || 0),
+        tx_bytes: Math.round(Number(bw.tx_bytes_24h) || 0),
+      },
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

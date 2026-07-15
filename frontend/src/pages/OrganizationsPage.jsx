@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Building2, Plus, X, Loader2, Users, ArrowRightLeft, Trash2,
-  Crown, Eye, Wrench, Gauge, Check, KeyRound, HardDrive,
+  Crown, Eye, Wrench, Gauge, Check, KeyRound, HardDrive, Activity,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -19,6 +19,17 @@ import { useAuthStore } from '../store/authStore'
 import EnrollmentTokenModal from '../components/modals/EnrollmentTokenModal'
 
 const ROLE_ICON = { admin: Crown, operator: Wrench, viewer: Eye }
+
+// Same helper as pages/BackupPage.jsx — kept local rather than imported
+// since it's a two-line pure function, not worth a shared-utils module yet.
+function formatBytes(n) {
+  if (n === null || n === undefined) return '—'
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = n / 1024, i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(1)} ${units[i]}`
+}
 
 // Small "340 / 500 devices" bar shown per org card. Purely a visibility
 // feature today (no enforcement change) — the limit already exists on
@@ -35,7 +46,7 @@ function UsageBar({ usage, deviceLimit }) {
   const pctUsed = deviceLimit > 0 ? Math.min(100, (usage.device_count / deviceLimit) * 100) : 0
   const barColor = usage.over_limit ? 'bg-accent-red' : pctUsed >= 85 ? 'bg-amber-400' : 'bg-brand-400'
   return (
-    <div className="mt-1 max-w-[220px]">
+    <div className="mt-1 max-w-[260px]">
       <div className="flex items-center justify-between mb-0.5">
         <span className={`text-[11px] font-mono ${usage.over_limit ? 'text-accent-red font-semibold' : 'text-slate-500'}`}>
           {usage.device_count} / {usage.device_limit} devices
@@ -45,6 +56,11 @@ function UsageBar({ usage, deviceLimit }) {
       <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
         <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pctUsed}%` }} />
       </div>
+      {usage.bandwidth_24h && (
+        <p className="text-[11px] font-mono text-slate-500 mt-1">
+          ↓{formatBytes(usage.bandwidth_24h.rx_bytes)} / ↑{formatBytes(usage.bandwidth_24h.tx_bytes)} <span className="text-slate-600">last 24h</span>
+        </p>
+      )}
     </div>
   )
 }
@@ -131,7 +147,7 @@ export default function OrganizationsPage() {
       />
 
       {activeOrg && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
           <StatCard icon={Building2} label="Active organization" value={activeOrg.name}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
           <StatCard icon={Gauge} label="Plan" value={activeOrg.plan}
@@ -142,6 +158,11 @@ export default function OrganizationsPage() {
             value={usageByOrg[activeOrg.id] ? `${usageByOrg[activeOrg.id].device_count} / ${usageByOrg[activeOrg.id].device_limit}` : '—'}
             iconBg={usageByOrg[activeOrg.id]?.over_limit ? 'bg-accent-red/15 border-accent-red/25' : 'bg-brand-500/15 border-brand-500/25'}
             iconColor={usageByOrg[activeOrg.id]?.over_limit ? 'text-accent-red' : 'text-brand-400'} />
+          <StatCard icon={Activity} label="Bandwidth (24h)"
+            value={usageByOrg[activeOrg.id]?.bandwidth_24h
+              ? `↓${formatBytes(usageByOrg[activeOrg.id].bandwidth_24h.rx_bytes)} / ↑${formatBytes(usageByOrg[activeOrg.id].bandwidth_24h.tx_bytes)}`
+              : '—'}
+            iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
         </div>
       )}
 

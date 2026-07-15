@@ -14,12 +14,13 @@ export default function StatCard({ icon: Icon, label, value, sub, iconColor, ico
         <Icon size={20} className={iconColor} />
       </div>
       <div className="min-w-0">
-        <p className="text-xs font-body uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+        <p className="text-xs font-body uppercase tracking-wide truncate" style={{ color: 'var(--text-muted)' }}>
           {label}
         </p>
         <p
-          className={`text-2xl font-display leading-none mt-0.5 ${accent || ''}`}
+          className={`text-2xl font-display leading-none mt-0.5 truncate ${accent || ''}`}
           style={!accent ? { color: 'var(--text-primary)' } : {}}
+          title={typeof value === 'string' ? value : undefined}
         >
           {value}
         </p>
