@@ -157,6 +157,7 @@ export default function SlaReportsPage() {
   }
 
   const download = async (report) => {
+    const toastId = toast.loading(`Preparing ${report.file_name}…`)
     try {
       const res = await api.get(`/sla-reports/${report.id}/download`, { responseType: 'blob' })
       const url = URL.createObjectURL(res.data)
@@ -164,8 +165,9 @@ export default function SlaReportsPage() {
       a.href = url; a.download = report.file_name
       document.body.appendChild(a); a.click(); a.remove()
       URL.revokeObjectURL(url)
+      toast.success(`Downloaded ${report.file_name}`, { id: toastId })
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Download failed')
+      toast.error(e.response?.data?.error || 'Download failed', { id: toastId })
     }
   }
 

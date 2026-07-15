@@ -23,6 +23,16 @@ const REFRESH_MS     = 15000
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmtTime     = ts => ts ? new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—'
+const relativeAgo = ms => {
+  if (!ms) return null
+  const secs = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+  if (secs < 5)    return 'just now'
+  if (secs < 60)   return `${secs}s ago`
+  const mins = Math.floor(secs / 60)
+  if (mins < 60)   return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  return `${hrs}h ago`
+}
 const fmtUptime   = s => { if(!s) return '—'; const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60); if(d>0) return `${d}d ${h}h`; if(h>0) return `${h}h ${m}m`; return `${m}m` }
 const fmtBytes    = b => { if(!b) return '—'; const u=['B','KB','MB','GB']; let i=0; while(b>=1024&&i<3){b/=1024;i++} return `${b.toFixed(1)}${u[i]}` }
 const pct         = (u,t) => t ? Math.round(u/t*100) : 0
@@ -223,6 +233,11 @@ export default function DashboardPage() {
   const [loading,    setLoading]    = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [lastRefresh,setLastRefresh]= useState(null)
+  const [tick, setTick] = useState(0) // forces a re-render every few seconds so "refreshed Xs ago" ticks up live, independent of actual data refreshes
+  useEffect(() => {
+    const t = setInterval(() => setTick(v => v + 1), 5000)
+    return () => clearInterval(t)
+  }, [])
   const [actionModal,setActionModal]= useState(null)
 
   // ── Persistent refs — NEVER wiped on refresh, only appended to ────────────
@@ -471,7 +486,18 @@ export default function DashboardPage() {
           </h1>
           <p className="text-[11px] font-mono mt-0.5" style={{color:'var(--text-muted)'}}>
             {new Date().toLocaleDateString([],{weekday:'long',day:'numeric',month:'long',year:'numeric'})}
-            {lastRefresh && <span className="ml-3 opacity-50">· refreshed {fmtTime(lastRefresh/1000)}</span>}
+            {lastRefresh && (
+              <span
+                className="ml-3"
+                style={{ opacity: 0.5 }}
+                title={`Last refreshed at ${fmtTime(lastRefresh/1000)}`}
+              >
+                · refreshed{' '}
+                <span style={Date.now() - lastRefresh > REFRESH_MS * 3 ? { color: 'var(--accent-yellow, #eab308)', opacity: 1 } : undefined}>
+                  {relativeAgo(lastRefresh)}
+                </span>
+              </span>
+            )}
           </p>
         </div>
         <button onClick={()=>fetchAll(true)} disabled={refreshing} className="icon-btn" title="Refresh">
