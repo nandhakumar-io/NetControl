@@ -561,6 +561,58 @@ router.post('/:id/poll', param('id').isUUID(), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POST /api/devices/bulk-agent-update ──────────────────────────────────────
+// Queues an immediate agent self-update for the selected devices, instead of
+// each agent waiting for its own AUTO_UPDATE poll cooldown (agent/
+// netcontrol-agent.js's checkForUpdate() normally waits up to
+// UPDATE_RETRY_COOLDOWN_MS, and does nothing at all if AUTO_UPDATE=false).
+//
+// This is a one-shot, explicit admin action — it doesn't touch or require
+// AUTO_UPDATE, and doesn't affect devices that weren't selected. Setting
+// agent_update_requested_at just marks the request; the agent picks it up
+// on its next metrics POST, where routes/metrics.js's ingest handler folds
+// it into the response as `force_update: true` and clears the flag once
+// delivered (see routes/metrics.js).
+//
+// Admin-only: unlike Wake/Shutdown/Restart, this pushes and runs a new
+// binary on the device, so it gets the same restriction as
+// reset-host-key/bulk-import rather than being open to operators.
+router.post('/bulk-agent-update',
+  requireRole('admin'),
+  body('deviceIds').isArray({ min: 1, max: 500 }).withMessage('deviceIds must be an array of 1–500 items'),
+  body('deviceIds.*').isUUID().withMessage('Invalid device id'),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid request', details: errors.array() });
+
+    try {
+      const { deviceIds } = req.body;
+      const now = Math.floor(Date.now() / 1000);
+      const placeholders = deviceIds.map(() => '?').join(',');
+
+      // Org-scoped update — same shape as bulk-maintenance below, but no
+      // operator carve-out: only admins can reach this route at all.
+      const result = await execute(
+        `UPDATE devices SET agent_update_requested_at = ?
+           WHERE id IN (${placeholders}) AND org_id = ? AND agent_key_hash IS NOT NULL`,
+        [now, ...deviceIds, req.orgId]
+      );
+
+      const requested = result.affectedRows || 0;
+      const skipped = deviceIds.length - requested;
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'bulk_agent_update_request', targetType: 'device', targetId: null,
+        targetName: `${requested} device(s)`, ipSource: req.realIp, result: 'success',
+        details: `Queued immediate agent update for ${requested} device(s)${skipped ? `, ${skipped} skipped (not agent-managed or not found)` : ''}`,
+      });
+
+      res.json({ requested, skipped });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
 // ── POST /api/devices/bulk-maintenance ───────────────────────────────────────
 // Toggle maintenance mode across many devices at once (patch windows,
 // whole-group maintenance — pair with the frontend's "select all" in a

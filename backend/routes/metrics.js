@@ -159,7 +159,7 @@ async function agentAuth(req, res, next) {
   const keyHash = hashKey(key);
   try {
     const row = await queryOne(
-      'SELECT id, name, ip_address, status, org_id, agent_version FROM devices WHERE agent_key_hash = ?',
+      'SELECT id, name, ip_address, status, org_id, agent_version, agent_update_requested_at FROM devices WHERE agent_key_hash = ?',
       [keyHash]
     );
     if (!row) return res.status(403).json({ error: 'Invalid API key' });
@@ -488,7 +488,23 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   // — see agent/netcontrol-agent.js's checkForUpdate()).
   const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version || device.agent_version);
 
-  res.json({ ok: true, device_id: device.id, update_available, latest_version });
+  // Admin-queued immediate update (routes/devices.js's POST
+  // /bulk-agent-update) — distinct from the routine update_available signal
+  // above: this bypasses the agent's AUTO_UPDATE gate and cooldown entirely
+  // since it's an explicit one-shot admin action, not the agent's own
+  // periodic self-update check. Cleared here (fire-once) rather than left
+  // for the agent to ack, so a request never re-fires after the device
+  // reports back — if this particular response doesn't reach the agent
+  // (dropped connection etc.), the field is already cleared and the update
+  // simply waits for the admin to notice and re-queue it, which is the
+  // safer failure mode for something that overwrites the running agent.
+  let force_update = false;
+  if (device.agent_update_requested_at) {
+    force_update = true;
+    run('UPDATE devices SET agent_update_requested_at = NULL WHERE id = ?', [device.id]).catch(() => {});
+  }
+
+  res.json({ ok: true, device_id: device.id, update_available, latest_version, force_update });
 });
 
 // ── GET /api/metrics/policies — agent fetches its effective restriction rules ──

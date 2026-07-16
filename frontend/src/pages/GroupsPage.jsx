@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Layers, Plus, Pencil, Trash2, Monitor, Zap, Power,
   RotateCcw, X, Loader2, ChevronDown, ChevronRight,
-  Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon, LayoutGrid
+  Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon, LayoutGrid,
+  TrendingUp, TrendingDown
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -125,6 +126,16 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
 
   const healthColor = pct === 100 ? '#22c55e' : pct >= 50 ? '#fbbf24' : pct > 0 ? '#fb923c' : '#64748b'
 
+  // Day-over-day device count trend — group.device_count_prev comes from
+  // the most recent daily snapshot before today (routes/groups.js LEFT
+  // JOINs group_device_count_snapshots, populated by
+  // services/scheduledJobs.js's snapshotGroupDeviceCounts()). null means no
+  // snapshot exists yet (fresh install / group created today) — in that
+  // case there's nothing true to compare against, so no trend is shown
+  // rather than implying "+N" against a number that was never real.
+  const prevCount = group.device_count_prev
+  const trendDelta = prevCount != null ? devices.length - prevCount : null
+
   return (
     <div className="rounded-2xl overflow-hidden transition-all duration-200"
       onDoubleClick={() => onOpenLab(group)}
@@ -198,14 +209,28 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
         {/* Stats row */}
         <div className="grid grid-cols-3 gap-2 mb-4">
           {[
-            { value: devices.length, label: 'Total',   color: 'var(--text-primary)',  bg: 'var(--bg-surface-3)',      border: 'var(--border-subtle)' },
+            { value: devices.length, label: 'Total',   color: 'var(--text-primary)',  bg: 'var(--bg-surface-3)',      border: 'var(--border-subtle)', trend: true },
             { value: online,         label: 'Online',  color: '#22c55e',              bg: 'rgba(34,197,94,0.08)',     border: 'rgba(34,197,94,0.2)'  },
             { value: offline,        label: 'Offline', color: 'var(--text-muted)',    bg: 'var(--bg-surface-3)',      border: 'var(--border-subtle)' },
-          ].map(({ value, label, color, bg, border }) => (
-            <div key={label} className="rounded-xl py-2.5 text-center"
+          ].map(({ value, label, color, bg, border, trend }) => (
+            <div key={label} className="relative rounded-xl py-2.5 text-center"
               style={{ background: bg, border: `1px solid ${border}` }}>
+              {trend && trendDelta != null && trendDelta !== 0 && (
+                <span
+                  title={`${trendDelta > 0 ? '+' : ''}${trendDelta} device(s) since yesterday`}
+                  className="absolute top-1 right-1.5 inline-flex items-center gap-0.5 text-[9px] font-mono font-bold"
+                  style={{ color: trendDelta > 0 ? '#22c55e' : '#f87171' }}>
+                  {trendDelta > 0 ? <TrendingUp size={9} /> : <TrendingDown size={9} />}
+                  {trendDelta > 0 ? '+' : ''}{trendDelta}
+                </span>
+              )}
               <p className="text-xl font-mono font-bold" style={{ color }}>{value}</p>
               <p className="text-[10px] font-semibold uppercase tracking-wider mt-0.5" style={{ color: 'var(--text-faint)' }}>{label}</p>
+              {trend && (
+                <p className="text-[8px] font-mono mt-0.5" style={{ color: 'var(--text-faint)', opacity: 0.6 }}>
+                  {trendDelta == null ? '\u00A0' : trendDelta === 0 ? 'no change' : 'since yesterday'}
+                </p>
+              )}
             </div>
           ))}
         </div>

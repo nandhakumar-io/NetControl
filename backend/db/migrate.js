@@ -907,6 +907,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  agent-version:', e.message);
     }
+    try {
+      const { migrateAgentUpdateRequest } = require('./migrate-agent-update-request');
+      await migrateAgentUpdateRequest();
+      console.log('  ✓ devices.agent_update_requested_at (Devices page can now queue an immediate agent update)');
+    } catch (e) {
+      console.warn('  ⚠  agent-update-request:', e.message);
+    }
+    try {
+      const { migrateGroupDeviceSnapshots } = require('./migrate-group-device-snapshots');
+      await migrateGroupDeviceSnapshots();
+      console.log('  ✓ group_device_count_snapshots (Groups page can now show a day-over-day trend)');
+    } catch (e) {
+      console.warn('  ⚠  group-device-snapshots:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

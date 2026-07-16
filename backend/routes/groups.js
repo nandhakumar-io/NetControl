@@ -23,17 +23,23 @@ router.get('/', async (req, res) => {
     if (req.user.role !== 'admin') {
       // Operators only see groups they have been explicitly granted access to
       groups = await query(
-        'SELECT g.*, COUNT(d.id) as device_count ' +
+        'SELECT g.*, COUNT(d.id) as device_count, prev.device_count as device_count_prev ' +
         'FROM `groups` g ' +
         'INNER JOIN user_group_access uga ON uga.group_id = g.id AND uga.user_id = ? ' +
         'LEFT JOIN devices d ON d.group_id = g.id ' +
+        'LEFT JOIN group_device_count_snapshots prev ON prev.group_id = g.id ' +
+        '  AND prev.snapshot_date = (SELECT MAX(snapshot_date) FROM group_device_count_snapshots WHERE group_id = g.id AND snapshot_date < CURDATE()) ' +
         'WHERE g.org_id = ? ' +
-        'GROUP BY g.id ORDER BY g.name',
+        'GROUP BY g.id, prev.device_count ORDER BY g.name',
         [req.user.id, req.orgId]
       );
     } else {
       groups = await query(
-        'SELECT g.*, COUNT(d.id) as device_count FROM `groups` g LEFT JOIN devices d ON d.group_id = g.id WHERE g.org_id = ? GROUP BY g.id ORDER BY g.name',
+        'SELECT g.*, COUNT(d.id) as device_count, prev.device_count as device_count_prev ' +
+        'FROM `groups` g LEFT JOIN devices d ON d.group_id = g.id ' +
+        'LEFT JOIN group_device_count_snapshots prev ON prev.group_id = g.id ' +
+        '  AND prev.snapshot_date = (SELECT MAX(snapshot_date) FROM group_device_count_snapshots WHERE group_id = g.id AND snapshot_date < CURDATE()) ' +
+        'WHERE g.org_id = ? GROUP BY g.id, prev.device_count ORDER BY g.name',
         [req.orgId]
       );
     }

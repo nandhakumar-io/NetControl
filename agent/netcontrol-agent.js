@@ -411,15 +411,26 @@ let updateNoticeLogged = false;
 let lastUpdateAttempt = 0;
 const UPDATE_RETRY_COOLDOWN_MS = 30 * 60 * 1000; // don't hammer the server if something's wrong
 
-async function checkForUpdate(creds, latestVersion) {
-  if (!AUTO_UPDATE) {
-    if (!updateNoticeLogged) {
-      updateNoticeLogged = true;
-      console.log(`\n[Agent] Update available: v${latestVersion} (running v${AGENT_VERSION}). Set NC_AUTO_UPDATE=true to update automatically, or download the new build yourself.`);
+async function checkForUpdate(creds, latestVersion, force = false) {
+  if (!latestVersion) return; // force_update with no manifest configured — nothing to fetch
+  if (!force) {
+    if (!AUTO_UPDATE) {
+      if (!updateNoticeLogged) {
+        updateNoticeLogged = true;
+        console.log(`\n[Agent] Update available: v${latestVersion} (running v${AGENT_VERSION}). Set NC_AUTO_UPDATE=true to update automatically, or download the new build yourself.`);
+      }
+      return;
     }
-    return;
+    if (Date.now() - lastUpdateAttempt < UPDATE_RETRY_COOLDOWN_MS) return;
+  } else {
+    // Admin explicitly queued this from the Devices page (POST
+    // /api/devices/bulk-agent-update) — that's a deliberate one-shot
+    // action, not the agent's own silent background updater, so it applies
+    // regardless of AUTO_UPDATE and isn't subject to the routine retry
+    // cooldown. It still goes through the same checksum + size validation
+    // below before anything on disk is touched.
+    console.log(`\n[Agent] Update requested by administrator (v${AGENT_VERSION} → v${latestVersion})…`);
   }
-  if (Date.now() - lastUpdateAttempt < UPDATE_RETRY_COOLDOWN_MS) return;
   lastUpdateAttempt = Date.now();
 
   console.log(`\n[Agent] Downloading update v${latestVersion}…`);
@@ -824,8 +835,8 @@ async function main() {
       fails = 0; backoff = 2000;
       process.stdout.write(`\r[Agent] ✓ ${new Date().toLocaleTimeString()}  CPU:${metrics.cpu}%  RAM:${metrics.ram.used}/${metrics.ram.total}MB  `);
 
-      if (res.body?.update_available) {
-        checkForUpdate(creds, res.body.latest_version).catch(e =>
+      if (res.body?.update_available || res.body?.force_update) {
+        checkForUpdate(creds, res.body.latest_version, res.body.force_update).catch(e =>
           console.warn('\n[Agent] Update check failed:', e.message));
       }
     } catch (e) {

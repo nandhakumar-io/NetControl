@@ -85,10 +85,26 @@ function compareVersions(a, b) {
   return 0
 }
 
-function AgentVersionBadge({ agentVersion, latestVersion }) {
+// last_seen is written on every metrics ingest (routes/metrics.js), so it's
+// a true "last check-in" timestamp — distinct from device.status, which only
+// flips to offline once the poller decides last_seen is stale enough. A
+// device can sit "online" while quietly not having reported fresh data for
+// a while; this is what actually shows that gap.
+function fmtLastSeen(ts) {
+  if (!ts) return 'never checked in'
+  const ageSec = Math.floor(Date.now() / 1000) - ts
+  const when = new Date(ts * 1000).toLocaleString()
+  if (ageSec < 60) return `${when} (just now)`
+  if (ageSec < 3600) return `${when} (${Math.floor(ageSec / 60)}m ago)`
+  if (ageSec < 86400) return `${when} (${Math.floor(ageSec / 3600)}h ago)`
+  return `${when} (${Math.floor(ageSec / 86400)}d ago)`
+}
+
+function AgentVersionBadge({ agentVersion, latestVersion, lastSeen }) {
+  const checkinLine = `Last check-in: ${fmtLastSeen(lastSeen)}`
   if (!agentVersion) {
     return (
-      <span title="This device hasn't reported an agent version yet"
+      <span title={`This device hasn't reported an agent version yet\n${checkinLine}`}
         className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono"
         style={{ background: 'rgba(148,163,184,0.1)', color: 'var(--text-faint)' }}>
         <PackageCheck size={9} /> v?
@@ -98,7 +114,7 @@ function AgentVersionBadge({ agentVersion, latestVersion }) {
   const outdated = latestVersion && compareVersions(latestVersion, agentVersion) > 0
   return (
     <span
-      title={outdated ? `Update available: v${latestVersion}` : 'Agent is up to date'}
+      title={`${outdated ? `Update available: v${latestVersion}` : 'Agent is up to date'}\n${checkinLine}`}
       className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono font-semibold"
       style={outdated
         ? { background: 'rgba(251,191,36,0.12)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }
@@ -245,7 +261,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
           {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
         </div>
         <div className="flex items-center gap-1.5">
-          <AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} />
+          <AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} />
           <OsBadge osType={device.os_type} />
         </div>
       </div>
@@ -439,7 +455,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
       <div><OsBadge osType={device.os_type} /></div>
 
       {/* Agent version */}
-      <div><AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} /></div>
+      <div><AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} /></div>
 
       {/* Status */}
       <div className="flex items-center gap-1.5 flex-wrap">
@@ -481,7 +497,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
 }
 
 // ── Bulk bar ──────────────────────────────────────────────────────────────────
-function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onEditSelected, onMaintenanceAll, onClear, canEdit }) {
+function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onEditSelected, onMaintenanceAll, onAgentUpdateAll, onClear, canEdit }) {
   if (!count) return null
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 animate-slide-up">
@@ -504,8 +520,9 @@ function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, on
           { fn: onShutdownAll, label: 'Shutdown',  icon: <Power size={11} />,     c: '#f87171', bg: 'rgba(239,68,68,0.1)',  bc: 'rgba(239,68,68,0.25)'  },
           { fn: onRestartAll,  label: 'Restart',   icon: <RotateCcw size={11} />, c: '#fbbf24', bg: 'rgba(251,191,36,0.1)', bc: 'rgba(251,191,36,0.25)' },
           { fn: onMaintenanceAll, label: 'Maintenance', icon: <Wrench size={11} />, c: '#fb923c', bg: 'rgba(251,146,60,0.1)', bc: 'rgba(251,146,60,0.25)' },
+          { fn: onAgentUpdateAll, label: 'Update Agent', icon: <PackageCheck size={11} />, c: '#38bdf8', bg: 'rgba(56,189,248,0.1)', bc: 'rgba(56,189,248,0.25)' },
           { fn: onPushFile,    label: 'Push File', icon: <Upload size={11} />,    c: '#38bdf8', bg: 'rgba(56,189,248,0.1)', bc: 'rgba(56,189,248,0.25)' },
-        ].map((b, i) => (
+        ].filter(b => b.fn).map((b, i) => (
           <button key={i} onClick={b.fn}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
             style={{ background: b.bg, border: `1px solid ${b.bc}`, color: b.c }}>
@@ -715,6 +732,27 @@ export default function DevicesPage() {
       fetchAll(true)
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
+    }
+  }
+
+  // Queues an immediate agent self-update for the selected devices (admin
+  // only — matches the backend's requireRole('admin') on
+  // POST /devices/bulk-agent-update). Devices without an agent (agentless/
+  // SSH-only) are silently skipped server-side since there's nothing to
+  // update on them; the response tells us how many that was.
+  const bulkAgentUpdate = async () => {
+    const targets = devices.filter(d => selectedIds.has(d.id))
+    if (!targets.length) return
+    if (!window.confirm(`Queue an immediate agent update for ${targets.length} device(s)? Each agent will download and apply the current release on its next check-in.`)) return
+    try {
+      const { data } = await api.post('/devices/bulk-agent-update', {
+        deviceIds: targets.map(d => d.id),
+      })
+      toast.success(`Update queued for ${data.requested} device(s)`)
+      if (data.skipped) toast(`${data.skipped} device(s) skipped — not agent-managed`, { icon: 'ℹ️' })
+      clearSelection()
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to queue agent update')
     }
   }
 
@@ -1082,6 +1120,7 @@ export default function DevicesPage() {
         onPushFile={() => setFilePushOpen(true)}
         onEditSelected={() => setBulkEditOpen(true)}
         onMaintenanceAll={bulkToggleMaintenance}
+        onAgentUpdateAll={isAdmin ? bulkAgentUpdate : null}
         canEdit={isAdmin}
         onClear={clearSelection} />
 

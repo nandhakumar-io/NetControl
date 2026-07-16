@@ -1,6 +1,6 @@
 {
   "name": "netcontrol-agent",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "A Node agent that collects system metrics like CPU, RAM, disk, network usage, and uptime to a remote server.",
   "keywords": [
     "monitoring",
