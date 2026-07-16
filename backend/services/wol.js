@@ -54,14 +54,31 @@ async function wakeSmart(device) {
     // Prefer another device in the same group that's on the same /24 and
     // currently reporting in via the agent (agent_key_hash set, status
     // online) — that agent is physically on the target's L2 segment and
-    // can broadcast locally.
-    const candidates = await query(
-      `SELECT id, name, ip_address FROM devices
-       WHERE id != ? AND agent_key_hash IS NOT NULL AND status = 'online'
-         AND ip_address LIKE ?`,
-      [device.id, `${targetSubnet}.%`]
-    );
-    relayAgent = candidates[0] || null;
+    // can broadcast locally. Falls back to ANY online agent on that same
+    // subnet regardless of group if no same-group candidate exists — group
+    // is just a preference (keeps the relay "close" organizationally when
+    // possible), not a hard requirement, since what actually matters for
+    // an L2 broadcast to reach the target is the subnet, not the group.
+    const sameGroupCandidates = device.group_id
+      ? await query(
+          `SELECT id, name, ip_address FROM devices
+           WHERE id != ? AND agent_key_hash IS NOT NULL AND status = 'online'
+             AND ip_address LIKE ? AND group_id = ?`,
+          [device.id, `${targetSubnet}.%`, device.group_id]
+        )
+      : [];
+
+    relayAgent = sameGroupCandidates[0] || null;
+
+    if (!relayAgent) {
+      const anyCandidates = await query(
+        `SELECT id, name, ip_address FROM devices
+         WHERE id != ? AND agent_key_hash IS NOT NULL AND status = 'online'
+           AND ip_address LIKE ?`,
+        [device.id, `${targetSubnet}.%`]
+      );
+      relayAgent = anyCandidates[0] || null;
+    }
   }
 
   if (relayAgent) {

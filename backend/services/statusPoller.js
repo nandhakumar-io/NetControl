@@ -493,6 +493,41 @@ async function pollAll() {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 let _timer = null;
+let _cycleInFlight = false;
+
+// BUG FIX: this used to be a plain `setInterval(() => pollAll(), POLL_INTERVAL_MS)`,
+// which fires every 5s NO MATTER whether the previous pollAll() call has
+// finished. On a large fleet — or just a fleet with a lot of currently-
+// unreachable non-agent devices, each eating up to TCP_TIMEOUT_MS per probed
+// port, gated by only MAX_CONCURRENT=50 concurrent sockets — a single cycle
+// can easily take well over 5s. That let cycles pile up and run concurrently,
+// and because each cycle snapshots `nowSec`/device status at ITS OWN start
+// time, an old, slow, overlapping cycle's flushToDB() could run its
+// `UPDATE devices SET status='offline' ...` AFTER a newer, correct write had
+// already landed — e.g. routes/metrics.js marking a device 'online' off a
+// fresh heartbeat that arrived *during* the stale cycle's TCP-probe phase.
+// The device would then sit at 'offline' in the DB even though the agent
+// was actively posting and remote access (which doesn't touch status at
+// all) still worked fine — exactly the "shows offline but everything else
+// says it's up" symptom this was producing.
+//
+// Fix: a re-entrancy guard so a new cycle never starts while one is still
+// running, and self-scheduling (setTimeout after completion) instead of a
+// fixed-rate setInterval, so ticks can't stack up in the first place.
+async function tick() {
+  if (_cycleInFlight) {
+    console.warn('[Poller] Previous cycle still running — skipping this tick to avoid a stale/overlapping flush');
+    return;
+  }
+  _cycleInFlight = true;
+  try {
+    await pollAll();
+  } catch (e) {
+    console.error('[Poller]', e);
+  } finally {
+    _cycleInFlight = false;
+  }
+}
 
 function start() {
   if (_timer) return;
@@ -501,8 +536,8 @@ function start() {
     `grace:${AGENT_GRACE_SEC}s maxSockets:${MAX_CONCURRENT} ` +
     `nonAgentInterval:${NON_AGENT_POLL_S}s`
   );
-  pollAll().catch(console.error);
-  _timer = setInterval(() => pollAll().catch(console.error), POLL_INTERVAL_MS);
+  tick();
+  _timer = setInterval(tick, POLL_INTERVAL_MS);
   if (_timer.unref) _timer.unref();
 }
 
