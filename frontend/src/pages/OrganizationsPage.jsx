@@ -147,21 +147,22 @@ export default function OrganizationsPage() {
       />
 
       {activeOrg && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-          <StatCard icon={Building2} label="Active organization" value={activeOrg.name}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
+          <StatCard icon={Building2} label="Organization" value={activeOrg.name}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
           <StatCard icon={Gauge} label="Plan" value={activeOrg.plan}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
-          <StatCard icon={Users} label="Your role here" value={activeOrg.org_role}
+          <StatCard icon={Users} label="Your role" value={activeOrg.org_role}
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
-          <StatCard icon={HardDrive} label="Devices used"
+          <StatCard icon={HardDrive} label="Devices"
             value={usageByOrg[activeOrg.id] ? `${usageByOrg[activeOrg.id].device_count} / ${usageByOrg[activeOrg.id].device_limit}` : '—'}
             iconBg={usageByOrg[activeOrg.id]?.over_limit ? 'bg-accent-red/15 border-accent-red/25' : 'bg-brand-500/15 border-brand-500/25'}
             iconColor={usageByOrg[activeOrg.id]?.over_limit ? 'text-accent-red' : 'text-brand-400'} />
-          <StatCard icon={Activity} label="Bandwidth (24h)"
+          <StatCard icon={Activity} label="Bandwidth"
             value={usageByOrg[activeOrg.id]?.bandwidth_24h
               ? `↓${formatBytes(usageByOrg[activeOrg.id].bandwidth_24h.rx_bytes)} / ↑${formatBytes(usageByOrg[activeOrg.id].bandwidth_24h.tx_bytes)}`
               : '—'}
+            sub="Last 24h"
             iconBg="bg-brand-500/15 border-brand-500/25" iconColor="text-brand-400" />
         </div>
       )}

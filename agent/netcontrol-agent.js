@@ -24,6 +24,9 @@
  *                     credentials file was deleted or the key was rejected).
  *   NC_INTERVAL     — metrics push interval seconds (default 5, min 3)
  *   NC_CRED_FILE    — override credential storage path
+ *   NC_AUTO_UPDATE  — set to "true" to let the agent replace itself with a
+ *                     newer build the server advertises (checksum-verified,
+ *                     off by default). See checkForUpdate() below.
  */
 'use strict';
 
@@ -33,6 +36,7 @@ const path  = require('path');
 const http  = require('http');
 const https = require('https');
 const { execSync, spawnSync, spawn } = require('child_process');
+const crypto = require('crypto');
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const SERVER_URL   = (process.env.NC_SERVER_URL || '').replace(/\/$/, '');
@@ -40,6 +44,17 @@ const REG_SECRET    = process.env.NC_REG_SECRET || '';
 const INTERVAL_SEC = Math.max(3, parseInt(process.env.NC_INTERVAL || '5', 10));
 const IS_WINDOWS   = os.platform() === 'win32';
 const AGENT_PATH   = path.resolve(process.argv[1]);
+// AUTO_UPDATE: opt-in (default off) — when the server reports a newer
+// version (see checkForUpdate() below), the agent downloads the new
+// netcontrol-agent.js from the server, verifies it against the sha256 the
+// server also reports, and atomically replaces itself before triggering a
+// restart through whichever service manager installed it. Off by default
+// because self-modifying a running production agent is exactly the kind of
+// thing an operator should consciously opt into per-fleet, not something
+// that silently turns on.
+const AUTO_UPDATE  = /^(1|true|yes)$/i.test(process.env.NC_AUTO_UPDATE || '');
+let AGENT_VERSION = '0.0.0';
+try { AGENT_VERSION = require('./package.json').version || '0.0.0'; } catch { /* package.json not alongside the script — version reporting just says 0.0.0 */ }
 
 const CRED_FILE = process.env.NC_CRED_FILE || (
   IS_WINDOWS
@@ -240,6 +255,32 @@ function httpReq(urlStr, opts = {}, body = null) {
   });
 }
 
+// Like httpReq, but returns the raw Buffer + response headers instead of
+// JSON-parsing the body — needed for downloading the agent's own updated
+// script (binary-safe, and we need the X-Agent-Sha256/X-Agent-Version
+// headers httpReq's JSON-only contract throws away).
+function downloadBuffer(urlStr, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlStr);
+    const lib = url.protocol === 'https:' ? https : http;
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'GET',
+      timeout: 20000,
+      headers,
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 function longPoll(urlStr, headers = {}) {
   // +3s over the backend's own 25s/20s poll timeouts (routes rely on
   // services/webTerminal.js's setTimeout(...,25000)/(...,20000)) so the
@@ -329,6 +370,7 @@ async function register() {
     os_type:    IS_WINDOWS ? 'windows' : 'linux',
     os_version: `${os.type()} ${os.release()}`,
     arch:       os.arch(),
+    agent_version: AGENT_VERSION,
   };
   console.log(`[Agent] Registering: ${payload.hostname} (${payload.ip})`);
   const res = await httpReq(
@@ -347,6 +389,96 @@ async function register() {
   saveCreds(creds);
   console.log(`[Agent] Registered as "${creds.device_name}" (${creds.device_id})`);
   return creds;
+}
+
+// ── Self-update ──────────────────────────────────────────────────────────────
+// Triggered from the main loop whenever a metrics POST response says
+// update_available: true (see routes/metrics.js + services/agentRelease.js
+// on the server). Two modes:
+//   - AUTO_UPDATE off (default): log it once per process lifetime so an
+//     operator watching the console/journal sees it, and stop — no file
+//     touched, no restart.
+//   - AUTO_UPDATE on: download the new netcontrol-agent.js from the server
+//     (authenticated the same way metrics POSTs are, via x-api-key),
+//     verify it against the sha256 the server reports in the response
+//     headers, atomically replace this script on disk, then trigger a
+//     restart through whichever service manager installed it.
+//
+// Deliberately conservative: any failure at any step just logs and leaves
+// the currently-running agent untouched — a bad update should never be
+// able to leave a fleet of devices with no agent running at all.
+let updateNoticeLogged = false;
+let lastUpdateAttempt = 0;
+const UPDATE_RETRY_COOLDOWN_MS = 30 * 60 * 1000; // don't hammer the server if something's wrong
+
+async function checkForUpdate(creds, latestVersion) {
+  if (!AUTO_UPDATE) {
+    if (!updateNoticeLogged) {
+      updateNoticeLogged = true;
+      console.log(`\n[Agent] Update available: v${latestVersion} (running v${AGENT_VERSION}). Set NC_AUTO_UPDATE=true to update automatically, or download the new build yourself.`);
+    }
+    return;
+  }
+  if (Date.now() - lastUpdateAttempt < UPDATE_RETRY_COOLDOWN_MS) return;
+  lastUpdateAttempt = Date.now();
+
+  console.log(`\n[Agent] Downloading update v${latestVersion}…`);
+  const res = await downloadBuffer(`${SERVER_URL}/api/agent-release/download`, { 'x-api-key': creds.api_key });
+  if (res.status !== 200) {
+    console.warn(`[Agent] Update download failed: HTTP ${res.status}`);
+    return;
+  }
+
+  const expectedSha = res.headers['x-agent-sha256'];
+  const actualSha = crypto.createHash('sha256').update(res.body).digest('hex');
+  if (!expectedSha || actualSha !== expectedSha) {
+    console.warn(`[Agent] Update REJECTED — checksum mismatch (expected ${expectedSha || 'none'}, got ${actualSha}). Not applying.`);
+    return;
+  }
+  if (res.body.length < 1000) {
+    // Sanity floor — a real agent script is tens of KB; anything this
+    // small is almost certainly a truncated download or an error page
+    // that somehow got a 200, not a real update. Refuse rather than risk
+    // replacing a working agent with garbage.
+    console.warn('[Agent] Update REJECTED — downloaded file suspiciously small, refusing to apply.');
+    return;
+  }
+
+  try {
+    const tmpPath = `${AGENT_PATH}.update-tmp`;
+    fs.writeFileSync(tmpPath, res.body);
+    fs.renameSync(tmpPath, AGENT_PATH); // atomic on the same filesystem — no window where the file is half-written
+    console.log(`[Agent] Update applied (v${AGENT_VERSION} → v${latestVersion}). Restarting…`);
+  } catch (e) {
+    console.error('[Agent] Update FAILED to write to disk:', e.message, '— check file permissions (the agent usually needs to run as root/SYSTEM to update itself, same as --install).');
+    return;
+  }
+
+  restartSelf();
+}
+
+// Ask whichever service manager installed this agent to relaunch it with
+// the freshly-written file, then exit this process. On Linux, systemd's
+// Restart=always (see installLinux()) means we could just exit and it
+// would come back anyway — calling systemctl restart explicitly first is
+// just belt-and-suspenders for the case where the agent is running
+// standalone under some other supervisor. On Windows, the scheduled task
+// has no restart-on-exit trigger at all (see installWindows()), so an
+// explicit `schtasks /Run` is the only thing that brings it back — without
+// it, exiting here would just leave the device with no agent until next
+// reboot.
+function restartSelf() {
+  try {
+    if (IS_WINDOWS) {
+      const child = spawn('schtasks', ['/Run', '/TN', 'NetControlAgent'], { detached: true, stdio: 'ignore' });
+      child.unref();
+    } else {
+      spawnSync('systemctl', ['restart', 'netcontrol-agent'], { stdio: 'ignore' });
+    }
+  } catch (e) {
+    console.warn('[Agent] Could not trigger a managed restart:', e.message, '— you may need to restart the agent manually to pick up the update.');
+  }
+  setTimeout(() => process.exit(0), 500); // give the spawn/systemctl call a moment to actually fire before we disappear
 }
 
 // ── Metrics ────────────────────────────────────────────────────────────────────
@@ -680,7 +812,7 @@ async function main() {
       const res = await httpReq(
         `${SERVER_URL}/api/metrics`,
         { method: 'POST', headers: { 'x-api-key': creds.api_key } },
-        metrics
+        { ...metrics, agent_version: AGENT_VERSION }
       );
       if (res.status === 403) {
         console.warn('[Agent] Key rejected — re-registering…');
@@ -691,6 +823,11 @@ async function main() {
       if (fails > 0) console.log('\n[Agent] Reconnected ✓');
       fails = 0; backoff = 2000;
       process.stdout.write(`\r[Agent] ✓ ${new Date().toLocaleTimeString()}  CPU:${metrics.cpu}%  RAM:${metrics.ram.used}/${metrics.ram.total}MB  `);
+
+      if (res.body?.update_available) {
+        checkForUpdate(creds, res.body.latest_version).catch(e =>
+          console.warn('\n[Agent] Update check failed:', e.message));
+      }
     } catch (e) {
       fails++;
       backoff = Math.min(backoff * 2, 60000);

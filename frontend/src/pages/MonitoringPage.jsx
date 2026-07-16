@@ -19,6 +19,7 @@ const fmtUptime  = s => { if (!s) return '—'; const d=Math.floor(s/86400),h=Ma
 const fmtBps     = b => { if (!b||b<0) return '0 B/s'; if(b<1024) return `${b.toFixed(0)} B/s`; if(b<1048576) return `${(b/1024).toFixed(1)} KB/s`; return `${(b/1048576).toFixed(1)} MB/s` }
 const fmtMB      = mb => !mb?'—':mb<1024?`${mb.toFixed(0)} MB`:`${(mb/1024).toFixed(1)} GB`
 const fmtGB      = gb => gb==null?'—':gb<1?`${(gb*1024).toFixed(0)} MB`:`${gb.toFixed(1)} GB`
+const fmtBytesTotal = n => { if (n==null) return '—'; if (n<1024) return `${n} B`; const u=['KB','MB','GB','TB']; let v=n/1024,i=0; while(v>=1024&&i<u.length-1){v/=1024;i++}; return `${v.toFixed(1)} ${u[i]}` }
 const fmtMs      = ms => ms==null?'—':ms<1000?`${ms}ms`:`${(ms/1000).toFixed(1)}s`
 const secAgo     = ts => ts ? Math.floor(Date.now()/1000)-ts : null
 const isStale    = (ts,s=45) => { const a=secAgo(ts); return a===null||a>s }
@@ -373,6 +374,20 @@ function DeviceDetail({ device, m, hist }) {
   const ramHist = useMemo(()=>hist.map((h,i)=>({i,v:h.ram?pct(h.ram.used,h.ram.total):null})).filter(h=>h.v!=null).slice(-80),[hist])
   const netHist = useMemo(()=>hist.map((h,i)=>({i,rx:(h.network?.rxSec||0)/1024,tx:(h.network?.txSec||0)/1024})).slice(-80),[hist])
 
+  // 24h cumulative total — a companion to the live rate + short sparkline
+  // above: those two answer "how fast right now / over the last ~25 min",
+  // this answers "how much data has this device actually moved today",
+  // same estimate logic as the org-wide figure on the Organizations page.
+  const [bw24h, setBw24h] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    setBw24h(null)
+    api.get(`/metrics/${device.id}/bandwidth-24h`)
+      .then(({ data }) => { if (!cancelled) setBw24h(data) })
+      .catch(() => { if (!cancelled) setBw24h(null) })
+    return () => { cancelled = true }
+  }, [device.id])
+
   if (!m || isStale(m.ts)) return (
     <div className="py-10 flex flex-col items-center gap-2 opacity-40">
       <Activity size={20} style={{color:'var(--text-muted)'}}/>
@@ -501,6 +516,12 @@ function DeviceDetail({ device, m, hist }) {
                 </LineChart>
               </ResponsiveContainer>
             )}
+          </div>
+          <div className="flex items-center justify-between mt-2 pt-2" style={{borderTop:'1px solid var(--border-subtle)'}}>
+            <span className="text-[9px] font-mono uppercase tracking-wider" style={{color:'var(--text-faint)'}}>Last 24h</span>
+            <span className="text-[10px] font-mono" style={{color:'var(--text-secondary)'}}>
+              {bw24h ? <>↓{fmtBytesTotal(bw24h.rx_bytes)} <span style={{color:'var(--text-faint)'}}>/</span> ↑{fmtBytesTotal(bw24h.tx_bytes)}</> : '—'}
+            </span>
           </div>
         </div>
       </div>

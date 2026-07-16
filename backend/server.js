@@ -279,6 +279,7 @@ app.use('/api/discovery', require('./routes/discovery'));
 app.use('/api/synthetic-checks', require('./routes/syntheticChecks'));
 app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/capacity-forecast', require('./routes/capacityForecast'));
+app.use('/api/agent-release', require('./routes/agentRelease'));
 app.use('/api/bulk-command', require('./routes/bulkCommand'));
 app.use('/api/saved-views', require('./routes/savedViews'));
 app.use('/api/process-policies', require('./routes/processPolicies'));

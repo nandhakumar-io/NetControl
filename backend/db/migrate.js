@@ -900,6 +900,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  backup-db-source:', e.message);
     }
+    try {
+      const { migrateAgentVersion } = require('./migrate-agent-version');
+      await migrateAgentVersion();
+      console.log('  ✓ devices.agent_version (agent self-update: server can now tell an agent it\'s out of date)');
+    } catch (e) {
+      console.warn('  ⚠  agent-version:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

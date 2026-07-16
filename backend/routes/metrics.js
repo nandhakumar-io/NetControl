@@ -159,7 +159,7 @@ async function agentAuth(req, res, next) {
   const keyHash = hashKey(key);
   try {
     const row = await queryOne(
-      'SELECT id, name, ip_address, status, org_id FROM devices WHERE agent_key_hash = ?',
+      'SELECT id, name, ip_address, status, org_id, agent_version FROM devices WHERE agent_key_hash = ?',
       [keyHash]
     );
     if (!row) return res.status(403).json({ error: 'Invalid API key' });
@@ -280,7 +280,7 @@ router.post('/register', registerLimiter, async (req, res) => {
     return res.status(401).json({ error: 'Missing x-enrollment-token (or legacy x-registration-secret) header' });
   }
 
-  const { hostname, ip, mac, os_type, os_version, arch } = req.body;
+  const { hostname, ip, mac, os_type, os_version, arch, agent_version } = req.body;
   if (!hostname || !ip) return res.status(400).json({ error: 'hostname and ip are required' });
 
   const osType = (os_type || '').toLowerCase().includes('win') ? 'windows' : 'linux';
@@ -344,19 +344,21 @@ router.post('/register', registerLimiter, async (req, res) => {
       // left alone so admin renames survive re-registration.
       await run(
         `UPDATE devices SET ip_address=?, mac_address=?, hostname=?, agent_key_hash=?, 
-         agent_registered_at=?, os_version=?, arch=?, last_seen=? WHERE id=? AND org_id=?`,
-        [ip, macFormatted, hostname, keyHash, now, os_version || null, arch || null, now, device.id, orgId]
+         agent_registered_at=?, os_version=?, arch=?, last_seen=?, agent_version=? WHERE id=? AND org_id=?`,
+        [ip, macFormatted, hostname, keyHash, now, os_version || null, arch || null, now, agent_version || null, device.id, orgId]
       );
 
       console.log(`[Agent] Updated existing device: ${device.name} (${device.id})`);
 
+      const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version);
       return res.json({
         device_id: device.id,
         device_name: device.name,
         api_key: apiKey,
         registered: false,  // Not a new registration
         action: 'updated',
-        status: 'approved'  // Existing devices are already approved
+        status: 'approved',  // Existing devices are already approved
+        update_available, latest_version,
       });
     }
 
@@ -368,10 +370,10 @@ router.post('/register', registerLimiter, async (req, res) => {
     await run(
       `INSERT INTO devices
          (id, name, hostname, ip_address, mac_address, os_type, os_version, arch,
-          agent_key_hash, agent_registered_at, status, last_seen, created_at, org_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          agent_key_hash, agent_registered_at, status, last_seen, created_at, org_id, agent_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, hostname, hostname, ip, macFormatted, osType, os_version || null,
-       arch || null, keyHash, now, approvalStatus, now, now, orgId]
+       arch || null, keyHash, now, approvalStatus, now, now, orgId, agent_version || null]
     );
 
     console.log(`[Agent] Registered new device: ${hostname} (${id}) → org ${orgId}`);
@@ -381,13 +383,15 @@ router.post('/register', registerLimiter, async (req, res) => {
       message: `New agent registered: ${hostname} (${ip}) — awaiting approval`,
     }).catch(() => {});
 
+    const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version);
     return res.status(201).json({
       device_id: id,
       device_name: hostname,
       api_key: apiKey,
       registered: true,  // This IS a new registration
       action: 'created',
-      status: 'needs_approval'  // Frontend shows modal for approval
+      status: 'needs_approval',  // Frontend shows modal for approval
+      update_available, latest_version,
     });
 
   } catch (e) {
@@ -414,7 +418,7 @@ const lastDbWrite = new Map();
 
 router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   const device = req.agentDevice;
-  const { cpu, ram, disk, network, uptime, os, hostname, processes } = req.body;
+  const { cpu, ram, disk, network, uptime, os, hostname, processes, agent_version } = req.body;
 
   const now = Math.floor(Date.now() / 1000);
 
@@ -434,6 +438,15 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     // Still keep last_seen fresh so the admin can see the agent is alive
     // and reporting, without flipping status away from needs_approval.
     run('UPDATE devices SET last_seen=? WHERE id=?', [now, device.id]).catch(() => {});
+  }
+
+  // Only write agent_version when it actually changed (right after the
+  // agent updates itself, or on its very first check-in) — not every
+  // single ~5s tick, since it practically never changes otherwise. Cached
+  // on req.agentDevice from agentAuth's SELECT, so this is a free
+  // in-memory comparison on the hot path, not an extra query.
+  if (agent_version && agent_version !== device.agent_version) {
+    run('UPDATE devices SET agent_version=? WHERE id=?', [agent_version, device.id]).catch(() => {});
   }
 
   const snapshot = {
@@ -468,7 +481,14 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   // Fire alert evaluation asynchronously
   setImmediate(() => evaluateAlerts(device.id, snapshot));
 
-  res.json({ ok: true, device_id: device.id });
+  // Agent self-update signal — cheap in-memory manifest read (see
+  // services/agentRelease.js), not a DB query, so it's fine on this hot
+  // ingest path. The agent decides what to do with this (log-only by
+  // default, or download+apply if it was started with NC_AUTO_UPDATE=true
+  // — see agent/netcontrol-agent.js's checkForUpdate()).
+  const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version || device.agent_version);
+
+  res.json({ ok: true, device_id: device.id, update_available, latest_version });
 });
 
 // ── GET /api/metrics/policies — agent fetches its effective restriction rules ──
@@ -885,6 +905,32 @@ router.get('/:deviceId', requireAuth, requireOrgContext, async (req, res) => {
     const entry = store.get(req.params.deviceId);
     if (!entry) return res.json({ latest: null, history: [] });
     res.json(entry);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /api/metrics/:deviceId/bandwidth-24h ──────────────────────────────────
+// A cumulative 24h total (bytes moved), as a companion to the live rx/tx
+// rate + short in-memory sparkline the Monitoring device-detail card already
+// shows (see MonitoringPage.jsx's DeviceDetail netHist) — same estimate
+// logic as the org-level 24h bandwidth figure in routes/orgs.js's
+// GET /:id/usage, just scoped to one device instead of summed across an
+// org's whole fleet.
+router.get('/:deviceId/bandwidth-24h', requireAuth, requireOrgContext, async (req, res) => {
+  try {
+    if (!(await assertMetricsAccess(req, res))) return;
+    const sinceTs = Math.floor(Date.now() / 1000) - 24 * 3600;
+    const [bw] = await query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN net_n > 0 THEN (net_rx_sum / net_n) * 60 ELSE 0 END), 0) AS rx_bytes_24h,
+         COALESCE(SUM(CASE WHEN net_n > 0 THEN (net_tx_sum / net_n) * 60 ELSE 0 END), 0) AS tx_bytes_24h
+       FROM metrics_history
+       WHERE device_id = ? AND bucket_ts >= ?`,
+      [req.params.deviceId, sinceTs]
+    );
+    res.json({
+      rx_bytes: Math.round(Number(bw.rx_bytes_24h) || 0),
+      tx_bytes: Math.round(Number(bw.tx_bytes_24h) || 0),
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

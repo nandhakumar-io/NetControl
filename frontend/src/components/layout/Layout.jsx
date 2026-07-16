@@ -483,7 +483,7 @@ export default function Layout() {
 
       {/* Sidebar */}
       <aside
-        className={`flex flex-col shrink-0 transition-transform md:transition-[width] duration-300 ease-in-out
+        className={`flex flex-col shrink-0 h-screen max-h-screen overflow-hidden transition-transform md:transition-[width] duration-300 ease-in-out
           fixed inset-y-0 left-0 z-40 md:relative md:z-auto
           ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:transform-none
           ${isLight ? 'bg-white border-r border-black/[0.06]' : 'bg-surface-1 border-r border-white/6'}
@@ -634,10 +634,16 @@ export default function Layout() {
 
         <TwoFactorModal open={show2FA} onClose={() => setShow2FA(false)} />
 
-        {/* Collapse toggle */}
+        {/* Collapse toggle — anchored to a fixed offset near the logo
+            header, NOT top-1/2 of the sidebar's own height. top-1/2 was
+            fragile: it positions against whatever height <aside> computes
+            for itself, so if that height was ever taller than the visible
+            viewport for any reason, the button would visually float far
+            down the page instead of sitting next to the logo where it
+            belongs. A fixed pixel offset can't drift like that. */}
         <button
           onClick={() => setCollapsed(c => !c)}
-          className={`hidden md:flex absolute top-1/2 -translate-y-1/2 w-6 h-6 rounded-full border items-center justify-center transition-all duration-150 z-50
+          className={`hidden md:flex absolute top-8 w-6 h-6 rounded-full border items-center justify-center transition-all duration-150 z-50
             ${isLight ? 'bg-white border-black/10 text-slate-400 hover:text-[#6c5ce7] hover:border-[#6c5ce7]/30'
                       : 'bg-surface-4 border-white/10 text-slate-400 hover:text-slate-200'}`}
           style={{ right: '-12px' }}
