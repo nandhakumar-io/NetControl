@@ -5,7 +5,8 @@ import {
   LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
-  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search
+  ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
+  PackageCheck,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -413,8 +414,9 @@ export default function Layout() {
     .filter(section => section.items.length > 0)
 
   const ADMIN_NAV = [
-    { to: '/users',     icon: Users,       label: 'Users',    show: isAdmin },
-    { to: '/security',  icon: ShieldAlert, label: 'Security', show: isAdmin },
+    { to: '/users',         icon: Users,        label: 'Users',         show: isAdmin },
+    { to: '/security',      icon: ShieldAlert,  label: 'Security',      show: isAdmin },
+    { to: '/agent-release', icon: PackageCheck, label: 'Agent Release', show: isAdmin },
   ].filter(n => n.show)
 
   const NavItem = ({ to, icon: Icon, label }) => (

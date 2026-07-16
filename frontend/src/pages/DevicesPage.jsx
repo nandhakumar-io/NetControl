@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon, Users, Wrench
+  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -67,6 +67,43 @@ function MaintenanceBadge({ note, until }) {
       style={{ background: 'rgba(251,146,60,0.12)', border: '1px solid rgba(251,146,60,0.3)', color: '#fb923c' }}>
       <Wrench size={10} />
       Maintenance
+    </span>
+  )
+}
+
+// ── Agent version badge ────────────────────────────────────────────────────────
+// Compares a device's reported agent_version against the currently published
+// release (services/agentRelease.js / GET /api/agent-release) so it's visible
+// right on the Devices page which agents are current vs. need an update —
+// same numeric x.y.z comparison the backend uses.
+function compareVersions(a, b) {
+  const pa = String(a || '0.0.0').split('.').map(n => parseInt(n, 10) || 0)
+  const pb = String(b || '0.0.0').split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0)
+  }
+  return 0
+}
+
+function AgentVersionBadge({ agentVersion, latestVersion }) {
+  if (!agentVersion) {
+    return (
+      <span title="This device hasn't reported an agent version yet"
+        className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono"
+        style={{ background: 'rgba(148,163,184,0.1)', color: 'var(--text-faint)' }}>
+        <PackageCheck size={9} /> v?
+      </span>
+    )
+  }
+  const outdated = latestVersion && compareVersions(latestVersion, agentVersion) > 0
+  return (
+    <span
+      title={outdated ? `Update available: v${latestVersion}` : 'Agent is up to date'}
+      className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono font-semibold"
+      style={outdated
+        ? { background: 'rgba(251,191,36,0.12)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }
+        : { background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)', color: '#22c55e' }}>
+      <PackageCheck size={9} /> v{agentVersion}
     </span>
   )
 }
@@ -143,7 +180,7 @@ function Skeleton({ count = 8, view = 'grid' }) {
 }
 
 // ── Device Card (grid) ────────────────────────────────────────────────────────
-function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance }) {
+function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion }) {
   const isLight = useThemeStore(s => s.theme === 'light')
   const status  = device.status || 'unknown'
   const isOnline = status === 'online'
@@ -207,7 +244,10 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
           <StatusBadge status={status} />
           {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
         </div>
-        <OsBadge osType={device.os_type} />
+        <div className="flex items-center gap-1.5">
+          <AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} />
+          <OsBadge osType={device.os_type} />
+        </div>
       </div>
 
       {/* Action buttons */}
@@ -281,7 +321,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 }
 
 // ── Group section header ──────────────────────────────────────────────────────
-function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance }) {
+function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion }) {
   const [open, setOpen] = useState(true)
   const online  = devices.filter(d => d.status === 'online').length
   const total   = devices.length
@@ -322,7 +362,8 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
               selected={selectedIds.has(d.id)}
               onSelect={id => onSelect(id, !selectedIds.has(id))}
               onWake={onWake} onShutdown={onShutdown} onRestart={onRestart}
-              onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance} />
+              onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance}
+              latestAgentVersion={latestAgentVersion} />
           ))}
         </div>
       )}
@@ -331,7 +372,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
 }
 
 // ── List row ──────────────────────────────────────────────────────────────────
-function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance }) {
+function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -344,7 +385,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
   return (
     <div className="grid items-center gap-3 px-4 py-3.5 cursor-pointer transition-all group"
       style={{
-        gridTemplateColumns: '40px 36px 1fr 140px 140px 100px 100px auto',
+        gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 100px auto',
         borderBottom: '1px solid var(--border-subtle)',
         background: selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(167,139,250,0.05)') : 'transparent',
         borderLeft: `2px solid ${selected ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent'}`,
@@ -396,6 +437,9 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
 
       {/* OS badge */}
       <div><OsBadge osType={device.os_type} /></div>
+
+      {/* Agent version */}
+      <div><AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} /></div>
 
       {/* Status */}
       <div className="flex items-center gap-1.5 flex-wrap">
@@ -516,6 +560,7 @@ export default function DevicesPage() {
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
   const [registrationTarget, setRegistrationTarget] = useState(null)
+  const [latestAgentVersion, setLatestAgentVersion] = useState(null)
   const isLight = useThemeStore(s => s.theme === 'light')
   const { isAdmin } = usePermissions()
 
@@ -532,6 +577,15 @@ export default function DevicesPage() {
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // Published agent release version (services/agentRelease.js), used to flag
+  // devices running an older agent build. 404 just means no release has been
+  // published yet — not an error worth surfacing here.
+  useEffect(() => {
+    api.get('/agent-release')
+      .then(({ data }) => setLatestAgentVersion(data?.version || null))
+      .catch(() => setLatestAgentVersion(null))
+  }, [])
 
   // Auto-refresh device statuses in the background so online/offline state
   // doesn't go stale while the page sits open (backend polls every 5s).
@@ -971,7 +1025,8 @@ export default function DevicesPage() {
               onRestart={d => handleAction('restart', d)}
               onEdit={d => setDeviceModal(d)}
               onDelete={d => setDeleteTarget(d)}
-              onToggleMaintenance={handleToggleMaintenance} />
+              onToggleMaintenance={handleToggleMaintenance}
+              latestAgentVersion={latestAgentVersion} />
           ))}
         </div>
 
@@ -980,7 +1035,7 @@ export default function DevicesPage() {
           style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-surface-2)' }}>
           {/* Table header */}
           <div className="grid items-center gap-3 px-4 py-3 text-sm font-bold uppercase tracking-wider"
-            style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 100px 100px auto',
+            style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 100px auto',
                      background: 'var(--bg-surface-3)', borderBottom: '1px solid var(--border-subtle)',
                      color: 'var(--text-muted)' }}>
             <button onClick={() => {
@@ -996,6 +1051,7 @@ export default function DevicesPage() {
             <span>IP Address</span>
             <span>MAC Address</span>
             <span>OS</span>
+            <span>Agent</span>
             <span>Status</span>
             <span>Actions</span>
           </div>
@@ -1011,7 +1067,8 @@ export default function DevicesPage() {
                 onRestart={dev => handleAction('restart', dev)}
                 onEdit={dev => setDeviceModal(dev)}
                 onDelete={dev => setDeleteTarget(dev)}
-                onToggleMaintenance={handleToggleMaintenance} />
+                onToggleMaintenance={handleToggleMaintenance}
+                latestAgentVersion={latestAgentVersion} />
             ))}
           </div>
         </div>

@@ -31,6 +31,7 @@ import RunbooksPage   from './pages/RunbooksPage'
 import SyntheticChecksPage from './pages/SyntheticChecksPage'
 import CapacityForecastPage from './pages/CapacityForecastPage'
 import BulkCommandPage from './pages/BulkCommandPage'
+import AgentReleasePage from './pages/AgentReleasePage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -141,6 +142,14 @@ export default function App() {
             element={
               <RequireRole roles={['admin']}>
                 <SecurityPage />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="agent-release"
+            element={
+              <RequireRole roles={['admin']}>
+                <AgentReleasePage />
               </RequireRole>
             }
           />
