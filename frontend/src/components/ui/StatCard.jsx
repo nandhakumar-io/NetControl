@@ -1,6 +1,22 @@
 import React from 'react'
 import { useThemeStore } from '../../store/themeStore'
 
+// Fixed text-2xl regardless of content length is what caused the
+// Organizations-page overlap/over-truncation bugs — any card showing a
+// variable-length string (org/device/group names, usernames) was one long
+// name away from the same problem. Stepping the font size down by
+// character count means a long value shrinks to fit instead of relying on
+// CSS ellipsis truncation as the only defense (truncate stays on as a
+// safety net for the pathological case, but shouldn't be doing the heavy
+// lifting for ordinary long-but-real names).
+function valueSizeClass(value) {
+  const len = typeof value === 'string' ? value.length : 0
+  if (len > 28) return 'text-base'
+  if (len > 20) return 'text-lg'
+  if (len > 13) return 'text-xl'
+  return 'text-2xl'
+}
+
 export default function StatCard({ icon: Icon, label, value, sub, iconColor, iconBg, accent }) {
   const { theme } = useThemeStore()
   const isLight = theme === 'light'
@@ -18,7 +34,7 @@ export default function StatCard({ icon: Icon, label, value, sub, iconColor, ico
           {label}
         </p>
         <p
-          className={`text-2xl font-display leading-none mt-0.5 truncate ${accent || ''}`}
+          className={`${valueSizeClass(value)} font-display leading-tight mt-0.5 truncate ${accent || ''}`}
           style={!accent ? { color: 'var(--text-primary)' } : {}}
           title={typeof value === 'string' ? value : undefined}
         >
