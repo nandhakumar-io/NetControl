@@ -343,6 +343,67 @@ router.post('/syslog/test', requireRole('admin'), async (req, res) => {
   }
 });
 
+// ── GET /api/audit/verify ────────────────────────────────────────────────────
+// Walks this org's hash chain (services/audit.js) in seq order and confirms
+// every row's hash actually matches SHA256(prev_hash + its own fields), and
+// that each row's prev_hash matches the previous row's hash. Any mismatch
+// means a row was edited or deleted after the fact — this is the "prove the
+// log wasn't tampered with" story compliance auditors ask for.
+//
+// Rows written before the chain existed (hash/prev_hash both NULL) are
+// skipped rather than flagged — they predate this feature and were never
+// protected by it, so they're neither verifiable nor "broken".
+router.get('/verify', requirePermission(128), requireOrgContext, async (req, res) => {
+  try {
+    const crypto = require('crypto');
+    const pool = getPool();
+    const scope = req.orgId; // 'system'-scope (org-less) rows aren't org-readable from here by design
+    const [rows] = await pool.execute(
+      `SELECT id, timestamp, org_id, user_id, username, action, target_type, target_id,
+              target_name, ip_source, result, details, seq, prev_hash, hash
+         FROM audit_log
+        WHERE org_id = ? AND hash IS NOT NULL
+        ORDER BY seq ASC`,
+      [scope]
+    );
+
+    let brokenAt = null;
+    let expectedPrev = null; // null = "haven't seen a hashed row yet for this scope"
+    let checked = 0;
+
+    for (const row of rows) {
+      const canonical = [
+        row.id, row.timestamp, row.org_id, row.user_id, row.username,
+        row.action, row.target_type, row.target_id, row.target_name,
+        row.ip_source, row.result, row.details,
+      ].map(v => (v === null || v === undefined) ? '' : String(v)).join('\u0001');
+
+      // First hashed row in the scope: whatever its prev_hash is becomes
+      // this scope's accepted genesis (it was the genesis at write time —
+      // see GENESIS_HASH in services/audit.js — we just don't re-derive
+      // that constant here to avoid duplicating it across two files).
+      if (expectedPrev === null) expectedPrev = row.prev_hash;
+
+      if (row.prev_hash !== expectedPrev) { brokenAt = row; break; }
+
+      const computed = crypto.createHash('sha256').update(row.prev_hash + '\u0001' + canonical).digest('hex');
+      if (computed !== row.hash) { brokenAt = row; break; }
+
+      expectedPrev = row.hash;
+      checked++;
+    }
+
+    res.json({
+      ok: !brokenAt,
+      checked,
+      total: rows.length,
+      brokenAt: brokenAt ? { id: brokenAt.id, seq: brokenAt.seq, timestamp: brokenAt.timestamp, action: brokenAt.action } : null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Raw-rows version of generateAuditExport, for the scheduled log-export job
 // when its target is "syslog" instead of a file — no rendering, just the
 // rows so each one can become its own syslog message.

@@ -293,6 +293,7 @@ app.use('/api/digest', require('./routes/digest'));
 app.use('/api/push',   require('./routes/push'));
 app.use('/api/notification-prefs', require('./routes/notificationPrefs'));
 app.use('/api/bulk-command-schedules', require('./routes/bulkCommandSchedules'));
+app.use('/api/ops-calendar', require('./routes/opsCalendar'));
 
 // BUG FIX: services/webTerminal.js implements the HTTP-relay fallback used
 // by the terminal page (/api/terminal/open/:id, the SSE output stream, and

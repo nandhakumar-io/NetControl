@@ -6,7 +6,7 @@ import {
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
-  PackageCheck, CalendarClock, BellRing,
+  PackageCheck, CalendarClock, CalendarDays, BellRing,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -417,6 +417,7 @@ export default function Layout() {
       items: [
         { to: '/schedules',        icon: Clock,     label: 'Schedules',     show: can(32) },
         { to: '/bulk-command-schedules', icon: CalendarClock, label: 'Command Schedules', show: can(4) },
+        { to: '/ops-calendar',     icon: CalendarDays, label: 'Ops Calendar', show: can(1) },
         { to: '/process-policies', icon: ShieldBan, label: 'Process Rules', show: can(4096) },
         { to: '/runbooks',         icon: Wrench,    label: 'Runbooks',      show: can(1) },
         { to: '/backups',          icon: Archive,   label: 'Backups',       show: can(8192) },

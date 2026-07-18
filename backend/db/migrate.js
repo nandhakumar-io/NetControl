@@ -935,6 +935,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  bulk-command-schedules:', e.message);
     }
+    try {
+      const { migrateAuditChain } = require('./migrate-audit-chain');
+      await migrateAuditChain();
+      console.log('  ✓ audit_log hash chain (tamper-evident audit trail, per-org)');
+    } catch (e) {
+      console.warn('  ⚠  audit-chain:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

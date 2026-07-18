@@ -1,8 +1,11 @@
 // services/audit.js — Structured audit logging (MySQL + Winston file log)
-const { execute, queryOne } = require('../db');
+const { queryOne, getPool } = require('../db');
 const { v4: uuidv4 } = require('uuid');
 const winston = require('winston');
 const fs = require('fs');
+const crypto = require('crypto');
+
+const GENESIS_HASH = '0'.repeat(64); // prev_hash for the very first entry in a chain scope
 
 if (!fs.existsSync('./logs')) fs.mkdirSync('./logs', { recursive: true });
 
@@ -67,17 +70,54 @@ async function log(opts) {
     details:     opts.details    || null,
   };
 
+  // ── Tamper-evident hash chain ──────────────────────────────────────────
+  // Chained per scope (org_id, or 'system' for org-less entries) so an
+  // MSP's clients each get an independently verifiable chain and inserts
+  // for different orgs never contend with each other. The previous hash
+  // is read+locked and the new one written in the same transaction — that
+  // row lock on audit_log_chain_state is what actually serializes
+  // concurrent inserts for the SAME scope across cluster workers; without
+  // it, two workers could both read the same "previous" hash and silently
+  // fork the chain instead of extending it.
+  const scope = entry.org_id || 'system';
+  const canonical = [
+    entry.id, entry.timestamp, entry.org_id, entry.user_id, entry.username,
+    entry.action, entry.target_type, entry.target_id, entry.target_name,
+    entry.ip_source, entry.result, entry.details,
+  ].map(v => (v === null || v === undefined) ? '' : String(v)).join('\u0001');
+
+  const conn = await getPool().getConnection();
   try {
-    await execute(
+    await conn.beginTransaction();
+    await conn.execute(
+      `INSERT IGNORE INTO audit_log_chain_state (scope, last_hash, last_seq) VALUES (?, ?, 0)`,
+      [scope, GENESIS_HASH]
+    );
+    const [stateRows] = await conn.execute(
+      `SELECT last_hash FROM audit_log_chain_state WHERE scope = ? FOR UPDATE`,
+      [scope]
+    );
+    const prevHash = stateRows[0]?.last_hash || GENESIS_HASH;
+    const hash = crypto.createHash('sha256').update(prevHash + '\u0001' + canonical).digest('hex');
+
+    await conn.execute(
       `INSERT INTO audit_log
-         (id, timestamp, org_id, user_id, username, action, target_type, target_id, target_name, ip_source, result, details)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, timestamp, org_id, user_id, username, action, target_type, target_id, target_name, ip_source, result, details, prev_hash, hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [entry.id, entry.timestamp, entry.org_id, entry.user_id, entry.username, entry.action,
        entry.target_type, entry.target_id, entry.target_name, entry.ip_source,
-       entry.result, entry.details]
+       entry.result, entry.details, prevHash, hash]
     );
+    await conn.execute(
+      `UPDATE audit_log_chain_state SET last_hash = ? WHERE scope = ?`,
+      [hash, scope]
+    );
+    await conn.commit();
   } catch (e) {
+    await conn.rollback().catch(() => {});
     logger.error('Failed to write audit to DB', { error: e.message, entry });
+  } finally {
+    conn.release();
   }
 
   logger.info('AUDIT', entry);

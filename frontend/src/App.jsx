@@ -32,6 +32,7 @@ import SyntheticChecksPage from './pages/SyntheticChecksPage'
 import CapacityForecastPage from './pages/CapacityForecastPage'
 import BulkCommandPage from './pages/BulkCommandPage'
 import BulkCommandSchedulesPage from './pages/BulkCommandSchedulesPage'
+import OpsCalendarPage from './pages/OpsCalendarPage'
 import AgentReleasePage from './pages/AgentReleasePage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
@@ -129,6 +130,7 @@ export default function App() {
           <Route path="capacity"         element={<RequirePermission bit={1}><CapacityForecastPage /></RequirePermission>} />
           <Route path="bulk-command"     element={<RequirePermission bit={4}><BulkCommandPage /></RequirePermission>} />
           <Route path="bulk-command-schedules" element={<RequirePermission bit={4}><BulkCommandSchedulesPage /></RequirePermission>} />
+          <Route path="ops-calendar" element={<RequirePermission bit={1}><OpsCalendarPage /></RequirePermission>} />
 
           {/* Admin-only routes */}
           <Route

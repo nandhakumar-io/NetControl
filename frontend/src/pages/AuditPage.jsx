@@ -5,7 +5,7 @@ import {
   Plus, Pencil, Trash2, Clock, CheckCircle2, XCircle, AlertCircle,
   Radio, Download, FileSpreadsheet, FileText, ChevronDown, Settings2, MinusCircle,
   Calendar, X as XIcon, ArrowUpCircle, ArrowDownCircle, GitCompare, History,
-  Server, Minus, ArrowRight, Loader2, Bookmark
+  Server, Minus, ArrowRight, Loader2, Bookmark, ShieldCheck
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -838,6 +838,28 @@ export default function AuditPage() {
     ? 'minmax(120px,0.9fr) minmax(110px,1fr) minmax(120px,1fr) minmax(160px,2.2fr) minmax(100px,1fr) 110px 64px'
     : 'minmax(130px,0.9fr) minmax(120px,1fr) minmax(130px,1fr) minmax(180px,2.2fr) minmax(110px,1fr) 110px'
 
+  const [verifying, setVerifying] = useState(false)
+  const [verifyResult, setVerifyResult] = useState(null) // { ok, checked, total, brokenAt } | null
+
+  const handleVerify = async () => {
+    setVerifying(true)
+    setVerifyResult(null)
+    const toastId = toast.loading('Verifying audit log integrity…')
+    try {
+      const { data } = await api.get('/audit/verify')
+      setVerifyResult(data)
+      if (data.ok) {
+        toast.success(`Verified — ${data.checked} entries, chain intact`, { id: toastId })
+      } else {
+        toast.error(`Tamper detected at entry ${data.brokenAt?.id?.slice(0, 8)}…`, { id: toastId, duration: 8000 })
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Verification failed', { id: toastId })
+    } finally {
+      setVerifying(false)
+    }
+  }
+
   const handleExport = async (format) => {
     setExportFormat(format)
     const toastId = toast.loading('Preparing export…')
@@ -877,6 +899,10 @@ export default function AuditPage() {
         actions={
           <>
             <SyslogBadge status={syslogStatus} isAdmin={isAdmin} onOpenSettings={() => setSyslogModalOpen(true)} />
+            <button onClick={handleVerify} disabled={verifying} className="btn-ghost" title="Recompute and check every entry's hash against the previous one — proves nothing was edited or deleted after the fact">
+              <ShieldCheck size={16} className={`text-accent-orange ${verifying ? 'animate-pulse' : ''}`} />
+              {verifying ? 'Verifying…' : 'Verify Integrity'}
+            </button>
             <ExportMenu onExport={handleExport} exporting={!!exportFormat} />
             <button onClick={() => { fetchLogs(); fetchSyslogStatus() }} className="btn-ghost" disabled={loading}>
               <RefreshCw size={16} className={`text-brand-400 ${loading ? 'animate-spin' : ''}`} />
@@ -885,6 +911,23 @@ export default function AuditPage() {
           </>
         }
       />
+
+      {verifyResult && (
+        <div className="mb-4 px-4 py-3 rounded-xl flex items-center gap-2.5 text-sm font-body"
+          style={{
+            background: verifyResult.ok ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+            border: `1px solid ${verifyResult.ok ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
+            color: verifyResult.ok ? '#4ade80' : '#f87171',
+          }}>
+          {verifyResult.ok ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+          {verifyResult.ok
+            ? `Chain intact — ${verifyResult.checked} of ${verifyResult.total} hashed entries verified, no tampering detected.`
+            : `Tamper detected — chain breaks at entry ${verifyResult.brokenAt?.id} (${verifyResult.brokenAt?.action}, seq ${verifyResult.brokenAt?.seq}). Everything before this point is still verified; investigate this and any later entries.`}
+          <button onClick={() => setVerifyResult(null)} className="ml-auto opacity-60 hover:opacity-100">
+            <XIcon size={14} />
+          </button>
+        </div>
+      )}
 
       <SyslogSettingsModal
         open={syslogModalOpen}
