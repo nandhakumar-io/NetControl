@@ -256,14 +256,15 @@ const RULE_TEMPLATES = [
 router.get('/rule-templates', (req, res) => res.json(RULE_TEMPLATES));
 
 // ── POST /api/alerts/rule-templates/:key/enable ────────────────────────────────
-// Body: { group_id? , device_id? } — omit both for an org-wide rule.
+// Body: { group_id? , device_id?, tag? } — omit all three for an org-wide rule.
 router.post('/rule-templates/:key/enable', requireRole('admin', 'operator'), async (req, res) => {
   try {
     const tpl = RULE_TEMPLATES.find(t => t.key === req.params.key);
     if (!tpl) return res.status(404).json({ error: 'Unknown template' });
 
-    const { group_id = null, device_id = null } = req.body || {};
-    if (device_id && group_id) return res.status(400).json({ error: 'set device_id or group_id, not both' });
+    const { group_id = null, device_id = null, tag = null } = req.body || {};
+    const scopeCount = [device_id, group_id, tag].filter(Boolean).length;
+    if (scopeCount > 1) return res.status(400).json({ error: 'set only one of device_id, group_id, or tag' });
 
     if (group_id) {
       const group = await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [group_id, req.orgId]);
@@ -278,11 +279,11 @@ router.post('/rule-templates/:key/enable', requireRole('admin', 'operator'), asy
     const now = Math.floor(Date.now() / 1000);
     await execute(
       `INSERT INTO alert_rules
-         (id, org_id, name, metric, operator, threshold, severity, device_id, group_id,
+         (id, org_id, name, metric, operator, threshold, severity, device_id, group_id, tag,
           actions, notify_admins, cooldown_sec, enabled, min_duration_sec, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)`,
       [id, req.orgId, tpl.name, tpl.metric, tpl.operator, tpl.threshold, tpl.severity,
-       device_id || null, group_id || null, JSON.stringify(['notify']),
+       device_id || null, group_id || null, tag || null, JSON.stringify(['notify']),
        tpl.cooldown_sec, tpl.min_duration_sec || 0, req.user.id, now]
     );
 
@@ -319,7 +320,7 @@ router.post('/rules', requireRole('admin', 'operator'), async (req, res) => {
   try {
     const {
       name, metric, operator = 'gt', threshold = 90,
-      severity = 'warning', device_id = null, group_id = null,
+      severity = 'warning', device_id = null, group_id = null, tag = null,
       actions = ['notify'], notify_admins = true,
       cooldown_sec = 300, enabled = true,
       escalate_after_sec = null, escalate_severity = 'critical', escalate_webhook_ids = null,
@@ -329,19 +330,20 @@ router.post('/rules', requireRole('admin', 'operator'), async (req, res) => {
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
     if (!['cpu','ram','disk','offline','process_count'].includes(metric))
       return res.status(400).json({ error: 'invalid metric' });
-    if (device_id && group_id) return res.status(400).json({ error: 'set device_id or group_id, not both' });
+    const scopeCount = [device_id, group_id, tag].filter(Boolean).length;
+    if (scopeCount > 1) return res.status(400).json({ error: 'set only one of device_id, group_id, or tag' });
 
     const id = uuidv4();
     const now = Math.floor(Date.now() / 1000);
     await execute(
       `INSERT INTO alert_rules
-         (id, org_id, name, metric, operator, threshold, severity, device_id, group_id,
+         (id, org_id, name, metric, operator, threshold, severity, device_id, group_id, tag,
           actions, notify_admins, cooldown_sec, enabled,
           escalate_after_sec, escalate_severity, escalate_webhook_ids,
           runbook_action_ids, min_duration_sec, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, req.orgId, name.trim(), metric, operator, threshold, severity,
-       device_id || null, group_id || null, JSON.stringify(actions),
+       device_id || null, group_id || null, tag || null, JSON.stringify(actions),
        notify_admins ? 1 : 0, cooldown_sec, enabled ? 1 : 0,
        escalate_after_sec || null, escalate_severity || 'critical',
        escalate_webhook_ids ? JSON.stringify(escalate_webhook_ids) : null,
@@ -366,7 +368,7 @@ router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
     const {
       name = existing.name, metric = existing.metric, operator = existing.operator,
       threshold = existing.threshold, severity = existing.severity,
-      device_id = existing.device_id, group_id = existing.group_id,
+      device_id = existing.device_id, group_id = existing.group_id, tag = existing.tag,
       actions = JSON.parse(existing.actions || '[]'),
       notify_admins = existing.notify_admins,
       cooldown_sec = existing.cooldown_sec, enabled = existing.enabled,
@@ -377,15 +379,16 @@ router.put('/rules/:id', requireRole('admin', 'operator'), async (req, res) => {
       min_duration_sec = existing.min_duration_sec || 0,
     } = req.body;
 
-    if (device_id && group_id) return res.status(400).json({ error: 'set device_id or group_id, not both' });
+    const scopeCount = [device_id, group_id, tag].filter(Boolean).length;
+    if (scopeCount > 1) return res.status(400).json({ error: 'set only one of device_id, group_id, or tag' });
 
     await execute(
       `UPDATE alert_rules SET name=?, metric=?, operator=?, threshold=?, severity=?,
-         device_id=?, group_id=?, actions=?, notify_admins=?, cooldown_sec=?, enabled=?,
+         device_id=?, group_id=?, tag=?, actions=?, notify_admins=?, cooldown_sec=?, enabled=?,
          escalate_after_sec=?, escalate_severity=?, escalate_webhook_ids=?, runbook_action_ids=?,
          min_duration_sec=? WHERE id=?`,
       [name, metric, operator, threshold, severity,
-       device_id || null, group_id || null, JSON.stringify(actions),
+       device_id || null, group_id || null, tag || null, JSON.stringify(actions),
        notify_admins ? 1 : 0, cooldown_sec, enabled ? 1 : 0,
        escalate_after_sec || null, escalate_severity || 'critical',
        escalate_webhook_ids ? JSON.stringify(escalate_webhook_ids) : null,
@@ -557,18 +560,20 @@ async function evaluateAlerts(deviceId, snapshot) {
     if (device.maintenance_mode) return;
 
     // Scoped to the device's own org — a "global" rule (device_id IS NULL
-    // AND group_id IS NULL) still only fires for devices belonging to the
-    // same tenant, so one client's blanket "CPU > 90%" rule never evaluates
-    // against another client's devices. A group-scoped rule (group_id set)
-    // fires for every device currently in that group — dynamic, so a
-    // device added to the group later is automatically covered without
-    // needing the rule re-enabled.
+    // AND group_id IS NULL AND tag IS NULL) still only fires for devices
+    // belonging to the same tenant, so one client's blanket "CPU > 90%" rule
+    // never evaluates against another client's devices. A group-scoped rule
+    // (group_id set) fires for every device currently in that group, and a
+    // tag-scoped rule (tag set) fires for every device currently carrying
+    // that tag — both dynamic, so a device added to the group/tag later is
+    // automatically covered without needing the rule re-enabled.
     const rules = await query(
       `SELECT * FROM alert_rules
         WHERE enabled = 1 AND org_id = ?
           AND (device_id IS NULL OR device_id = ?)
-          AND (group_id IS NULL OR group_id = ?)`,
-      [device.org_id, deviceId, device.group_id]
+          AND (group_id IS NULL OR group_id = ?)
+          AND (tag IS NULL OR tag IN (SELECT tag FROM device_tags WHERE device_id = ?))`,
+      [device.org_id, deviceId, device.group_id, deviceId]
     );
     if (!rules.length) return;
 

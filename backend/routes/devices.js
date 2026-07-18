@@ -160,6 +160,34 @@ router.get('/tags', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── GET /api/devices/health-scores ───────────────────────────────────────────
+// Composite 0-100 score per device — see services/deviceHealthScore.js for
+// exactly what goes into it. Fetched once by the Devices page and merged into
+// the device list client-side (kept as its own endpoint rather than baked
+// into GET /, so a page that doesn't need it — e.g. a device picker in
+// Backup/Bulk Command — doesn't pay for alert/compliance/forecast/uptime
+// queries on every load).
+// Must stay registered before GET /:id below, same reasoning as /tags.
+router.get('/health-scores', async (req, res) => {
+  try {
+    const { computeHealthScores } = require('../services/deviceHealthScore');
+    const scores = await computeHealthScores(req.orgId);
+
+    // Non-admins only see scores for devices in groups they've been granted
+    // access to — same restriction GET / and GET /:id already apply.
+    if (req.user.role !== 'admin') {
+      const allowed = await query(
+        'SELECT d.id FROM devices d INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? WHERE d.org_id = ?',
+        [req.user.id, req.orgId]
+      );
+      const allowedIds = new Set(allowed.map(r => r.id));
+      for (const id of Object.keys(scores)) if (!allowedIds.has(id)) delete scores[id];
+    }
+
+    res.json(scores);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/devices/:id ─────────────────────────────────────────────────────
 // SECURITY FIX: Non-admins could previously fetch ANY device by ID (IDOR).
 // Now every non-admin role (operator, viewer, custom) is restricted to

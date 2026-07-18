@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck
+  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -71,7 +71,41 @@ function MaintenanceBadge({ note, until }) {
   )
 }
 
-// ── Agent version badge ────────────────────────────────────────────────────────
+// ── Health score badge ────────────────────────────────────────────────────────
+// health = { score, breakdown: {alerts, drift, capacity, uptime}, uptime_pct,
+// drift_status, days_to_full } | undefined (still loading or no data at all).
+// The number is never a black box — the tooltip spells out exactly which of
+// the four factors cost points, matching backend/services/deviceHealthScore.js.
+function healthColor(score) {
+  if (score >= 85) return '#22c55e'
+  if (score >= 60) return '#fbbf24'
+  return '#f87171'
+}
+function HealthBadge({ health, loading }) {
+  if (loading && !health) {
+    return <span className="text-sm" style={{ color: 'var(--text-faint)' }}>…</span>
+  }
+  if (!health) return <span className="text-sm" style={{ color: 'var(--text-faint)' }}>—</span>
+
+  const { score, breakdown, uptime_pct, drift_status, days_to_full } = health
+  const color = healthColor(score)
+  const lines = [`Health score: ${score}/100`]
+  lines.push(breakdown.alerts < 0 ? `Open alerts: ${breakdown.alerts} pts` : 'Open alerts: none')
+  lines.push(drift_status === 'drift' ? `Config drift detected: ${breakdown.drift} pts` : drift_status === 'clean' ? 'Config drift: clean' : 'Config drift: no data yet')
+  lines.push(typeof days_to_full === 'number' ? `Disk projected full in ${Math.round(days_to_full)}d: ${breakdown.capacity} pts` : 'Capacity: stable')
+  lines.push(uptime_pct != null ? `7-day uptime ${uptime_pct.toFixed(1)}%: ${breakdown.uptime} pts` : '7-day uptime: no data yet')
+
+  return (
+    <span title={lines.join('\n')}
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold cursor-help"
+      style={{ background: `${color}1f`, border: `1px solid ${color}40`, color }}>
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
+      {score}
+    </span>
+  )
+}
+
+
 // Compares a device's reported agent_version against the currently published
 // release (services/agentRelease.js / GET /api/agent-release) so it's visible
 // right on the Devices page which agents are current vs. need an update —
@@ -388,7 +422,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
 }
 
 // ── List row ──────────────────────────────────────────────────────────────────
-function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion }) {
+function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -401,7 +435,7 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
   return (
     <div className="grid items-center gap-3 px-4 py-3.5 cursor-pointer transition-all group"
       style={{
-        gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 100px auto',
+        gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
         borderBottom: '1px solid var(--border-subtle)',
         background: selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(167,139,250,0.05)') : 'transparent',
         borderLeft: `2px solid ${selected ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent'}`,
@@ -456,6 +490,9 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
 
       {/* Agent version */}
       <div><AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} /></div>
+
+      {/* Health score */}
+      <div><HealthBadge health={health} loading={healthLoading} /></div>
 
       {/* Status */}
       <div className="flex items-center gap-1.5 flex-wrap">
@@ -578,6 +615,10 @@ export default function DevicesPage() {
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
   const [registrationTarget, setRegistrationTarget] = useState(null)
   const [latestAgentVersion, setLatestAgentVersion] = useState(null)
+  const [healthScores, setHealthScores] = useState({}) // { [deviceId]: { score, breakdown, ... } }
+  const [healthLoading, setHealthLoading] = useState(true)
+  const [sortKey, setSortKey] = useState(null) // null | 'health'
+  const [sortDir, setSortDir] = useState('asc') // 'asc' surfaces worst-health-first, which is the point of sorting by it
   const isLight = useThemeStore(s => s.theme === 'light')
   const { isAdmin } = usePermissions()
 
@@ -594,6 +635,18 @@ export default function DevicesPage() {
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // Composite health score — rolls up open alerts, drift, capacity runway,
+  // and uptime (see backend/services/deviceHealthScore.js). Fetched
+  // separately from the device list itself since it's a heavier computation
+  // (touches four other tables) and shouldn't block the page's first paint.
+  useEffect(() => {
+    setHealthLoading(true)
+    api.get('/devices/health-scores')
+      .then(({ data }) => setHealthScores(data))
+      .catch(() => setHealthScores({}))
+      .finally(() => setHealthLoading(false))
+  }, [])
 
   // Published agent release version (services/agentRelease.js), used to flag
   // devices running an older agent build. 404 just means no release has been
@@ -775,15 +828,33 @@ export default function DevicesPage() {
   const manageableDevices = useMemo(() => devices.filter(d => d.status !== 'needs_approval'), [devices])
 
   // Filtering
-  const filtered = useMemo(() => manageableDevices.filter(d => {
-    const q = search.toLowerCase()
-    if (q && !d.name.toLowerCase().includes(q) && !d.ip_address.includes(q) && !(d.mac_address||'').toLowerCase().includes(q)) return false
-    if (osFilter !== 'all' && d.os_type !== osFilter) return false
-    if (statusFilter !== 'all' && d.status !== statusFilter) return false
-    if (groupFilter !== 'all' && d.group_id !== groupFilter) return false
-    if (tagFilter.size > 0 && !(d.tags || []).some(t => tagFilter.has(t))) return false
-    return true
-  }), [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter])
+  const filtered = useMemo(() => {
+    const base = manageableDevices.filter(d => {
+      const q = search.toLowerCase()
+      if (q && !d.name.toLowerCase().includes(q) && !d.ip_address.includes(q) && !(d.mac_address||'').toLowerCase().includes(q)) return false
+      if (osFilter !== 'all' && d.os_type !== osFilter) return false
+      if (statusFilter !== 'all' && d.status !== statusFilter) return false
+      if (groupFilter !== 'all' && d.group_id !== groupFilter) return false
+      if (tagFilter.size > 0 && !(d.tags || []).some(t => tagFilter.has(t))) return false
+      return true
+    })
+    if (sortKey === 'health') {
+      const withScore = [...base].sort((a, b) => {
+        // Devices with no score yet (still loading, or no signal at all)
+        // sink to the bottom regardless of direction — an unknown score
+        // isn't "healthy", it's just not computed, so it shouldn't rank
+        // above a device with a known problem.
+        const sa = healthScores[a.id]?.score
+        const sb = healthScores[b.id]?.score
+        if (sa == null && sb == null) return 0
+        if (sa == null) return 1
+        if (sb == null) return -1
+        return sortDir === 'asc' ? sa - sb : sb - sa
+      })
+      return withScore
+    }
+    return base
+  }, [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter, sortKey, sortDir, healthScores])
 
   // Grouped for grid view
   const grouped = useMemo(() => {
@@ -1073,7 +1144,7 @@ export default function DevicesPage() {
           style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-surface-2)' }}>
           {/* Table header */}
           <div className="grid items-center gap-3 px-4 py-3 text-sm font-bold uppercase tracking-wider"
-            style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 100px auto',
+            style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
                      background: 'var(--bg-surface-3)', borderBottom: '1px solid var(--border-subtle)',
                      color: 'var(--text-muted)' }}>
             <button onClick={() => {
@@ -1090,6 +1161,17 @@ export default function DevicesPage() {
             <span>MAC Address</span>
             <span>OS</span>
             <span>Agent</span>
+            <button
+              className="flex items-center gap-1 uppercase tracking-wider text-sm font-bold text-left"
+              style={{ color: sortKey === 'health' ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-muted)' }}
+              title="Sort by composite health score (open alerts, drift, capacity runway, uptime)"
+              onClick={() => {
+                if (sortKey !== 'health') { setSortKey('health'); setSortDir('asc') }
+                else setSortDir(dir => dir === 'asc' ? 'desc' : 'asc')
+              }}>
+              Health
+              {sortKey === 'health' && (sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+            </button>
             <span>Status</span>
             <span>Actions</span>
           </div>
@@ -1106,13 +1188,14 @@ export default function DevicesPage() {
                 onEdit={dev => setDeviceModal(dev)}
                 onDelete={dev => setDeleteTarget(dev)}
                 onToggleMaintenance={handleToggleMaintenance}
-                latestAgentVersion={latestAgentVersion} />
+                latestAgentVersion={latestAgentVersion}
+                health={healthScores[d.id]}
+                healthLoading={healthLoading} />
             ))}
           </div>
         </div>
       )}
 
-      {/* Bulk bar */}
       <BulkBar count={selectedIds.size}
         onWakeAll={() => bulkAction('wake')}
         onShutdownAll={() => bulkAction('shutdown')}

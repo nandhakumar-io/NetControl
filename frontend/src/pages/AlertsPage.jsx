@@ -39,7 +39,7 @@ const ACTIONS_DEF = [
 ]
 const EMPTY = {
   name:'', metric:'cpu', operator:'gt', threshold:90,
-  severity:'warning', device_id:null, group_id:null, actions:['notify'],
+  severity:'warning', device_id:null, group_id:null, tag:null, actions:['notify'],
   notify_admins:true, cooldown_sec:300, enabled:true,
   runbook_action_ids: [], min_duration_sec: 0,
 }
@@ -83,7 +83,7 @@ function Toggle({ on, onChange }) {
 }
 
 // ── Rule form modal ────────────────────────────────────────────────────────────
-function RuleModal({ open, onClose, onSaved, rule, devices, groups }) {
+function RuleModal({ open, onClose, onSaved, rule, devices, groups, tags }) {
   const [form, setForm]   = useState(EMPTY)
   const [saving, setSaving] = useState(false)
   const [runbooks, setRunbooks] = useState([])
@@ -194,18 +194,26 @@ function RuleModal({ open, onClose, onSaved, rule, devices, groups }) {
             <div className="grid grid-cols-2 gap-4">
               {/* Target — a rule applies to exactly one of: a single device,
                   every device in a group (dynamic — devices added later are
-                  automatically covered), or the whole org. */}
+                  automatically covered), every device carrying a tag (also
+                  dynamic — tags are freeform and cross-cutting, independent
+                  of the group hierarchy), or the whole org. */}
               <div>
                 <label className={lbl}>Apply To</label>
                 <select className={inp}
-                  value={form.group_id ? `group:${form.group_id}` : form.device_id ? `device:${form.device_id}` : ''}
+                  value={form.tag ? `tag:${form.tag}` : form.group_id ? `group:${form.group_id}` : form.device_id ? `device:${form.device_id}` : ''}
                   onChange={e => {
                     const v = e.target.value
-                    if (v.startsWith('group:')) { set('group_id', v.slice(6)); set('device_id', null) }
-                    else if (v.startsWith('device:')) { set('device_id', v.slice(7)); set('group_id', null) }
-                    else { set('device_id', null); set('group_id', null) }
+                    if (v.startsWith('tag:')) { set('tag', v.slice(4)); set('group_id', null); set('device_id', null) }
+                    else if (v.startsWith('group:')) { set('group_id', v.slice(6)); set('device_id', null); set('tag', null) }
+                    else if (v.startsWith('device:')) { set('device_id', v.slice(7)); set('group_id', null); set('tag', null) }
+                    else { set('device_id', null); set('group_id', null); set('tag', null) }
                   }}>
                   <option value="">All Devices (org-wide)</option>
+                  {tags?.length > 0 && (
+                    <optgroup label="Tags">
+                      {tags.map(t => <option key={t.tag} value={`tag:${t.tag}`}>{t.tag} ({t.device_count})</option>)}
+                    </optgroup>
+                  )}
                   {groups?.length > 0 && (
                     <optgroup label="Groups">
                       {groups.map(g => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}
@@ -415,7 +423,7 @@ function PushBanner() {
 // ── Rule template card ────────────────────────────────────────────────────────
 // Own local state for the scope picker (group vs. org-wide) so selecting a
 // scope on one card never affects any other card's pending selection.
-function TemplateCard({ tpl, groups, onEnable, enabling }) {
+function TemplateCard({ tpl, groups, tags, onEnable, enabling }) {
   const [scopeId, setScopeId] = useState('')
   const metricLabel = { cpu: 'CPU', ram: 'RAM', disk: 'Disk', offline: 'Offline', process_count: 'Process count' }[tpl.metric] || tpl.metric
 
@@ -441,6 +449,7 @@ function TemplateCard({ tpl, groups, onEnable, enabling }) {
         <select className="input-field text-xs py-1.5 flex-1" value={scopeId} onChange={e => setScopeId(e.target.value)}>
           <option value="">All devices (org-wide)</option>
           {groups.map(g => <option key={g.id} value={g.id}>Group: {g.name}</option>)}
+          {tags?.map(t => <option key={t.tag} value={`tag:${t.tag}`}>Tag: {t.tag}</option>)}
         </select>
         <button
           onClick={() => onEnable(tpl.key, scopeId || null)}
@@ -459,6 +468,7 @@ export default function AlertsPage() {
   const [triggered, setTriggered] = useState([])
   const [devices,   setDevices]   = useState([])
   const [groups,    setGroups]    = useState([])
+  const [tags,      setTags]      = useState([])
   const [templates, setTemplates] = useState([])
   const [enablingKey, setEnablingKey] = useState(null)
   const [loading,   setLoading]   = useState(true)
@@ -474,18 +484,20 @@ export default function AlertsPage() {
   const fetchAll = useCallback(async () => {
     try {
       setLoading(true)
-      const [r, t, d, g, tpl] = await Promise.all([
+      const [r, t, d, g, tpl, tg] = await Promise.all([
         api.get('/alerts/rules'),
         api.get('/alerts/triggered?limit=300'),
         api.get('/devices'),
         api.get('/groups').catch(() => ({ data: [] })),
         api.get('/alerts/rule-templates').catch(() => ({ data: [] })),
+        api.get('/devices/tags').catch(() => ({ data: [] })),
       ])
       setRules(r.data)
       setTriggered(t.data)
       setDevices(d.data)
       setGroups(g.data)
       setTemplates(tpl.data)
+      setTags(tg.data)
     } catch (e) {
       toast.error('Failed to load alert data')
       console.error(e)
@@ -503,10 +515,12 @@ export default function AlertsPage() {
   // Enables a template rule scoped to a group (or org-wide if scopeId is
   // null) — one click instead of building the same "disk > 90%" rule by
   // hand every time a new client/lab gets onboarded.
-  const handleEnableTemplate = async (key, scopeId) => {
+  const handleEnableTemplate = async (key, scope) => {
     setEnablingKey(key)
     try {
-      await api.post(`/alerts/rule-templates/${key}/enable`, scopeId ? { group_id: scopeId } : {})
+      const body = scope?.startsWith('tag:') ? { tag: scope.slice(4) }
+        : scope ? { group_id: scope } : {}
+      await api.post(`/alerts/rule-templates/${key}/enable`, body)
       toast.success('Rule enabled')
       fetchAll()
     } catch (e) {
@@ -738,7 +752,7 @@ export default function AlertsPage() {
                         {m?.label}
                         {m?.hasThresh && ` ${rule.operator==='gt'?'>':'<'} ${rule.threshold}${m?.unit}`}
                         {' · '}cooldown {fmtCd(rule.cooldown_sec)}
-                        {' · '}{rule.device_name ? `📍 ${rule.device_name}` : rule.group_name ? `👥 ${rule.group_name}` : '🌐 All devices'}
+                        {' · '}{rule.device_name ? `📍 ${rule.device_name}` : rule.group_name ? `👥 ${rule.group_name}` : rule.tag ? `🏷️ ${rule.tag}` : '🌐 All devices'}
                         {fires > 0 && <span className="ml-2 text-amber-400"> ⚡ {fires} fires</span>}
                       </p>
 
@@ -793,7 +807,7 @@ export default function AlertsPage() {
       {tab === 'templates' && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {templates.map(tpl => (
-            <TemplateCard key={tpl.key} tpl={tpl} groups={groups} onEnable={handleEnableTemplate} enabling={enablingKey} />
+            <TemplateCard key={tpl.key} tpl={tpl} groups={groups} tags={tags} onEnable={handleEnableTemplate} enabling={enablingKey} />
           ))}
         </div>
       )}
@@ -897,6 +911,7 @@ export default function AlertsPage() {
         rule={editRule}
         devices={devices}
         groups={groups}
+        tags={tags}
       />
     </div>
   )

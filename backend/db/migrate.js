@@ -942,6 +942,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  audit-chain:', e.message);
     }
+    try {
+      const { migrateAlertRuleTagScope } = require('./migrate-alert-rule-tag-scope');
+      await migrateAlertRuleTagScope();
+      console.log('  ✓ alert_rules.tag (scope a rule to every device carrying a tag)');
+    } catch (e) {
+      console.warn('  ⚠  alert-rule-tag-scope:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node
