@@ -32,6 +32,7 @@ process.on('unhandledRejection', (err) => {
 const { loadAllSchedules } = require('./services/scheduler');
 const statusPoller         = require('./services/statusPoller');
 const complianceService    = require('./services/complianceService');
+const capacityForecast     = require('./services/capacityForecast');
 const metricsRollup        = require('./services/metricsRollup');
 const scheduledJobs        = require('./services/scheduledJobs');
 const digestService        = require('./services/digestService');
@@ -45,6 +46,18 @@ console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
 loadAllSchedules();
 statusPoller.start();
 complianceService.start();
+// BUG FIX: capacityForecast.start() — the periodic "disk projected full in
+// N days" webhook/email check — was previously only ever started inside
+// server.js's `if (role === 'all')` branch, i.e. only in the single-process
+// local-dev topology. In the production topology this app actually ships
+// (docker-compose.yaml: a `backend` web container at the default
+// PROCESS_ROLE=web, plus this separate `poller` container for exactly this
+// kind of background job), nothing ever called it — the Capacity Forecast
+// PAGE still worked (it computes on demand when visited), but the proactive
+// "warn before a disk fills up" notification pipeline was silently dead.
+// Belongs here with every other recurring background job, same as
+// statusPoller/complianceService/scheduledJobs above.
+capacityForecast.start();
 scheduledJobs.start();
 digestService.start();
 syntheticCheckRunner.start();
