@@ -17,14 +17,14 @@ const cron = require('node-cron');
 const path = require('path');
 
 const { query, queryOne, execute } = require('../db');
-const { decrypt } = require('../services/crypto');
-const audit = require('../services/audit');
-const webhook = require('../services/webhook');
-const backupService = require('../services/backupService');
-const remoteBrowse = require('../services/remoteBrowse');
-const destinations = require('../services/backupDestinations');
-const slaReportService = require('../services/slaReportService');
-const mailer = require('../services/mailer');
+const { decrypt } = require('./crypto');
+const audit = require('./audit');
+const webhook = require('./webhook');
+const backupService = require('./backupService');
+const remoteBrowse = require('./remoteBrowse');
+const destinations = require('./backupDestinations');
+const slaReportService = require('./slaReportService');
+const mailer = require('./mailer');
 
 const backupTasks = new Map();     // schedule.id -> cron task
 const logExportTasks = new Map();  // schedule.id -> cron task
@@ -228,7 +228,7 @@ async function runLogExportSchedule(schedule) {
     // ── Syslog target: no file at all, just stream each matching audit
     //    row to the configured syslog server as its own message. ───────────
     if (exportTarget === 'syslog') {
-      const syslogForwarder = require('../services/syslogForwarder');
+      const syslogForwarder = require('./syslogForwarder');
       const rows = await queryAuditRows(filters);
       const { sent, failed, total } = await syslogForwarder.exportEntries(rows);
 
@@ -478,12 +478,13 @@ function unregisterSlaReportSchedule(id) {
 }
 
 // ── Group device-count snapshots ─────────────────────────────────────────────
-// Powers the Groups page's "+3 since yesterday" trend indicator. One row
-// per group per day, upserted daily — not a schedule a user creates/edits
-// (unlike backup/log-export/SLA schedules above), so it isn't in the
-// backup/logExport/slaReport task Maps or registered from a DB table; it's
-// just always-on for the life of the process, same idea as the poller's own
-// tick loop.
+// Powers the Groups page's "+3 since yesterday" trend indicator (see
+// routes/groups.js, which joins against group_device_count_snapshots for
+// the prior day's count). One row per group per day, upserted daily — not
+// a schedule a user creates/edits (unlike backup/log-export/SLA schedules
+// above), so it isn't in the backup/logExport/slaReport task Maps or
+// registered from a DB table; it's just always-on for the life of the
+// process, same idea as the poller's own tick loop.
 //
 // ON DUPLICATE KEY UPDATE makes this safe to run more than once for the
 // same day (e.g. a restart right after midnight) — it just re-overwrites
