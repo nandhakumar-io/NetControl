@@ -125,7 +125,16 @@ router.get('/stream', (req, res) => {
   pending.forEach(n => res.write(`data: ${JSON.stringify(n)}\n\n`));
   pendingNotifications.set(uid, []);
 
-  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 20000);
+  // NOTE: this used to be a raw SSE comment (`: ping\n\n`). Comments never
+  // reach EventSource's onmessage/onerror handlers at all, so the bell's
+  // 45s-since-last-message watchdog (Layout.jsx's NotificationBell) had no
+  // way to know the connection was still alive during a quiet stretch with
+  // no real alerts — it just declared the stream "stalled" every ~45s and
+  // showed "Live updates stopped" / Reconnect even though nothing was
+  // actually wrong. A named `ping` event fixes that: the frontend listens
+  // for it and treats it exactly like a real message. Same fix already
+  // applied to routes/bulkCommand.js's stream.
+  const ping = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch {} }, 20000);
   req.on('close', () => { clearInterval(ping); sseClients.get(uid)?.delete(res); });
 });
 

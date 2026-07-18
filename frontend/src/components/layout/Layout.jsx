@@ -54,6 +54,16 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
     )
     esRef.current = es
     es.onopen = () => { errorCountRef.current = 0; setStreamState('connected') }
+    // Server sends a named `ping` event every 20s to keep the connection
+    // alive during quiet stretches — without listening for it, the 45s
+    // watchdog below had no way to tell "no alerts right now" apart from
+    // "connection silently died," so it flagged every idle period as
+    // stalled. Same fix as BulkCommandPage's attachStream().
+    es.addEventListener('ping', () => {
+      errorCountRef.current = 0
+      lastMessageRef.current = Date.now()
+      setStreamState('connected')
+    })
     es.onmessage = (e) => {
       errorCountRef.current = 0
       lastMessageRef.current = Date.now()
@@ -62,8 +72,13 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
         const n = JSON.parse(e.data)
         if (!n.type) return
         setNotifs(prev => [n, ...prev].slice(0, 50))
+        // BUG FIX: the backend's notification payload (both the live SSE
+        // push and GET /alerts/notifications) uses the field `message`,
+        // never `details` — this was reading a field that never existed,
+        // so every toast read "...: undefined on <device>" instead of the
+        // actual alert text.
         if (n.severity === 'critical') {
-          toast.error(`🚨 ${n.rule_name}: ${n.details} on ${n.device_name}`, { duration: 8000 })
+          toast.error(`🚨 ${n.rule_name}: ${n.message} on ${n.device_name}`, { duration: 8000 })
         } else {
           toast(`⚠ ${n.rule_name} on ${n.device_name}`, { duration: 5000 })
         }
