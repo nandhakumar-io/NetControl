@@ -921,6 +921,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  group-device-snapshots:', e.message);
     }
+    try {
+      const { migrateNotificationPrefs } = require('./migrate-notification-prefs');
+      await migrateNotificationPrefs();
+      console.log('  ✓ user_notification_prefs (per-user in-app/push severity thresholds + mute)');
+    } catch (e) {
+      console.warn('  ⚠  notification-prefs:', e.message);
+    }
+    try {
+      const { migrateBulkCommandSchedules } = require('./migrate-bulk-command-schedules');
+      await migrateBulkCommandSchedules();
+      console.log('  ✓ bulk_command_schedules (cron-scheduled saved bulk commands)');
+    } catch (e) {
+      console.warn('  ⚠  bulk-command-schedules:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

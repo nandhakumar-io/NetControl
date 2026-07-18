@@ -69,6 +69,11 @@ const EVENTS = {
   'capacity.warning':            'Capacity forecast: approaching full',
   'capacity.critical':           'Capacity forecast: critical — filling up very soon',
   'capacity.resolved':           'Capacity forecast: no longer at risk',
+  // Cron-scheduled saved bulk commands (services/bulkCommandScheduler.js) —
+  // a saved command run automatically across its device list, same
+  // success/failure shape as scheduled backups/log exports/SLA reports.
+  'bulk_schedule.succeeded':     'Scheduled bulk command completed',
+  'bulk_schedule.failed':        'Scheduled bulk command failed',
 };
 
 module.exports.EVENTS = EVENTS;
@@ -87,6 +92,7 @@ function buildPayload(provider, event, data) {
     'schedule.action_succeeded': '⏱️', 'schedule.action_failed': '⏱️',
     'backup.verified': '✅', 'backup.verify_failed': '💥', 'digest.weekly': '📊',
     'sla_report.generated': '📈', 'sla_report.failed': '💥',
+    'bulk_schedule.succeeded': '🖥️', 'bulk_schedule.failed': '💥',
   }[event] || 'ℹ️';
 
   const text  = `${emoji} *${EVENTS[event] || event}*\n${data.message || JSON.stringify(data)}`;

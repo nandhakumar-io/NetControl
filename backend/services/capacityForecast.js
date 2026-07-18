@@ -181,17 +181,28 @@ async function checkAndNotify() {
       const message = `${f.device_name}: ${metric === 'disk' ? 'disk' : 'RAM'} usage at ${f.current_pct}% and rising ~${f.slope_per_day}%/day — projected full in ~${Math.round(f.days_to_full)} day${Math.round(f.days_to_full) === 1 ? '' : 's'}`;
       const severity = f.days_to_full <= CRITICAL_DAYS ? 'critical' : 'warning';
 
-      pushNotification(admins.map(a => a.id), {
-        type: 'capacity', severity,
-        rule_name: `Capacity forecast (${metric})`, device_id: f.device_id,
-        device_name: f.device_name, metric, message, triggered_at: now,
-      });
-      webPush.sendToUsers(admins.map(a => a.id), {
-        title: `📈 ${f.device_name} filling up`,
-        body: message,
-        tag: `nc-capacity-${f.device_id}-${metric}`,
-        data: { type: 'capacity', deviceId: f.device_id, metric, url: '/capacity' },
-      }).catch(() => {});
+      // Per-user severity threshold / channel opt-out / mute — same gating
+      // routes/alerts.js's notifyAdmins() applies (see
+      // services/notificationPrefs.js).
+      const notificationPrefs = require('./notificationPrefs');
+      const inAppRecipients = await notificationPrefs.filterRecipients(admins.map(a => a.id), 'in_app', severity);
+      const pushRecipients  = await notificationPrefs.filterRecipients(admins.map(a => a.id), 'push', severity);
+
+      if (inAppRecipients.length) {
+        pushNotification(inAppRecipients, {
+          type: 'capacity', severity,
+          rule_name: `Capacity forecast (${metric})`, device_id: f.device_id,
+          device_name: f.device_name, metric, message, triggered_at: now,
+        });
+      }
+      if (pushRecipients.length) {
+        webPush.sendToUsers(pushRecipients, {
+          title: `📈 ${f.device_name} filling up`,
+          body: message,
+          tag: `nc-capacity-${f.device_id}-${metric}`,
+          data: { type: 'capacity', deviceId: f.device_id, metric, url: '/capacity' },
+        }).catch(() => {});
+      }
 
       // Same trigger, same severity, now also reaching Telegram/Slack/
       // generic webhooks — fire() already handles per-webhook min_severity

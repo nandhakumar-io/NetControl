@@ -37,6 +37,7 @@ const scheduledJobs        = require('./services/scheduledJobs');
 const digestService        = require('./services/digestService');
 const syntheticCheckRunner = require('./services/syntheticCheckRunner');
 const auditRetention       = require('./services/auditRetention');
+const bulkCommandScheduler = require('./services/bulkCommandScheduler');
 
 console.log(`\n🛰️  NetControl poller process starting (pid ${process.pid})`);
 console.log(`   Environment : ${process.env.NODE_ENV || 'development'}\n`);
@@ -47,6 +48,7 @@ complianceService.start();
 scheduledJobs.start();
 digestService.start();
 syntheticCheckRunner.start();
+bulkCommandScheduler.start();
 
 // ── metrics_history compaction + retention ────────────────────────────────────
 // Raw 60s buckets are kept for METRICS_COMPRESS_AFTER_DAYS (default 35 —
@@ -72,5 +74,6 @@ process.on('SIGTERM', () => {
   digestService.stop();
   syntheticCheckRunner.stop();
   auditRetention.stop();
+  bulkCommandScheduler.stop();
   process.exit(0);
 });

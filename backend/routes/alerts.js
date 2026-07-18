@@ -487,18 +487,30 @@ function advanceFlapTracking(prevState, now) {
 }
 
 async function notifyAdmins(rule, deviceId, deviceName, severity, message, now, logId = null) {
+  const notificationPrefs = require('../services/notificationPrefs');
   const admins = await query('SELECT id FROM users WHERE role = ? AND enabled = 1', ['admin']);
-  for (const admin of admins) {
+  const allAdminIds = admins.map(a => a.id);
+
+  // Per-user gating (severity threshold, channel on/off, temporary mute —
+  // see services/notificationPrefs.js). Applied independently per channel:
+  // someone might want everything in the bell but only critical pages to
+  // their phone, or vice versa.
+  const inAppRecipients = await notificationPrefs.filterRecipients(allAdminIds, 'in_app', severity);
+  const pushRecipients  = await notificationPrefs.filterRecipients(allAdminIds, 'push', severity);
+
+  for (const userId of inAppRecipients) {
     await execute(
       `INSERT INTO alert_notifications (id, user_id, rule_id, device_id, severity, message, triggered_at, read_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-      [uuidv4(), admin.id, rule.id, deviceId, severity, message, now]
+      [uuidv4(), userId, rule.id, deviceId, severity, message, now]
     );
   }
-  pushNotification(admins.map(a => a.id), {
-    type: 'alert', severity, rule_name: rule.name, device_id: deviceId,
-    device_name: deviceName, metric: rule.metric, message, triggered_at: now,
-  });
+  if (inAppRecipients.length) {
+    pushNotification(inAppRecipients, {
+      type: 'alert', severity, rule_name: rule.name, device_id: deviceId,
+      device_name: deviceName, metric: rule.metric, message, triggered_at: now,
+    });
+  }
 
   // Real mobile/browser push (see services/webPush.js) — separate from the
   // in-app SSE notification above, which only reaches an open tab. Skipped
@@ -506,7 +518,7 @@ async function notifyAdmins(rule, deviceId, deviceName, severity, message, now, 
   // doesn't buzz someone's phone the same way an actual breach does; the
   // one-tap Acknowledge/Snooze actions only make sense for an open incident
   // anyway, which is exactly when logId is passed in.
-  if (severity !== 'info') {
+  if (severity !== 'info' && pushRecipients.length) {
     const webPush = require('../services/webPush');
     const actions = logId
       ? [
@@ -514,7 +526,7 @@ async function notifyAdmins(rule, deviceId, deviceName, severity, message, now, 
           { action: 'snooze', title: 'Snooze 1h' },
         ]
       : [];
-    webPush.sendToUsers(admins.map(a => a.id), {
+    webPush.sendToUsers(pushRecipients, {
       title: `${severity === 'critical' ? '🔴' : '🟡'} ${rule.name}`,
       body: message,
       tag: logId ? `nc-alert-${logId}` : `nc-alert-${rule.id}-${deviceId}`,
