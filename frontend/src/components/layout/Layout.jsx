@@ -6,7 +6,7 @@ import {
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
-  PackageCheck,
+  PackageCheck, CalendarClock, BellRing,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -14,6 +14,7 @@ import { usePermissions } from '../../hooks/usePermissions'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import TwoFactorModal from '../modals/TwoFactorModal'
+import NotificationPrefsModal from '../modals/NotificationPrefsModal'
 import OrgSwitcher from './OrgSwitcher'
 import CommandPalette from './CommandPalette'
 
@@ -328,6 +329,10 @@ export default function Layout() {
   // had no home. This was the only reason 2FA was invisible even though
   // the whole backend flow already worked end to end.
   const [show2FA, setShow2FA] = useState(false)
+  // Per-user in-app/push notification preferences (severity thresholds +
+  // temporary mute) — same "backend existed, needed a home" situation as
+  // TwoFactorModal above. See routes/notificationPrefs.js.
+  const [showNotifPrefs, setShowNotifPrefs] = useState(false)
   // Command palette (Cmd+K / Ctrl+K) — a single fast "jump to" search across
   // devices/groups/runbooks/schedules/users instead of navigating through
   // the sidebar to find one specific thing. See CommandPalette.jsx and the
@@ -396,6 +401,7 @@ export default function Layout() {
       label: 'Automation',
       items: [
         { to: '/schedules',        icon: Clock,     label: 'Schedules',     show: can(32) },
+        { to: '/bulk-command-schedules', icon: CalendarClock, label: 'Command Schedules', show: can(4) },
         { to: '/process-policies', icon: ShieldBan, label: 'Process Rules', show: can(4096) },
         { to: '/runbooks',         icon: Wrench,    label: 'Runbooks',      show: can(1) },
         { to: '/backups',          icon: Archive,   label: 'Backups',       show: can(8192) },
@@ -611,6 +617,18 @@ export default function Layout() {
             {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{isLight ? 'Light mode' : 'Dark mode'}</span>}
           </button>
 
+          {/* Notification preferences (per-user severity thresholds + mute) */}
+          <button
+            onClick={() => setShowNotifPrefs(true)}
+            title="Notification preferences"
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
+                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
+          >
+            <BellRing size={16} className="shrink-0" />
+            {!collapsed && <span className="text-sm font-body font-medium">Notifications</span>}
+          </button>
+
           {/* Security / 2FA */}
           <button
             onClick={() => setShow2FA(true)}
@@ -635,6 +653,7 @@ export default function Layout() {
         </div>
 
         <TwoFactorModal open={show2FA} onClose={() => setShow2FA(false)} />
+        <NotificationPrefsModal open={showNotifPrefs} onClose={() => setShowNotifPrefs(false)} />
 
         {/* Collapse toggle — anchored to a fixed offset near the logo
             header, NOT top-1/2 of the sidebar's own height. top-1/2 was
