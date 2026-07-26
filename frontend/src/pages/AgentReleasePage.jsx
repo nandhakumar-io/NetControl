@@ -11,7 +11,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   PackageCheck, UploadCloud, Loader2, CheckCircle2, AlertTriangle,
-  Clock, Hash, FileCode2, Monitor, Server, RefreshCw,
+  Clock, Hash, FileCode2, Monitor, Server, RefreshCw, History,
+  RotateCcw, PlayCircle, PauseCircle, Radio,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -34,20 +35,24 @@ function formatDate(sec) {
 
 export default function AgentReleasePage() {
   const [manifest, setManifest]   = useState(null)
+  const [history,  setHistory]    = useState([])
   const [loading,  setLoading]    = useState(true)
   const [devices,  setDevices]    = useState([])
   const [uploading, setUploading] = useState(false)
-  const [form, setForm] = useState({ file: null, version: '', notes: '' })
+  const [busyId, setBusyId]       = useState(null)
+  const [form, setForm] = useState({ file: null, version: '', notes: '', rollout_percent: 10 })
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [releaseRes, devicesRes] = await Promise.all([
+      const [releaseRes, devicesRes, historyRes] = await Promise.all([
         api.get('/agent-release').catch(err => err.response?.status === 404 ? { data: null } : Promise.reject(err)),
         api.get('/devices').catch(() => ({ data: [] })),
+        api.get('/agent-release/history').catch(() => ({ data: [] })),
       ])
       setManifest(releaseRes.data)
       setDevices(Array.isArray(devicesRes.data) ? devicesRes.data : (devicesRes.data?.devices || []))
+      setHistory(Array.isArray(historyRes.data) ? historyRes.data : [])
     } catch (e) {
       toast.error(e.response?.data?.error || 'Failed to load agent release info')
     } finally {
@@ -68,17 +73,58 @@ export default function AgentReleasePage() {
       fd.append('file', form.file)
       fd.append('version', form.version)
       fd.append('notes', form.notes || '')
+      fd.append('rollout_percent', String(form.rollout_percent))
       const { data } = await api.post('/agent-release', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setManifest(data)
-      setForm({ file: null, version: '', notes: '' })
-      toast.success(`Released v${data.version} — agents will pick it up on their next check-in`)
+      setForm({ file: null, version: '', notes: '', rollout_percent: 10 })
+      toast.success(`Released v${data.version} at ${form.rollout_percent}% rollout`)
       load()
     } catch (e) {
       toast.error(e.response?.data?.error || e.response?.data?.errors?.[0]?.msg || 'Upload failed')
     } finally {
       setUploading(false)
+    }
+  }
+
+  const handleRolloutChange = async (id, pct) => {
+    setBusyId(id)
+    try {
+      await api.patch(`/agent-release/${id}/rollout`, { rollout_percent: pct })
+      toast.success(`Rollout set to ${pct}%`)
+      load()
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to update rollout')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleRollback = async (id, version) => {
+    if (!window.confirm(`Roll back to v${version}? Agents will start receiving this build again.`)) return
+    setBusyId(id)
+    try {
+      await api.post(`/agent-release/${id}/rollback`)
+      toast.success(`Rolled back to v${version}`)
+      load()
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Rollback failed')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleResume = async (id) => {
+    setBusyId(id)
+    try {
+      await api.post(`/agent-release/${id}/resume`)
+      toast.success('Canary resumed')
+      load()
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to resume')
+    } finally {
+      setBusyId(null)
     }
   }
 
@@ -154,6 +200,19 @@ export default function AgentReleasePage() {
                     style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--text-muted)' }}>
+                    Initial rollout — {form.rollout_percent}% of devices
+                  </label>
+                  <input
+                    type="range" min={0} max={100} step={5} value={form.rollout_percent}
+                    onChange={e => setForm(f => ({ ...f, rollout_percent: parseInt(e.target.value, 10) }))}
+                    className="w-full"
+                  />
+                  <p className="text-sm mt-1" style={{ color: 'var(--text-faint)' }}>
+                    Defaults to a 10% canary. Devices are picked deterministically, so the same cohort stays in as you dial this up later.
+                  </p>
+                </div>
                 <button type="submit" disabled={uploading}
                   className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all"
                   style={{ background: uploading ? 'var(--bg-surface-3)' : '#a78bfa', color: uploading ? 'var(--text-muted)' : '#1a1a2e' }}>
@@ -178,6 +237,12 @@ export default function AgentReleasePage() {
               {manifest ? (
                 <div className="space-y-3 text-sm">
                   <Row label="Version" value={`v${manifest.version}`} mono />
+                  <Row label="Status" value={
+                    <span className="inline-flex items-center gap-1">
+                      <Radio size={11} className="text-emerald-400" /> {manifest.status}
+                    </span>
+                  } />
+                  <Row label="Rollout" value={`${manifest.rollout_percent}% of devices`} />
                   <Row label="Uploaded" value={formatDate(manifest.uploaded_at)} />
                   <Row label="SHA-256" value={manifest.sha256} mono truncate />
                   {manifest.notes && (
@@ -194,6 +259,66 @@ export default function AgentReleasePage() {
               )}
             </div>
           </div>
+
+          {/* Release history — rollout slider, rollback, resume */}
+          {history.length > 0 && (
+            <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
+              <div className="px-5 py-3.5 flex items-center gap-2" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                <History size={16} style={{ color: 'var(--text-muted)' }} />
+                <h2 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>Release History</h2>
+              </div>
+              <div className="divide-y" style={{ borderColor: 'var(--border-subtle)' }}>
+                {history.map(r => (
+                  <div key={r.id} className="px-5 py-4 space-y-3">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className="text-sm font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>v{r.version}</span>
+                      <StatusPill status={r.status} />
+                      <span className="text-sm" style={{ color: 'var(--text-faint)' }}>{formatDate(r.uploaded_at)}</span>
+                      <div className="flex-1" />
+                      {r.health && (r.health.healthy + r.health.unhealthy + r.health.pending > 0) && (
+                        <div className="flex items-center gap-2 text-sm">
+                          {r.health.healthy > 0 && <span className="text-emerald-400">{r.health.healthy} healthy</span>}
+                          {r.health.pending > 0 && <span style={{ color: 'var(--text-faint)' }}>{r.health.pending} pending</span>}
+                          {r.health.unhealthy > 0 && <span className="text-red-400">{r.health.unhealthy} unhealthy</span>}
+                        </div>
+                      )}
+                    </div>
+
+                    {r.notes && <p className="text-sm" style={{ color: 'var(--text-faint)' }}>{r.notes}</p>}
+
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {r.status === 'active' && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm" style={{ color: 'var(--text-faint)' }}>Rollout</span>
+                          <input
+                            type="range" min={0} max={100} step={5} value={r.rollout_percent}
+                            disabled={busyId === r.id}
+                            onChange={e => handleRolloutChange(r.id, parseInt(e.target.value, 10))}
+                            className="w-40"
+                          />
+                          <span className="text-sm font-mono" style={{ color: 'var(--text-primary)' }}>{r.rollout_percent}%</span>
+                        </div>
+                      )}
+                      {r.status === 'paused' && (
+                        <button onClick={() => handleResume(r.id)} disabled={busyId === r.id}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium"
+                          style={{ background: 'rgba(52,211,153,0.12)', border: '1px solid rgba(52,211,153,0.3)', color: '#34d399' }}>
+                          <PlayCircle size={13} /> Resume canary
+                        </button>
+                      )}
+                      {r.status !== 'active' && (
+                        <button onClick={() => handleRollback(r.id, r.version)} disabled={busyId === r.id}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium"
+                          style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}>
+                          <RotateCcw size={13} /> Roll back to this build
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Per-device version breakdown */}
           {outdated.length > 0 && (
@@ -219,6 +344,23 @@ export default function AgentReleasePage() {
         </div>
       )}
     </div>
+  )
+}
+
+function StatusPill({ status }) {
+  const map = {
+    active:      { bg: 'rgba(52,211,153,0.12)', border: 'rgba(52,211,153,0.3)', color: '#34d399', icon: Radio },
+    paused:      { bg: 'rgba(251,191,36,0.12)', border: 'rgba(251,191,36,0.3)', color: '#fbbf24', icon: PauseCircle },
+    superseded:  { bg: 'var(--bg-surface-3)', border: 'var(--border-subtle)', color: 'var(--text-faint)', icon: History },
+    rolled_back: { bg: 'var(--bg-surface-3)', border: 'var(--border-subtle)', color: 'var(--text-faint)', icon: RotateCcw },
+  }
+  const s = map[status] || map.superseded
+  const Icon = s.icon
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-sm font-semibold"
+      style={{ background: s.bg, border: `1px solid ${s.border}`, color: s.color }}>
+      <Icon size={10} /> {status}
+    </span>
   )
 }
 

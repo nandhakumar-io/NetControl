@@ -949,6 +949,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  alert-rule-tag-scope:', e.message);
     }
+    try {
+      const { migrateRunbookApproval } = require('./migrate-runbook-approval');
+      await migrateRunbookApproval();
+      console.log('  ✓ runbook approval gate (require_approval + runbook_pending_approvals)');
+    } catch (e) {
+      console.warn('  ⚠  runbook-approval:', e.message);
+    }
+    try {
+      const { migrateAgentCanary } = require('./migrate-agent-canary');
+      await migrateAgentCanary();
+      console.log('  ✓ agent canary rollout + rollback (agent_releases, devices.agent_update_health)');
+    } catch (e) {
+      console.warn('  ⚠  agent-canary:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

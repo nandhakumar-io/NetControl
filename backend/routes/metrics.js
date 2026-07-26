@@ -350,7 +350,7 @@ router.post('/register', registerLimiter, async (req, res) => {
 
       console.log(`[Agent] Updated existing device: ${device.name} (${device.id})`);
 
-      const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version);
+      const { update_available, latest_version } = await require('../services/agentRelease').resolveUpdateForDevice(device.id, agent_version);
       return res.json({
         device_id: device.id,
         device_name: device.name,
@@ -383,7 +383,7 @@ router.post('/register', registerLimiter, async (req, res) => {
       message: `New agent registered: ${hostname} (${ip}) — awaiting approval`,
     }).catch(() => {});
 
-    const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version);
+    const { update_available, latest_version } = await require('../services/agentRelease').resolveUpdateForDevice(id, agent_version);
     return res.status(201).json({
       device_id: id,
       device_name: hostname,
@@ -481,12 +481,15 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
   // Fire alert evaluation asynchronously
   setImmediate(() => evaluateAlerts(device.id, snapshot));
 
-  // Agent self-update signal — cheap in-memory manifest read (see
-  // services/agentRelease.js), not a DB query, so it's fine on this hot
-  // ingest path. The agent decides what to do with this (log-only by
-  // default, or download+apply if it was started with NC_AUTO_UPDATE=true
-  // — see agent/netcontrol-agent.js's checkForUpdate()).
-  const { update_available, latest_version } = require('../services/agentRelease').isUpdateAvailable(agent_version || device.agent_version);
+  // Agent self-update signal — now a per-device rollout decision (DB read
+  // of the single active release row, see services/agentRelease.js's
+  // resolveUpdateForDevice()) rather than an in-memory manifest read, since
+  // it needs deviceId for deterministic canary-cohort bucketing. Still
+  // cheap relative to everything else on this ingest path. The agent
+  // decides what to do with this (log-only by default, or download+apply
+  // if it was started with NC_AUTO_UPDATE=true — see
+  // agent/netcontrol-agent.js's checkForUpdate()).
+  const { update_available, latest_version } = await require('../services/agentRelease').resolveUpdateForDevice(device.id, agent_version || device.agent_version);
 
   // Admin-queued immediate update (routes/devices.js's POST
   // /bulk-agent-update) — distinct from the routine update_available signal

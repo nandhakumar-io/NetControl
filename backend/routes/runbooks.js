@@ -54,16 +54,16 @@ router.get('/', async (req, res) => {
 // ── POST /api/runbooks ────────────────────────────────────────────────────
 router.post('/', requireManageRunbooks, async (req, res) => {
   try {
-    const { name, description = null, os_type = 'any', command, timeout_sec = 30 } = req.body;
+    const { name, description = null, os_type = 'any', command, timeout_sec = 30, require_approval = false } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
     if (!command?.trim()) return res.status(400).json({ error: 'command is required' });
     if (!['linux', 'windows', 'any'].includes(os_type)) return res.status(400).json({ error: 'invalid os_type' });
 
     const id = uuidv4();
     await execute(
-      `INSERT INTO runbook_actions (id, org_id, name, description, os_type, command, timeout_sec, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
-      [id, req.orgId, name.trim(), description, os_type, command, Math.min(timeout_sec, 300), req.user.id]
+      `INSERT INTO runbook_actions (id, org_id, name, description, os_type, command, timeout_sec, require_approval, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP())`,
+      [id, req.orgId, name.trim(), description, os_type, command, Math.min(timeout_sec, 300), require_approval ? 1 : 0, req.user.id]
     );
     await audit.log({ userId: req.user.id, username: req.user.username,
       action: 'create_runbook', targetType: 'runbook_action', targetId: id,
@@ -82,11 +82,12 @@ router.put('/:id', requireManageRunbooks, async (req, res) => {
       name = existing.name, description = existing.description,
       os_type = existing.os_type, command = existing.command,
       timeout_sec = existing.timeout_sec,
+      require_approval = existing.require_approval,
     } = req.body;
 
     await execute(
-      `UPDATE runbook_actions SET name=?, description=?, os_type=?, command=?, timeout_sec=? WHERE id=? AND org_id=?`,
-      [name, description, os_type, command, Math.min(timeout_sec, 300), req.params.id, req.orgId]
+      `UPDATE runbook_actions SET name=?, description=?, os_type=?, command=?, timeout_sec=?, require_approval=? WHERE id=? AND org_id=?`,
+      [name, description, os_type, command, Math.min(timeout_sec, 300), require_approval ? 1 : 0, req.params.id, req.orgId]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }

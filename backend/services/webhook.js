@@ -34,6 +34,7 @@ const EVENTS = {
   'process.violation':       'Restricted process detected/blocked',
   // System
   'system.agent_registered': 'New agent registered',
+  'system.agent_canary_paused': 'Agent canary rollout auto-paused (unhealthy devices)',
   // Scheduled backups — fired by services/scheduledJobs.js. These already
   // existed in code but were missing from this map (no display name/emoji)
   // and from the frontend's event picker (so they couldn't be selected when

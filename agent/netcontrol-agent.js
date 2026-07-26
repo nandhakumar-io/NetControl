@@ -15,6 +15,15 @@
  *     Linux:   sudo node netcontrol-agent.js --uninstall
  *     Windows: node netcontrol-agent.js --uninstall (as Administrator)
  *
+ *   Self-test (used internally by the self-update path — see checkForUpdate()
+ *   below — to verify a newly-downloaded build actually boots before it's
+ *   promoted to the running service; safe to run manually too):
+ *     node netcontrol-agent.js --self-test
+ *     Exits 0 if the build can load its dependencies, read the existing
+ *     credentials file (if any), and reach NC_SERVER_URL. Exits 1 otherwise.
+ *     Does NOT register, run the metrics loop, or touch the installed
+ *     service/scheduled task.
+ *
  * ENV VARS:
  *   NC_SERVER_URL   — required: http(s)://host:port of your NetControl server
  *   NC_REG_SECRET   — required for first-time registration: must match the
@@ -74,7 +83,24 @@ if (process.argv.includes('--uninstall')) {
   process.exit(0);
 }
 
-if (!SERVER_URL) {
+// --self-test: run by checkForUpdate() against a freshly-downloaded,
+// not-yet-promoted build (see "Self-update (blue-green via versioned
+// installs)" further down). Deliberately does the absolute minimum needed
+// to prove "this file can actually run" — no registration, no metrics
+// loop, no writes to the credentials file, no touching the installed
+// service/task. A false-positive here (exiting 0 when the build is
+// actually broken) is far worse than a false-negative, so every check
+// inside runSelfTest() fails closed: any unexpected error/timeout is a
+// FAIL, not a skip. `SELF_TEST` is checked again at the bottom of the file
+// to skip the normal startup loop (see startWithRestart() call at EOF).
+const SELF_TEST = process.argv.includes('--self-test');
+if (SELF_TEST) {
+  // runSelfTest() is defined further down as a hoisted `async function`,
+  // safe to call here.
+  runSelfTest().then(ok => process.exit(ok ? 0 : 1));
+}
+
+if (!SELF_TEST && !SERVER_URL) {
   console.error('[Agent] NC_SERVER_URL is required.\n  Example: NC_SERVER_URL=http://192.168.1.100:4000 node netcontrol-agent.js');
   process.exit(1);
 }
@@ -83,20 +109,27 @@ if (!SERVER_URL) {
 // SERVICE INSTALLATION
 // ──────────────────────────────────────────────────────────────────────────────
 
-function installService() {
+// `execPath` is optional — defaults to AGENT_PATH (the file currently
+// running), which is the normal --install behavior. The self-update
+// promotion path (promoteVersion() below) passes the versioned candidate
+// path instead, so the SAME systemd unit / scheduled task is rewritten to
+// point at the new build and restarted — no second process, no pm2, no
+// dual-registration window. installService() itself is otherwise
+// unchanged and remains fully idempotent (safe to call repeatedly).
+function installService(execPath = AGENT_PATH) {
   if (!SERVER_URL) {
     console.error('[Install] NC_SERVER_URL must be set when running --install');
     process.exit(1);
   }
 
   if (IS_WINDOWS) {
-    installWindows();
+    installWindows(execPath);
   } else {
-    installLinux();
+    installLinux(execPath);
   }
 }
 
-function installLinux() {
+function installLinux(execPath = AGENT_PATH) {
   const nodeBin = process.execPath; // full path to node binary
   const serviceFile = `/etc/systemd/system/netcontrol-agent.service`;
 
@@ -108,8 +141,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${nodeBin} ${AGENT_PATH}
-WorkingDirectory=${path.dirname(AGENT_PATH)}
+ExecStart=${nodeBin} ${execPath}
+WorkingDirectory=${path.dirname(execPath)}
 Environment=NC_SERVER_URL=${SERVER_URL}
 Environment=NC_INTERVAL=${INTERVAL_SEC}
 Restart=always
@@ -128,7 +161,7 @@ WantedBy=multi-user.target
     execSync('systemctl daemon-reload');
     execSync('systemctl enable netcontrol-agent');
     execSync('systemctl restart netcontrol-agent');
-    console.log('✅ NetControl agent installed and started as systemd service.');
+    console.log(`✅ NetControl agent installed and started as systemd service (${execPath}).`);
     console.log('   Status:  sudo systemctl status netcontrol-agent');
     console.log('   Logs:    sudo journalctl -u netcontrol-agent -f');
     console.log('   Stop:    sudo systemctl stop netcontrol-agent');
@@ -139,7 +172,7 @@ WantedBy=multi-user.target
   }
 }
 
-function installWindows() {
+function installWindows(execPath = AGENT_PATH) {
   const nodeBin  = process.execPath;
   const dataDir  = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'NetControl');
   const logFile  = path.join(dataDir, 'agent.log');
@@ -153,7 +186,7 @@ function installWindows() {
   const wrapper = `@echo off
 set NC_SERVER_URL=${SERVER_URL}
 set NC_INTERVAL=${INTERVAL_SEC}
-"${nodeBin}" "${AGENT_PATH}" >> "${logFile}" 2>&1
+"${nodeBin}" "${execPath}" >> "${logFile}" 2>&1
 `;
   fs.writeFileSync(wrapperPath, wrapper);
 
@@ -391,7 +424,73 @@ async function register() {
   return creds;
 }
 
-// ── Self-update ──────────────────────────────────────────────────────────────
+// ── Self-test ──────────────────────────────────────────────────────────────────
+// Run via `node <candidate-path> --self-test` against a freshly-downloaded
+// build that has NOT been promoted yet (see checkForUpdate()'s versioned
+// download below). Proves the new file can actually boot before the
+// currently-running agent trusts it enough to hand over the service.
+//
+// Deliberately conservative in the opposite direction from checkForUpdate():
+// every check here should fail (return false) rather than throw or hang,
+// so the caller always gets a clean true/false rather than having to
+// separately handle a crash vs. a timeout vs. a real failure.
+async function runSelfTest() {
+  const result = { deps: false, creds: false, server: false };
+  try {
+    console.log(`[SelfTest] Checking build at ${AGENT_PATH} (v${AGENT_VERSION})…`);
+
+    // 1. Dependencies actually resolve. This is the single most common way
+    //    a "successfully downloaded" build is still broken — e.g. npm
+    //    install failed silently, or node_modules wasn't carried over into
+    //    the new versioned directory.
+    try {
+      require('systeminformation');
+      result.deps = true;
+    } catch (e) {
+      console.warn('[SelfTest] FAIL — could not load systeminformation:', e.message);
+    }
+
+    // 2. Credentials file is readable (if one exists — a brand new install
+    //    with no creds yet is not itself a failure, just means this check
+    //    is a no-op rather than a pass/fail).
+    const creds = loadCreds();
+    result.creds = creds ? !!(creds.device_id && creds.api_key) : true;
+    if (creds && !result.creds) console.warn('[SelfTest] FAIL — credentials file exists but is malformed.');
+
+    // 3. The server is actually reachable with the current build's HTTP
+    //    stack. Doesn't need to authenticate — just needs SERVER_URL to
+    //    respond at all, since a build with a broken http/https wrapper
+    //    (e.g. a bad edit to httpReq()) would otherwise pass 1 and 2 and
+    //    still be useless in production.
+    if (!SERVER_URL) {
+      console.warn('[SelfTest] FAIL — NC_SERVER_URL is not set.');
+    } else {
+      try {
+        const res = await httpReq(`${SERVER_URL}/api/health`, { timeout: 8000 }).catch(() =>
+          httpReq(SERVER_URL, { timeout: 8000 }));
+        // Any HTTP response at all (even a 404 if /api/health doesn't
+        // exist on this server version) proves the network stack and TLS
+        // handshake work — we're testing "can this build talk to the
+        // server", not "does this exact endpoint exist".
+        result.server = !!res && typeof res.status === 'number';
+      } catch (e) {
+        console.warn('[SelfTest] FAIL — could not reach NC_SERVER_URL:', e.message);
+      }
+    }
+
+    const ok = result.deps && result.creds && result.server;
+    console.log(`[SelfTest] deps=${result.deps} creds=${result.creds} server=${result.server} → ${ok ? 'PASS' : 'FAIL'}`);
+    return ok;
+  } catch (e) {
+    // Anything unexpected (a syntax error surfacing only at require-time
+    // elsewhere in this file, an uncaught throw, etc.) is a FAIL — never
+    // let an unknown exception be mistaken for a pass.
+    console.error('[SelfTest] FAIL — unexpected error:', e.message);
+    return false;
+  }
+}
+
+// ── Self-update (blue-green via versioned installs) ─────────────────────────
 // Triggered from the main loop whenever a metrics POST response says
 // update_available: true (see routes/metrics.js + services/agentRelease.js
 // on the server). Two modes:
@@ -407,6 +506,20 @@ async function register() {
 // Deliberately conservative: any failure at any step just logs and leaves
 // the currently-running agent untouched — a bad update should never be
 // able to leave a fleet of devices with no agent running at all.
+//
+// CHANGED (blue-green): updates used to overwrite AGENT_PATH in place and
+// restart on faith that the bytes were intact (checksum-only). Now each
+// version is downloaded into its own directory under VERSIONS_DIR, proven
+// to actually boot via a `--self-test` child process, and only THEN
+// promoted by rewriting the systemd unit / scheduled task to point at the
+// new path (see installService(execPath) above) and restarting through
+// the same service manager as before. If self-test fails, the versioned
+// directory is left on disk for inspection (not cleaned up automatically)
+// and the currently-running agent is completely untouched — no file
+// swapped, no restart triggered.
+const VERSIONS_DIR = path.join(path.dirname(AGENT_PATH), 'versions');
+const SELF_TEST_TIMEOUT_MS = 20000;
+
 let updateNoticeLogged = false;
 let lastUpdateAttempt = 0;
 const UPDATE_RETRY_COOLDOWN_MS = 30 * 60 * 1000; // don't hammer the server if something's wrong
@@ -427,8 +540,8 @@ async function checkForUpdate(creds, latestVersion, force = false) {
     // /api/devices/bulk-agent-update) — that's a deliberate one-shot
     // action, not the agent's own silent background updater, so it applies
     // regardless of AUTO_UPDATE and isn't subject to the routine retry
-    // cooldown. It still goes through the same checksum + size validation
-    // below before anything on disk is touched.
+    // cooldown. It still goes through the same checksum + self-test
+    // validation below before anything about the running service changes.
     console.log(`\n[Agent] Update requested by administrator (v${AGENT_VERSION} → v${latestVersion})…`);
   }
   lastUpdateAttempt = Date.now();
@@ -450,22 +563,106 @@ async function checkForUpdate(creds, latestVersion, force = false) {
     // Sanity floor — a real agent script is tens of KB; anything this
     // small is almost certainly a truncated download or an error page
     // that somehow got a 200, not a real update. Refuse rather than risk
-    // replacing a working agent with garbage.
+    // promoting garbage.
     console.warn('[Agent] Update REJECTED — downloaded file suspiciously small, refusing to apply.');
     return;
   }
 
+  // ── Land the new build in its own versioned directory ──────────────────
+  // Never touches AGENT_PATH — a failed/rejected update here has made
+  // zero changes to anything the running service depends on.
+  const versionDir = path.join(VERSIONS_DIR, latestVersion);
+  const candidatePath = path.join(versionDir, 'netcontrol-agent.js');
   try {
-    const tmpPath = `${AGENT_PATH}.update-tmp`;
-    fs.writeFileSync(tmpPath, res.body);
-    fs.renameSync(tmpPath, AGENT_PATH); // atomic on the same filesystem — no window where the file is half-written
-    console.log(`[Agent] Update applied (v${AGENT_VERSION} → v${latestVersion}). Restarting…`);
+    fs.mkdirSync(versionDir, { recursive: true });
+    fs.writeFileSync(candidatePath, res.body);
+    // The candidate needs its own package.json so `require('./package.json')`
+    // (AGENT_VERSION above) and dependency resolution work when it's later
+    // run as the promoted service. Copy the currently-running one's deps
+    // list — systeminformation's version doesn't change on most releases
+    // (see the top-of-file note on why the agent ships as a single script).
+    const pkgSrc = path.join(path.dirname(AGENT_PATH), 'package.json');
+    if (fs.existsSync(pkgSrc)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgSrc, 'utf8'));
+      pkg.version = latestVersion;
+      fs.writeFileSync(path.join(versionDir, 'package.json'), JSON.stringify(pkg, null, 2));
+    }
+    // node_modules (systeminformation) — symlink rather than copy so this
+    // doesn't reinstall/duplicate ~50MB per version. If the currently
+    // running install doesn't have node_modules alongside it either (e.g.
+    // global install), self-test's require() below will just fail closed
+    // and the update is correctly rejected rather than silently skipping
+    // the dependency check.
+    const modulesSrc = path.join(path.dirname(AGENT_PATH), 'node_modules');
+    const modulesDst = path.join(versionDir, 'node_modules');
+    if (fs.existsSync(modulesSrc) && !fs.existsSync(modulesDst)) {
+      try { fs.symlinkSync(modulesSrc, modulesDst, 'junction'); } catch (e) {
+        console.warn('[Agent] Could not link node_modules for candidate build:', e.message);
+      }
+    }
   } catch (e) {
-    console.error('[Agent] Update FAILED to write to disk:', e.message, '— check file permissions (the agent usually needs to run as root/SYSTEM to update itself, same as --install).');
+    console.error('[Agent] Update FAILED to write candidate build to disk:', e.message);
     return;
   }
 
-  restartSelf();
+  // ── Prove it boots before trusting it with the live service ─────────────
+  console.log(`[Agent] Running self-test against candidate build v${latestVersion}…`);
+  const passed = await runCandidateSelfTest(candidatePath);
+  if (!passed) {
+    console.warn(`[Agent] Self-test FAILED for v${latestVersion} — leaving running agent (v${AGENT_VERSION}) untouched.`);
+    console.warn(`[Agent] Candidate left on disk for inspection: ${candidatePath}`);
+    return;
+  }
+
+  // ── Promote: same systemd unit / scheduled task, new ExecStart target ───
+  // This is the entire "cutover" — no second process is ever left running,
+  // no pm2 or other process manager is required, and it reuses the exact
+  // install logic that already ran during --install (fully idempotent).
+  console.log(`[Agent] Self-test passed. Promoting v${latestVersion} and restarting…`);
+  try {
+    installService(candidatePath);
+  } catch (e) {
+    console.error('[Agent] Promotion FAILED:', e.message, '— running agent left in place; you may need to promote manually:');
+    console.error(`  sudo node ${candidatePath} --install`);
+    return;
+  }
+  setTimeout(() => process.exit(0), 500); // installService()'s restart already brought the new version up
+}
+
+// Spawns the candidate build with --self-test and resolves true/false
+// based on its exit code. Runs as a genuinely separate process (not just
+// require()'d in-process) so a candidate with e.g. a top-level infinite
+// loop or a crash-on-load bug can't take down the currently-running agent
+// that's evaluating it — the worst case is this promise times out.
+function runCandidateSelfTest(candidatePath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const child = spawn(process.execPath, [candidatePath, '--self-test'], {
+      env: { ...process.env, NC_SERVER_URL: SERVER_URL },
+      stdio: 'inherit',
+    });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.warn(`[Agent] Self-test timed out after ${SELF_TEST_TIMEOUT_MS / 1000}s — treating as FAIL.`);
+      try { child.kill('SIGKILL'); } catch {}
+      resolve(false);
+    }, SELF_TEST_TIMEOUT_MS);
+
+    child.on('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      console.warn('[Agent] Self-test process failed to spawn:', e.message);
+      resolve(false);
+    });
+  });
 }
 
 // Ask whichever service manager installed this agent to relaunch it with
@@ -478,6 +675,11 @@ async function checkForUpdate(creds, latestVersion, force = false) {
 // explicit `schtasks /Run` is the only thing that brings it back — without
 // it, exiting here would just leave the device with no agent until next
 // reboot.
+// NOTE: no longer called by checkForUpdate() — promotion now goes through
+// installService(candidatePath), which does its own systemctl/schtasks
+// restart as part of rewriting the unit/task. Left in place in case
+// anything else wants a "just restart whatever's currently installed"
+// helper in the future.
 function restartSelf() {
   try {
     if (IS_WINDOWS) {
@@ -872,4 +1074,8 @@ async function startWithRestart() {
   console.log('[Agent] Stopped cleanly.');
 }
 
-startWithRestart();
+// SELF_TEST short-circuits here: runSelfTest() above already handles its
+// own process.exit(), so the real agent loop must never start alongside it.
+if (!SELF_TEST) {
+  startWithRestart();
+}

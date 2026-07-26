@@ -78,6 +78,16 @@ console.log(`   Metrics retention: ${metricsRollup.COMPRESS_AFTER_DAYS}d raw -> 
 auditRetention.start();
 console.log(`   Audit log retention: ${auditRetention.RETENTION_DAYS ? auditRetention.RETENTION_DAYS + 'd' : 'disabled (kept forever)'}\n`);
 
+// ── Runbook approval-gate expiry ────────────────────────────────────────────
+// A pending runbook approval (routes/alerts.js) auto-expires so a stale
+// approval can't fire a remediation against a since-resolved incident.
+// Checked every minute — cheap single UPDATE, same pattern as the interval
+// timers the other services above manage internally.
+const { expireStaleApprovals } = require('./routes/alerts');
+const approvalExpiryInterval = setInterval(() => { expireStaleApprovals(); }, 60 * 1000);
+expireStaleApprovals();
+console.log('   Runbook approval expiry: checking every 60s\n');
+
 // Keep the process alive; all the real work happens on setInterval timers
 // inside the services above.
 process.on('SIGTERM', () => {
@@ -88,5 +98,6 @@ process.on('SIGTERM', () => {
   syntheticCheckRunner.stop();
   auditRetention.stop();
   bulkCommandScheduler.stop();
+  clearInterval(approvalExpiryInterval);
   process.exit(0);
 });

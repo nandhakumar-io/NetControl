@@ -267,6 +267,14 @@ async function flushToDB(results, nowSec, devices) {
 
   await Promise.all(tasks);
 
+  // Agent canary health: if any device that just went offline recently
+  // accepted a self-update and is still inside the grace window, flag it
+  // unhealthy and let the canary auto-pause check run.
+  if (toOffline.length) {
+    require('./agentRelease').markOfflineDuringUpdateGrace(toOffline)
+      .catch(e => console.error('[Poller] agent canary health check:', e.message));
+  }
+
   // ── Push transitions to the web tier in real time ────────────────────────
   // The poller writes MySQL directly (source of truth), but browsers get
   // their live view from the bus/SSE, same channel the metrics route uses.

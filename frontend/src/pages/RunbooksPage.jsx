@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Wrench, Plus, X, Loader2, Trash2, Pencil, Play, Clock,
-  Terminal, CheckCircle2, XCircle, History,
+  Terminal, CheckCircle2, XCircle, History, ShieldCheck, ThumbsUp, ThumbsDown,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -30,13 +30,19 @@ export default function RunbooksPage() {
   const [editing, setEditing] = useState(null)
   const [testingId, setTestingId] = useState(null)
   const [historyFor, setHistoryFor] = useState(null)
+  const [approvals, setApprovals] = useState([])
+  const [decidingId, setDecidingId] = useState(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [rb, dv] = await Promise.all([api.get('/runbooks'), api.get('/devices')])
+      const [rb, dv, ap] = await Promise.all([
+        api.get('/runbooks'), api.get('/devices'),
+        api.get('/alerts/approvals', { params: { status: 'pending' } }).catch(() => ({ data: [] })),
+      ])
       setRunbooks(rb.data)
       setDevices(dv.data)
+      setApprovals(ap.data)
     } catch (e) {
       toast.error(e.response?.data?.error || 'Failed to load runbooks')
     } finally {
@@ -45,6 +51,27 @@ export default function RunbooksPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+  // Pending approvals can arrive at any time (an alert firing), so poll
+  // lightly while the page is open rather than only loading once.
+  useEffect(() => {
+    const t = setInterval(() => {
+      api.get('/alerts/approvals', { params: { status: 'pending' } }).then(({ data }) => setApprovals(data)).catch(() => {})
+    }, 20000)
+    return () => clearInterval(t)
+  }, [])
+
+  const decide = async (id, action) => {
+    setDecidingId(id)
+    try {
+      await api.post(`/alerts/approvals/${id}/${action}`)
+      toast.success(action === 'approve' ? 'Runbook approved and run' : 'Approval rejected')
+      setApprovals(a => a.filter(x => x.id !== id))
+    } catch (e) {
+      toast.error(e.response?.data?.error || `Failed to ${action}`)
+    } finally {
+      setDecidingId(null)
+    }
+  }
 
   const remove = async (rb) => {
     if (!window.confirm(`Delete runbook "${rb.name}"? Any alert rules using it will stop running it.`)) return
@@ -70,6 +97,38 @@ export default function RunbooksPage() {
         ) : null}
       />
 
+      {approvals.length > 0 && (
+        <div className="card mb-4" style={{ borderColor: 'rgba(251,191,36,0.35)' }}>
+          <div className="flex items-center gap-2 mb-3">
+            <ShieldCheck size={15} className="text-amber-400" />
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+              Pending Approvals ({approvals.length})
+            </h2>
+          </div>
+          <div className="flex flex-col gap-2">
+            {approvals.map(a => (
+              <div key={a.id} className="rounded-xl border p-3 flex items-start justify-between gap-3" style={{ borderColor: 'rgba(251,191,36,0.25)' }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{a.runbook_name} → {a.hostname}</p>
+                  <code className="text-xs text-slate-400 block truncate font-mono mt-0.5">{a.command}</code>
+                  <p className="text-xs text-slate-500 mt-1">Triggered by {a.triggered_by} · {fmtDateTime(a.created_at)}</p>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button onClick={() => decide(a.id, 'approve')} disabled={decidingId === a.id}
+                    title="Approve and run" className="p-1.5 rounded-lg text-emerald-400 hover:bg-emerald-400/10">
+                    <ThumbsUp size={14} />
+                  </button>
+                  <button onClick={() => decide(a.id, 'reject')} disabled={decidingId === a.id}
+                    title="Reject" className="p-1.5 rounded-lg text-red-400 hover:bg-red-400/10">
+                    <ThumbsDown size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="card">
         {loading ? (
           <div className="flex justify-center py-10"><Loader2 className="animate-spin text-brand-400" size={24} /></div>
@@ -89,6 +148,12 @@ export default function RunbooksPage() {
                       <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded-full bg-white/5 text-slate-400">
                         {OS_LABEL[rb.os_type]}
                       </span>
+                      {!!rb.require_approval && (
+                        <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1"
+                          style={{ background: 'rgba(251,191,36,0.12)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }}>
+                          <ShieldCheck size={9} /> Approval required
+                        </span>
+                      )}
                     </p>
                     {rb.description && <p className="text-xs text-slate-500 mt-0.5">{rb.description}</p>}
                     <code className="text-xs text-slate-400 mt-1 block truncate font-mono">{rb.command}</code>
@@ -145,6 +210,7 @@ function RunbookForm({ runbook, onCancel, onSaved }) {
   const [osType, setOsType] = useState(runbook?.os_type || 'any')
   const [command, setCommand] = useState(runbook?.command || '')
   const [timeoutSec, setTimeoutSec] = useState(runbook?.timeout_sec || 30)
+  const [requireApproval, setRequireApproval] = useState(!!runbook?.require_approval)
   const [saving, setSaving] = useState(false)
 
   const submit = async (e) => {
@@ -152,7 +218,7 @@ function RunbookForm({ runbook, onCancel, onSaved }) {
     if (!name.trim()) { toast.error('Name is required'); return }
     if (!command.trim()) { toast.error('Command is required'); return }
     setSaving(true)
-    const payload = { name: name.trim(), description: description.trim() || null, os_type: osType, command, timeout_sec: Number(timeoutSec) }
+    const payload = { name: name.trim(), description: description.trim() || null, os_type: osType, command, timeout_sec: Number(timeoutSec), require_approval: requireApproval }
     try {
       if (runbook) await api.put(`/runbooks/${runbook.id}`, payload)
       else await api.post('/runbooks', payload)
@@ -201,6 +267,17 @@ function RunbookForm({ runbook, onCancel, onSaved }) {
             <label className="label">Timeout (seconds, max 300)</label>
             <input type="number" min={1} max={300} className="input-field" value={timeoutSec} onChange={e => setTimeoutSec(e.target.value)} />
           </div>
+          <label className="flex items-start gap-2.5 rounded-xl border p-3 cursor-pointer" style={{ borderColor: 'var(--border-subtle)' }}>
+            <input type="checkbox" className="mt-0.5" checked={requireApproval} onChange={e => setRequireApproval(e.target.checked)} />
+            <span>
+              <span className="text-sm font-medium flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
+                <ShieldCheck size={13} className="text-amber-400" /> Require admin approval before running
+              </span>
+              <span className="text-xs text-slate-500 block mt-0.5">
+                When an alert rule would auto-fire this runbook, it's queued for an admin to approve or reject instead of running immediately. Approvals expire after 30 minutes.
+              </span>
+            </span>
+          </label>
           <div className="flex gap-2 mt-1">
             <button type="button" onClick={onCancel} className="btn-secondary flex-1 justify-center">Cancel</button>
             <button type="submit" disabled={saving} className="btn-primary flex-1 justify-center">

@@ -11,6 +11,17 @@ const { requireOrgContext } = require('../middleware/tenant');
 const router = express.Router();
 router.use(requireAuth, requireOrgContext);
 
+// ── Admin lookup for approval-pending notifications ─────────────────────────
+// Org-scoped when the rule belongs to an org, instance-wide admin fallback
+// otherwise — mirrors the org_id NULL-means-global convention used
+// elsewhere (e.g. webhooks, compliance drift patterns).
+async function getAdminUserIds(orgId) {
+  const rows = orgId
+    ? await query(`SELECT user_id FROM org_members WHERE org_id = ? AND org_role = 'admin'`, [orgId])
+    : await query(`SELECT id AS user_id FROM users WHERE role = 'admin'`);
+  return rows.map(r => r.user_id);
+}
+
 // ── Auto-actions: alert rules can list actions like ['notify','wake'] — until
 // now 'actions' was only ever stored/logged, never actually executed, so a
 // rule configured to "wake the device when it's offline" silently did
@@ -58,14 +69,45 @@ async function performAlertActions(rule, deviceId, deviceName, actions) {
     const device = await loadDevice(deviceId).catch(() => null);
     if (device) {
       for (const runbookId of runbookIds) {
+        const runbook = await queryOne('SELECT * FROM runbook_actions WHERE id = ?', [runbookId]);
+        if (!runbook) continue;
+
+        if (runbook.require_approval) {
+          // Queue instead of run. Expires in 30 min — an approval decided
+          // against a since-resolved incident is worse than no action at all.
+          const approvalId = uuidv4();
+          await execute(
+            `INSERT INTO runbook_pending_approvals
+               (id, org_id, runbook_id, device_id, rule_id, triggered_by, status, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, UNIX_TIMESTAMP())`,
+            [approvalId, rule.org_id || null, runbookId, deviceId, rule.id,
+             `alert rule: ${rule.name}`, Math.floor(Date.now() / 1000) + 1800]
+          );
+          results.push({ action: `runbook:${runbook.name}`, result: 'pending_approval', detail: 'Awaiting admin approval' });
+          await audit.log({
+            username: 'system (alert rule)', action: 'runbook_queued_for_approval', targetType: 'device',
+            targetId: deviceId, targetName: deviceName, result: 'pending',
+            details: `Runbook "${runbook.name}" requires approval before running (alert rule "${rule.name}")`,
+          }).catch(() => {});
+          // Reuse the existing alert notification channel (push + SSE) so an
+          // approval waiting on someone shows up exactly where alerts already do.
+          pushNotification(await getAdminUserIds(rule.org_id), {
+            type: 'runbook_approval_pending',
+            title: `Approval needed: ${runbook.name}`,
+            body: `${deviceName} — triggered by alert rule "${rule.name}"`,
+            approvalId,
+          });
+          continue;
+        }
+
         const outcome = await runRunbookById(runbookId, device, {
           triggeredBy: `alert rule: ${rule.name}`, ruleId: rule.id,
-        }).catch(e => ({ result: 'failure', output: e.message, runbookName: runbookId }));
-        results.push({ action: `runbook:${outcome.runbookName || runbookId}`, result: outcome.result, detail: outcome.output });
+        }).catch(e => ({ result: 'failure', output: e.message, runbookName: runbook.name }));
+        results.push({ action: `runbook:${outcome.runbookName || runbook.name}`, result: outcome.result, detail: outcome.output });
         await audit.log({
           username: 'system (alert rule)', action: 'run_runbook', targetType: 'device', targetId: deviceId,
           targetName: deviceName, result: outcome.result,
-          details: `Runbook "${outcome.runbookName || runbookId}" auto-triggered by alert rule "${rule.name}": ${outcome.output}`,
+          details: `Runbook "${outcome.runbookName || runbook.name}" auto-triggered by alert rule "${rule.name}": ${outcome.output}`,
         }).catch(() => {});
       }
     }
@@ -865,4 +907,87 @@ async function evaluateOffline(deviceId, deviceName) {
   return evaluateAlerts(deviceId, { _offline: true, hostname: deviceName });
 }
 
-module.exports = { router, evaluateAlerts, evaluateOffline, pushNotification };
+// ── Runbook approval queue ───────────────────────────────────────────────────
+// Companion to the require_approval branch in performAlertActions() above.
+// GET  /api/alerts/approvals?status=pending
+// POST /api/alerts/approvals/:id/approve
+// POST /api/alerts/approvals/:id/reject
+router.get('/approvals', requireAuth, async (req, res) => {
+  try {
+    const status = req.query.status || 'pending';
+    const rows = await query(
+      `SELECT rpa.*, ra.name AS runbook_name, ra.command, ra.os_type, d.hostname
+         FROM runbook_pending_approvals rpa
+         JOIN runbook_actions ra ON ra.id = rpa.runbook_id
+         JOIN devices d ON d.id = rpa.device_id
+        WHERE rpa.status = ? AND (rpa.org_id = ? OR rpa.org_id IS NULL)
+        ORDER BY rpa.created_at DESC
+        LIMIT 200`,
+      [status, req.orgId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/approvals/:id/approve', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const approval = await queryOne(
+      `SELECT * FROM runbook_pending_approvals WHERE id = ? AND status = 'pending'`, [req.params.id]);
+    if (!approval) return res.status(404).json({ error: 'Not found or already decided' });
+    if (approval.expires_at < Math.floor(Date.now() / 1000)) {
+      await execute(`UPDATE runbook_pending_approvals SET status='expired' WHERE id=?`, [approval.id]);
+      return res.status(410).json({ error: 'Approval window expired' });
+    }
+
+    const { loadDevice } = require('./actions');
+    const device = await loadDevice(approval.device_id);
+    if (!device) return res.status(404).json({ error: 'Device no longer exists' });
+
+    const outcome = await runRunbookById(approval.runbook_id, device, {
+      triggeredBy: `approved by ${req.user.username}`, ruleId: approval.rule_id,
+    });
+
+    await execute(
+      `UPDATE runbook_pending_approvals
+          SET status='approved', decided_by=?, decided_at=UNIX_TIMESTAMP(), run_result=?, run_output=?
+        WHERE id=?`,
+      [req.user.id, outcome.result, outcome.output, approval.id]
+    );
+    await audit.log({
+      userId: req.user.id, username: req.user.username, action: 'runbook_approval_approve',
+      targetType: 'device', targetId: approval.device_id, result: outcome.result,
+      ipSource: req.realIp || req.ip,
+      details: `Approved and ran "${outcome.runbookName}": ${outcome.output}`,
+    });
+    res.json({ ...outcome, approvalId: approval.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/approvals/:id/reject', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const result = await execute(
+      `UPDATE runbook_pending_approvals SET status='rejected', decided_by=?, decided_at=UNIX_TIMESTAMP()
+        WHERE id=? AND status='pending'`,
+      [req.user.id, req.params.id]
+    );
+    if (!result.affectedRows) return res.status(404).json({ error: 'Not found or already decided' });
+    await audit.log({
+      userId: req.user.id, username: req.user.username, action: 'runbook_approval_reject',
+      targetType: 'runbook_pending_approvals', targetId: req.params.id, result: 'success',
+      ipSource: req.realIp || req.ip,
+    });
+    res.json({ status: 'rejected' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Expire stale pending approvals — called from services/scheduler.js's
+// existing periodic tick (same pattern as auditRetention.js), not on a
+// dedicated timer of its own.
+async function expireStaleApprovals() {
+  await execute(
+    `UPDATE runbook_pending_approvals SET status='expired'
+      WHERE status='pending' AND expires_at < UNIX_TIMESTAMP()`
+  ).catch(e => console.error('[Alerts] expireStaleApprovals failed:', e.message));
+}
+
+module.exports = { router, evaluateAlerts, evaluateOffline, pushNotification, expireStaleApprovals };
