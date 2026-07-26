@@ -18,16 +18,34 @@ const mysql  = require('mysql2/promise');
 const crypto = require('crypto');
 
 // ── Connection ────────────────────────────────────────────────────────────────
-async function connect() {
-  return mysql.createConnection({
-    host:     process.env.DB_HOST     || 'localhost',
-    port:     parseInt(process.env.DB_PORT) || 3306,
-    user:     process.env.DB_USER     || 'netcontrol',
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME     || 'netcontrol',
-    multipleStatements: true,
-    timezone: '+00:00',
-  });
+// Retries with backoff: even though docker-compose.yaml gates this service on
+// mysql's healthcheck (condition: service_healthy), there's a small window
+// where the healthcheck can pass a beat before Docker's embedded DNS has
+// fully propagated the "mysql" hostname to this container's network
+// namespace — surfacing as `getaddrinfo EAI_AGAIN mysql` on the very first
+// connection attempt even though mysql is genuinely up. Retrying a few times
+// with backoff rides out that race instead of failing the whole migration
+// (and therefore backend/poller, which both wait on this container exiting
+// 0) over a transient DNS blip.
+async function connect(retries = 8, delayMs = 2000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await mysql.createConnection({
+        host:     process.env.DB_HOST     || 'localhost',
+        port:     parseInt(process.env.DB_PORT) || 3306,
+        user:     process.env.DB_USER     || 'netcontrol',
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME     || 'netcontrol',
+        multipleStatements: true,
+        timezone: '+00:00',
+      });
+    } catch (e) {
+      const transient = e.code === 'EAI_AGAIN' || e.code === 'ECONNREFUSED' || e.code === 'PROTOCOL_CONNECTION_LOST';
+      if (!transient || attempt === retries) throw e;
+      console.warn(`[Migrate] DB connection attempt ${attempt}/${retries} failed (${e.code}), retrying in ${delayMs / 1000}s...`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
 }
 
 // ── Migration list — ADD NEW ONES AT THE BOTTOM ONLY ─────────────────────────
@@ -989,4 +1007,4 @@ function exitWhenFlushed(code) {
   if (process.stderr.writableLength === 0) done(); else process.stderr.once('drain', done);
   // Safety net in case neither stream ever fires 'drain' (e.g. already flushed)
   setTimeout(() => process.exit(code), 2000).unref();
-}
+}1

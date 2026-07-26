@@ -5,6 +5,7 @@ import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import ScheduleModal from '../components/modals/ScheduleModal'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 const ACTION_META = {
   wake:     { icon: Zap,       color: 'text-accent-green',  bg: 'bg-accent-green/10 border-accent-green/20',  label: 'Wake' },
@@ -52,6 +53,9 @@ export default function SchedulesPage() {
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // ── Jump-to-schedule from global search (Cmd+K → Enter) ───────────────────
+  const highlightId = useHighlightParam(!loading && schedules.length > 0)
 
   const toggleEnabled = async (schedule) => {
     try {
@@ -136,9 +140,11 @@ export default function SchedulesPage() {
             const targetName = getTargetName(schedule)
 
             return (
-              <div key={schedule.id}
+              <div key={schedule.id} id={`hl-${schedule.id}`}
                 className={`glass rounded-xl border transition-all duration-200 p-4 ${
-                  schedule.enabled
+                  String(schedule.id) === highlightId
+                    ? 'border-accent-purple/60 ring-2 ring-accent-purple/30'
+                    : schedule.enabled
                     ? 'border-white/10 hover:border-white/15'
                     : 'border-white/5 opacity-60'
                 }`}

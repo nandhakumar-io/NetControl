@@ -6,7 +6,8 @@ import {
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
-  PackageCheck, CalendarClock, CalendarDays, BellRing,
+  PackageCheck, CalendarClock, CalendarDays, BellRing, ChevronDown,
+  HardDrive, Gauge, Workflow, ClipboardCheck, Settings2,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -17,6 +18,14 @@ import TwoFactorModal from '../modals/TwoFactorModal'
 import NotificationPrefsModal from '../modals/NotificationPrefsModal'
 import OrgSwitcher from './OrgSwitcher'
 import CommandPalette from './CommandPalette'
+
+const SECTION_ICONS = {
+  Devices:     HardDrive,
+  Monitoring:  Gauge,
+  Automation:  Workflow,
+  Compliance:  ClipboardCheck,
+  Admin:       Settings2,
+}
 
 // ── Notification bell — SSE listener only, no nav ─────────────────────────────
 // This component handles LIVE notifications (toasts + badge count).
@@ -377,6 +386,16 @@ export default function Layout() {
 
   useEffect(() => { applyTheme(theme) }, [])
 
+  // ── Collapsible nav sections ────────────────────────────────────────────
+  // Each labeled group (Devices, Monitoring, Automation, …) starts collapsed
+  // and expands on click — this is what actually shrinks the sidebar's
+  // resting height instead of always showing every item in every group.
+  // Whichever section contains the currently-active route is auto-expanded
+  // on load / on navigation, so you're never looking at a collapsed group
+  // hiding the page you're already on.
+  const [expandedSections, setExpandedSections] = useState({})
+  const toggleSection = (label) => setExpandedSections(s => ({ ...s, [label]: !s[label] }))
+
   const handleLogout = async () => {
     await logout()
     toast.success('Logged out')
@@ -440,6 +459,15 @@ export default function Layout() {
     { to: '/security',      icon: ShieldAlert,  label: 'Security',      show: isAdmin },
     { to: '/agent-release', icon: PackageCheck, label: 'Agent Release', show: isAdmin },
   ].filter(n => n.show)
+
+  // Auto-expand whichever section owns the current route. Runs on every
+  // navigation (not just mount) so clicking a link inside a collapsed
+  // section — or landing on a deep link/refresh — always reveals it.
+  useEffect(() => {
+    const owner = NAV_SECTIONS.find(s => s.label && s.items.some(i => location.pathname.startsWith(i.to)))
+    if (owner) setExpandedSections(s => ({ ...s, [owner.label]: true }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname])
 
   const NavItem = ({ to, icon: Icon, label }) => (
     <NavLink
@@ -529,40 +557,102 @@ export default function Layout() {
 
         {/* Main Nav */}
         <nav className="flex-1 py-4 px-2 flex flex-col gap-1.5 overflow-y-auto">
-          {NAV_SECTIONS.map((section, idx) => (
-            <div key={section.label ?? `section-${idx}`}>
-              {section.label && (
-                <>
-                  {!collapsed && (
-                    <div className="mt-3 mb-1 px-3">
-                      <p className={`text-[11px] font-body font-semibold uppercase tracking-widest ${isLight ? 'text-slate-400' : 'text-slate-600'}`}>
-                        {section.label}
-                      </p>
-                    </div>
-                  )}
-                  {collapsed && idx > 0 && <div className={`my-2 mx-3 h-px ${isLight ? 'bg-black/[0.06]' : 'bg-white/6'}`} />}
-                </>
-              )}
-              <div className="flex flex-col gap-1.5">
-                {section.items.map(item => <NavItem key={item.to} {...item} />)}
+          {NAV_SECTIONS.map((section, idx) => {
+            // The ungrouped top section (label: null, Dashboard/Organizations)
+            // is always fully visible — only labeled groups collapse.
+            if (!section.label) {
+              return (
+                <div key={`section-${idx}`} className="flex flex-col gap-1.5">
+                  {section.items.map(item => <NavItem key={item.to} {...item} />)}
+                </div>
+              )
+            }
+            const isOpen = collapsed || !!expandedSections[section.label]
+            // A section is "active" (highlighted header, even while collapsed)
+            // if the current route lives inside it — so you can always tell
+            // where you are without needing the group expanded.
+            const isActiveSection = section.items.some(i => location.pathname.startsWith(i.to))
+            const SectionIcon = SECTION_ICONS[section.label]
+            return (
+              <div key={section.label}>
+                {collapsed ? (
+                  <div className="flex flex-col items-center">
+                    {idx > 0 && <div className="mb-2 mx-3 h-px w-6" style={{ background: isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)' }} />}
+                    {SectionIcon && (
+                      <div title={section.label}
+                        className="w-6 h-6 mb-2 rounded-md flex items-center justify-center shrink-0"
+                        style={{ color: isActiveSection ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-secondary)' }}>
+                        <SectionIcon size={13} />
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => toggleSection(section.label)}
+                    className={`mt-3 mb-1 px-3 py-1.5 w-full flex items-center justify-between rounded-lg transition-colors duration-150
+                      ${isLight ? 'hover:bg-black/[0.03]' : 'hover:bg-white/[0.04]'}`}
+                  >
+                    <span className="flex items-center gap-1.5 text-[11px] font-body font-bold uppercase tracking-[0.12em]"
+                      style={{ color: isActiveSection ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-primary)' }}>
+                      {SectionIcon && <SectionIcon size={12} className="shrink-0" />}
+                      {section.label}
+                    </span>
+                    <ChevronDown
+                      size={13}
+                      className={`transition-transform duration-200 shrink-0
+                        ${isOpen ? 'rotate-0' : '-rotate-90'}
+                        ${isLight ? 'text-slate-400' : 'text-slate-600'}`}
+                    />
+                  </button>
+                )}
+                {isOpen && (
+                  <div className="flex flex-col gap-1.5 overflow-hidden">
+                    {section.items.map(item => <NavItem key={item.to} {...item} />)}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            )
+          })}
 
           {/* Admin section */}
-          {ADMIN_NAV.length > 0 && (
-            <>
-              {!collapsed && (
-                <div className="mt-3 mb-1 px-3">
-                  <p className={`text-[11px] font-body font-semibold uppercase tracking-widest ${isLight ? 'text-slate-400' : 'text-slate-600'}`}>
-                    Admin
-                  </p>
-                </div>
-              )}
-              {collapsed && <div className={`my-2 mx-3 h-px ${isLight ? 'bg-black/[0.06]' : 'bg-white/6'}`} />}
-              {ADMIN_NAV.map(item => <NavItem key={item.to} {...item} />)}
-            </>
-          )}
+          {ADMIN_NAV.length > 0 && (() => {
+            const isOpen = collapsed || !!expandedSections['Admin']
+            const isActiveSection = ADMIN_NAV.some(i => location.pathname.startsWith(i.to))
+            const AdminIcon = SECTION_ICONS.Admin
+            return (
+              <>
+                {collapsed ? (
+                  <div className="flex flex-col items-center">
+                    <div className="mb-2 mx-3 h-px w-6" style={{ background: isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)' }} />
+                    <div title="Admin"
+                      className="w-6 h-6 mb-2 rounded-md flex items-center justify-center shrink-0"
+                      style={{ color: isActiveSection ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-secondary)' }}>
+                      <AdminIcon size={13} />
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => toggleSection('Admin')}
+                    className={`mt-3 mb-1 px-3 py-1.5 w-full flex items-center justify-between rounded-lg transition-colors duration-150
+                      ${isLight ? 'hover:bg-black/[0.03]' : 'hover:bg-white/[0.04]'}`}
+                  >
+                    <span className="flex items-center gap-1.5 text-[11px] font-body font-bold uppercase tracking-[0.12em]"
+                      style={{ color: isActiveSection ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-primary)' }}>
+                      <AdminIcon size={12} className="shrink-0" />
+                      Admin
+                    </span>
+                    <ChevronDown
+                      size={13}
+                      className={`transition-transform duration-200 shrink-0
+                        ${isOpen ? 'rotate-0' : '-rotate-90'}
+                        ${isLight ? 'text-slate-400' : 'text-slate-600'}`}
+                    />
+                  </button>
+                )}
+                {isOpen && ADMIN_NAV.map(item => <NavItem key={item.to} {...item} />)}
+              </>
+            )
+          })()}
         </nav>
 
         {/* Bottom section */}
@@ -719,6 +809,15 @@ export default function Layout() {
           NetControl
         </span>
         <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={() => setShowPalette(true)}
+            title="Search"
+            className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0
+              ${isLight ? 'text-slate-500 hover:bg-black/[0.04]' : 'text-slate-400 hover:bg-white/[0.06]'}`}
+            aria-label="Search"
+          >
+            <Search size={18} />
+          </button>
           <NotificationBell collapsed={true} isLight={isLight} variant="topbar" />
         </div>
       </div>

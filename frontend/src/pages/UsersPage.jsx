@@ -12,6 +12,7 @@ import UserActivityModal from '../components/modals/UserActivityModal'
 import { usePermissions } from '../hooks/usePermissions'
 import { useAuthStore } from '../store/authStore'
 import { useThemeStore } from '../store/themeStore'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 const ROLE_COLOR = { admin:'#a78bfa', operator:'#38bdf8', viewer:'#94a3b8', custom:'#fb923c' }
 const ROLE_BG    = { admin:'rgba(167,139,250,0.12)', operator:'rgba(56,189,248,0.12)', viewer:'rgba(148,163,184,0.12)', custom:'rgba(251,146,60,0.12)' }
@@ -121,13 +122,18 @@ function GroupAccessPanel({ user, allGroups, onClose, onSaved }) {
 }
 
 // ── User row ──────────────────────────────────────────────────────────────────
-function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onActivity, onAssignGroups }) {
+function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onActivity, onAssignGroups, highlighted }) {
   const isSelf = user.id === currentUserId
   return (
-    <div className="grid items-center gap-3 px-5 py-4 transition-colors group"
-      style={{ gridTemplateColumns: '240px 120px 100px 160px 140px 96px', borderBottom: '1px solid var(--border-subtle)' }}
+    <div id={`hl-${user.id}`} className="grid items-center gap-3 px-5 py-4 transition-colors group"
+      style={{
+        gridTemplateColumns: '240px 120px 100px 160px 140px 96px',
+        borderBottom: '1px solid var(--border-subtle)',
+        background: highlighted ? 'rgba(167,139,250,0.10)' : 'transparent',
+        boxShadow: highlighted ? 'inset 0 0 0 1px rgba(167,139,250,0.35)' : 'none',
+      }}
       onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+      onMouseLeave={e => e.currentTarget.style.background = highlighted ? 'rgba(167,139,250,0.10)' : 'transparent'}>
 
       {/* User info */}
       <div className="flex items-center gap-3 min-w-0">
@@ -241,6 +247,14 @@ export default function UsersPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // ── Jump-to-user from global search (Cmd+K → Enter) ───────────────────────
+  const highlightId = useHighlightParam(!loading && users.length > 0)
+  useEffect(() => {
+    if (!highlightId) return
+    setSearch(''); setRoleFilter('all')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightId])
 
   const handleToggle = async (user) => {
     try {
@@ -363,7 +377,8 @@ export default function UsersPage() {
           <UserRow key={u.id} user={u} currentUserId={currentUser?.id} groups={groups}
             onEdit={setEditTarget} onDelete={setDeleteTarget}
             onToggle={handleToggle} onActivity={setActivityTarget}
-            onAssignGroups={setGroupAccessTarget} />
+            onAssignGroups={setGroupAccessTarget}
+            highlighted={String(u.id) === highlightId} />
         ))}
       </div>
 

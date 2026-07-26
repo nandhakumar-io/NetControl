@@ -31,6 +31,14 @@ export default function CommandPalette({ open, onClose }) {
   const debounceRef = useRef(null)
   const navigate  = useNavigate()
 
+  // Race-safety: every request is tagged with an incrementing id, and only
+  // the response matching the LATEST request is applied. Without this, a
+  // slow response to an earlier keystroke can land after a faster response
+  // to a later one and clobber it with stale results — which is also what
+  // made Enter feel unreliable ("search a device, hit Enter, nothing
+  // happens" or it jumps to the wrong page).
+  const requestIdRef = useRef(0)
+
   useEffect(() => {
     if (open) {
       setQ(''); setResults([]); setActive(0)
@@ -38,15 +46,37 @@ export default function CommandPalette({ open, onClose }) {
     }
   }, [open])
 
+  // Sorts device results so an exact (case-insensitive) name match always
+  // lands first — e.g. typing the full hostname and hitting Enter should
+  // jump straight to that device, not whatever else starts with the same
+  // characters.
+  const rankResults = (flat, query) => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return flat
+    return [...flat].sort((a, b) => {
+      const aExact = (a.label || '').toLowerCase() === needle
+      const bExact = (b.label || '').toLowerCase() === needle
+      if (aExact !== bExact) return aExact ? -1 : 1
+      const aStarts = (a.label || '').toLowerCase().startsWith(needle)
+      const bStarts = (b.label || '').toLowerCase().startsWith(needle)
+      if (aStarts !== bStarts) return aStarts ? -1 : 1
+      return 0
+    })
+  }
+
+  // Returns the flattened, ranked result list directly (in addition to
+  // updating state) so callers like handleKeyDown's Enter-fast-path can
+  // navigate off the fresh data immediately instead of waiting a render
+  // cycle for `results` to update.
   const runSearch = useCallback((value) => {
-    if (!value.trim()) { setResults([]); setLoading(false); return }
+    const needle = value.trim()
+    if (!needle) { setResults([]); setLoading(false); return Promise.resolve([]) }
+    const requestId = ++requestIdRef.current
     setLoading(true)
-    api.get('/search', { params: { q: value } })
+    return api.get('/search', { params: { q: needle } })
       .then(r => {
+        if (requestId !== requestIdRef.current) return [] // superseded by a newer request
         const cats = r.data?.categories || {}
-        // Fixed category order so results don't jump around as different
-        // categories resolve at different times — devices first since
-        // that's what people jump to most in a device-management tool.
         const order = ['device', 'group', 'runbook', 'schedule', 'user']
         const flat = []
         for (const type of order) {
@@ -56,11 +86,13 @@ export default function CommandPalette({ open, onClose }) {
             : type === 'schedule' ? 'schedules' : 'users'
           for (const item of cats[key] || []) flat.push(item)
         }
-        setResults(flat)
+        const ranked = rankResults(flat, needle)
+        setResults(ranked)
         setActive(0)
+        return ranked
       })
-      .catch(() => setResults([]))
-      .finally(() => setLoading(false))
+      .catch(() => { if (requestId === requestIdRef.current) setResults([]); return [] })
+      .finally(() => { if (requestId === requestIdRef.current) setLoading(false) })
   }, [])
 
   useEffect(() => {
@@ -79,7 +111,19 @@ export default function CommandPalette({ open, onClose }) {
     if (e.key === 'Escape') { onClose(); return }
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, results.length - 1)); return }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setActive(a => Math.max(a - 1, 0)); return }
-    if (e.key === 'Enter')     { e.preventDefault(); go(results[active]); return }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      // Fast path: results already match what's currently typed (the
+      // debounce already resolved) — navigate immediately, no extra
+      // round-trip.
+      if (!loading && results.length) { go(results[active]); return }
+      // Enter pressed before the debounced search finished (or nothing
+      // has fired yet) — skip the debounce and search right now, then
+      // jump straight to the best match once it resolves, instead of
+      // silently doing nothing.
+      clearTimeout(debounceRef.current)
+      runSearch(q).then(ranked => { if (ranked.length) go(ranked[0]) })
+    }
   }
 
   if (!open) return null

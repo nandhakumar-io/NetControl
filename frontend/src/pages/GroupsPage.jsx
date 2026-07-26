@@ -13,6 +13,7 @@ import LabLayoutEditor from '../components/lab/LabLayoutEditor'
 import LabConsole from '../components/lab/LabConsole'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 // ── Group form modal ──────────────────────────────────────────────────────────
 function GroupFormModal({ open, onClose, onSaved, group }) {
@@ -118,7 +119,7 @@ function DeviceChip({ device }) {
 }
 
 // ── Group card ────────────────────────────────────────────────────────────────
-function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labActive, isLight }) {
+function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labActive, isLight, highlighted }) {
   const [expanded, setExpanded] = useState(false)
   const online  = devices.filter(d => d.status === 'online').length
   const offline = devices.length - online
@@ -137,13 +138,13 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
   const trendDelta = prevCount != null ? devices.length - prevCount : null
 
   return (
-    <div className="rounded-2xl overflow-hidden transition-all duration-200"
+    <div id={`hl-${group.id}`} className="rounded-2xl overflow-hidden transition-all duration-200"
       onDoubleClick={() => onOpenLab(group)}
       title="Double-click to open Lab Console"
       style={{
         background: 'var(--bg-surface-2)',
-        border: `1px solid ${labActive ? 'rgba(168,85,247,0.4)' : online > 0 ? 'rgba(34,197,94,0.15)' : 'var(--border-subtle)'}`,
-        boxShadow: 'var(--shadow-card)',
+        border: `1px solid ${highlighted ? (isLight ? '#6c5ce7' : '#a78bfa') : labActive ? 'rgba(168,85,247,0.4)' : online > 0 ? 'rgba(34,197,94,0.15)' : 'var(--border-subtle)'}`,
+        boxShadow: highlighted ? (isLight ? '0 0 0 3px rgba(108,92,231,0.25), var(--shadow-card)' : '0 0 0 3px rgba(167,139,250,0.25), var(--shadow-card)') : 'var(--shadow-card)',
         cursor: 'pointer',
       }}>
 
@@ -321,6 +322,14 @@ export default function GroupsPage() {
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // ── Jump-to-group from global search (Cmd+K → Enter) ──────────────────────
+  const highlightId = useHighlightParam(!loading && groups.length > 0)
+  useEffect(() => {
+    if (!highlightId) return
+    setSearch('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightId])
 
   // Auto-refresh device/group status in the background — same 5s cadence
   // as DevicesPage — so a Lab Console left open shows seats flip
@@ -518,6 +527,7 @@ export default function GroupsPage() {
               onOpenLab={handleOpenLab}
               labActive={activeLabId === group.id}
               isLight={isLight}
+              highlighted={group.id === highlightId || String(group.id) === highlightId}
             />
           ))}
         </div>

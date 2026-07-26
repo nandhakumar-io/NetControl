@@ -15,6 +15,7 @@ import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import { usePermissions } from '../hooks/usePermissions'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 const OS_LABEL = { any: 'Any OS', linux: 'Linux', windows: 'Windows' }
 const fmtDateTime = (sec) => sec ? new Date(sec * 1000).toLocaleString() : '—'
@@ -59,6 +60,9 @@ export default function RunbooksPage() {
     }, 20000)
     return () => clearInterval(t)
   }, [])
+
+  // ── Jump-to-runbook from global search (Cmd+K → Enter) ────────────────────
+  const highlightId = useHighlightParam(!loading && runbooks.length > 0)
 
   const decide = async (id, action) => {
     setDecidingId(id)
@@ -140,7 +144,12 @@ export default function RunbooksPage() {
         ) : (
           <div className="flex flex-col gap-2">
             {runbooks.map(rb => (
-              <div key={rb.id} className="rounded-xl border border-white/10 p-3">
+              <div key={rb.id} id={`hl-${rb.id}`} className="rounded-xl border p-3 transition-all"
+                style={String(rb.id) === highlightId ? {
+                  borderColor: 'rgba(167,139,250,0.5)',
+                  boxShadow: '0 0 0 3px rgba(167,139,250,0.2)',
+                  background: 'rgba(167,139,250,0.06)',
+                } : { borderColor: 'rgba(255,255,255,0.1)' }}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>

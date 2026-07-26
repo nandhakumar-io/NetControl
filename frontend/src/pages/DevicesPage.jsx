@@ -17,6 +17,7 @@ import BulkEditModal from '../components/modals/BulkEditModal'
 import SavedViews from '../components/SavedViews'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const STATUS = {
@@ -242,7 +243,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
   }
 
   return (
-    <div onClick={() => onSelect(device.id)}
+    <div id={`hl-${device.id}`} onClick={() => onSelect(device.id)}
       className="relative rounded-2xl p-4 cursor-pointer transition-all duration-200 group"
       style={{
         background: selected
@@ -422,7 +423,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
 }
 
 // ── List row ──────────────────────────────────────────────────────────────────
-function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading }) {
+function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -433,15 +434,18 @@ function DeviceListRow({ device, group, selected, onSelect, onWake, onShutdown, 
   }
 
   return (
-    <div className="grid items-center gap-3 px-4 py-3.5 cursor-pointer transition-all group"
+    <div id={`hl-${device.id}`}
+      className="grid items-center gap-3 px-4 py-3.5 cursor-pointer transition-all group"
       style={{
         gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
         borderBottom: '1px solid var(--border-subtle)',
-        background: selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(167,139,250,0.05)') : 'transparent',
-        borderLeft: `2px solid ${selected ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent'}`,
+        background: highlighted ? (isLight ? 'rgba(108,92,231,0.08)' : 'rgba(167,139,250,0.10)')
+          : selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(167,139,250,0.05)') : 'transparent',
+        borderLeft: `2px solid ${highlighted ? (isLight ? '#6c5ce7' : '#a78bfa') : selected ? (isLight ? '#6c5ce7' : '#a78bfa') : 'transparent'}`,
+        boxShadow: highlighted ? (isLight ? 'inset 0 0 0 1px rgba(108,92,231,0.35)' : 'inset 0 0 0 1px rgba(167,139,250,0.35)') : 'none',
       }}
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-hover)' }}
-      onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent' }}
+      onMouseLeave={e => { if (!selected) e.currentTarget.style.background = highlighted ? (isLight ? 'rgba(108,92,231,0.08)' : 'rgba(167,139,250,0.10)') : 'transparent' }}
       onClick={() => onSelect(device.id, !selected)}>
 
       {/* Checkbox */}
@@ -872,6 +876,19 @@ export default function DevicesPage() {
   const unknownCount = manageableDevices.filter(d => !d.status || d.status === 'unknown').length
   const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all' || tagFilter.size > 0
 
+  // ── Jump-to-device from global search (Cmd+K → Enter) ─────────────────────
+  // Arriving here via /devices?highlight=<id> should reliably show that
+  // device even if a filter left over from a previous visit would otherwise
+  // hide it — so any active filter is cleared once, on arrival with a
+  // highlight param, before the scroll-into-view below runs.
+  const highlightId = useHighlightParam(!loading && filtered.length > 0)
+  useEffect(() => {
+    if (!highlightId) return
+    setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set())
+    setViewMode('list') // a single highlighted row reads more clearly in the list view than buried in a grid
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightId])
+
   const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()) }
   const currentFilters = { search, osFilter, statusFilter, groupFilter, tagFilter: [...tagFilter] }
   const applyView = (f) => {
@@ -1181,6 +1198,7 @@ export default function DevicesPage() {
               <DeviceListRow key={d.id} device={d}
                 group={groups.find(g => g.id === d.group_id)}
                 selected={selectedIds.has(d.id)}
+                highlighted={d.id === highlightId}
                 onSelect={handleSelect}
                 onWake={dev => handleAction('wake', dev)}
                 onShutdown={dev => handleAction('shutdown', dev)}
