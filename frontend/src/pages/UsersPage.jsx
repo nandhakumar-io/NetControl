@@ -154,8 +154,21 @@ function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onAc
               <span title="2FA enabled" className="text-[9px] px-1.5 py-0.5 rounded font-body font-bold"
                 style={{ background: 'rgba(52,211,153,0.12)', color: '#34d399' }}>2FA</span>
             ) : user.totp_required ? (
-              <span title="2FA required — user hasn't enrolled yet" className="text-[9px] px-1.5 py-0.5 rounded font-body font-bold"
-                style={{ background: 'rgba(251,191,36,0.12)', color: '#fbbf24' }}>2FA pending</span>
+              <span
+                title={
+                  user.totp_grace_days_left === 0
+                    ? "2FA required — grace period elapsed, will be forced to enroll at next login"
+                    : `2FA required — user hasn't enrolled yet, ${user.totp_grace_days_left ?? '?'} day(s) left in grace period`
+                }
+                className="text-[9px] px-1.5 py-0.5 rounded font-body font-bold"
+                style={{
+                  background: user.totp_grace_days_left === 0 ? 'rgba(248,113,113,0.12)' : 'rgba(251,191,36,0.12)',
+                  color: user.totp_grace_days_left === 0 ? '#f87171' : '#fbbf24',
+                }}>
+                {user.totp_grace_days_left === 0
+                  ? '2FA pending — grace elapsed'
+                  : `2FA pending — ${user.totp_grace_days_left ?? '?'}d left`}
+              </span>
             ) : null}
           </div>
           <p className="text-[10px] font-body truncate" style={{ color: 'var(--text-muted)' }}>

@@ -15,6 +15,9 @@ const webhook = require('../services/webhook');
 const { isIPAllowed, logBlockedAttempt } = require('../services/ipAllowlist');
 const bf      = require('../services/bruteForce');
 const twoFactor = require('../services/twoFactor');
+const { describeUserAgent } = require('../services/uaParse');
+const { describeLocation } = require('../services/geoLocate');
+const notificationPrefs = require('../services/notificationPrefs');
 require('dotenv').config();
 
 const router = express.Router();
@@ -72,6 +75,51 @@ async function twoFactorGraceRemaining(user) {
   const remaining = Math.max(0, Math.ceil(graceDays - elapsedDays));
   return remaining;
 }
+
+// ── "New sign-in" self-notification ──────────────────────────────────────────
+// Piggybacks on the webhook.fire('auth.login', ...) event that already fires
+// on every successful login (see the 4 call sites below) — pushes the same
+// "you just signed in" info through the in-app bell + web push pipeline so a
+// user notices a compromise (someone else's session) as it happens, not just
+// admins watching webhooks. Fails silently: a notification hiccup must never
+// break login itself. Respects the user's own notification prefs (default:
+// in-app on, push only at warning+ — so this is a quiet bell ping unless the
+// user has explicitly turned push down to 'info').
+async function notifyNewSession(user, ip, userAgent) {
+  try {
+    const location = describeLocation(ip); // "City, Country" or null (private/unresolvable IP)
+    const message = `New sign-in from ${describeUserAgent(userAgent)}${location ? `, ${location}` : ` — ${ip}`}`;
+    const now = Math.floor(Date.now() / 1000);
+
+    const inAppRecipients = await notificationPrefs.filterRecipients([user.id], 'in_app', 'info');
+    if (inAppRecipients.length) {
+      await execute(
+        `INSERT INTO alert_notifications (id, user_id, rule_id, device_id, severity, message, triggered_at, read_at)
+         VALUES (?, ?, NULL, NULL, 'info', ?, ?, NULL)`,
+        [uuidv4(), user.id, message, now]
+      );
+      // Lazy require to avoid routes/auth.js <-> routes/alerts.js becoming a
+      // hard load-order dependency — this is the same SSE push helper
+      // notifyAdmins() in routes/alerts.js uses for live-open tabs.
+      const { pushNotification } = require('./alerts');
+      pushNotification([user.id], { type: 'session', severity: 'info', message, triggered_at: now });
+    }
+
+    const pushRecipients = await notificationPrefs.filterRecipients([user.id], 'push', 'info');
+    if (pushRecipients.length) {
+      const webPush = require('../services/webPush');
+      await webPush.sendToUsers(pushRecipients, {
+        title: '🔐 New sign-in',
+        body: message,
+        tag: `nc-session-${user.id}`,
+        data: { type: 'session', url: '/settings/sessions' },
+      }).catch(() => {});
+    }
+  } catch (e) {
+    console.error('[Auth] notifyNewSession failed (non-fatal):', e.message);
+  }
+}
+
 async function createRefreshToken(userId, res, req) {
   const raw  = crypto.randomBytes(64).toString('hex');
   const hash = crypto.createHash('sha256').update(raw).digest('hex');
@@ -294,6 +342,7 @@ router.post('/login', authLimiter, async (req, res) => {
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: graceDaysLeft !== null ? `2FA enrollment grace: ${graceDaysLeft}d left` : null });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip}` }).catch(() => {});
+    notifyNewSession(user, ip, req.headers['user-agent']).catch(() => {});
 
     res.json({
       accessToken,
@@ -367,6 +416,7 @@ router.post('/2fa/verify', authLimiter, async (req, res) => {
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: usedBackupCode ? 'via 2FA backup code' : 'via 2FA TOTP' });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip}${usedBackupCode ? ' (backup code used)' : ''}` }).catch(() => {});
+    notifyNewSession(user, ip, req.headers['user-agent']).catch(() => {});
 
     res.json({
       accessToken,
@@ -500,6 +550,7 @@ router.post('/2fa/enroll/confirm', authLimiter, async (req, res) => {
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: 'via mandated 2FA enrollment' });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip} (completed mandated 2FA enrollment)` }).catch(() => {});
+    notifyNewSession(user, ip, req.headers['user-agent']).catch(() => {});
 
     res.json({
       accessToken,
@@ -639,6 +690,7 @@ router.get('/google/callback', authLimiter, async (req, res) => {
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'google_login', ipSource: ip, result: 'success', details: `via Google (${email})` });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in via Google from ${ip}` }).catch(() => {});
+    notifyNewSession(user, ip, req.headers['user-agent']).catch(() => {});
 
     const graceParam = googleGraceDaysLeft !== null ? `&twoFactorGraceDaysLeft=${googleGraceDaysLeft}` : '';
     res.redirect(`${frontendUrl}/auth/callback#token=${encodeURIComponent(accessToken)}&user=${encodeURIComponent(JSON.stringify(publicUser(user)))}${graceParam}`);

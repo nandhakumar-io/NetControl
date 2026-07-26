@@ -47,7 +47,25 @@ router.post('/ip-allowlist',
       }
       const id = await ipSvc.createRule({ userId: user_id || null, role: role || null, cidr, label, enabled, createdBy: req.user.id });
       await audit.log({ userId: req.user.id, username: req.user.username, action: 'create_ip_rule', targetType: 'ip_allowlist', targetId: id, targetName: cidr, ipSource: req.realIp, result: 'success' });
-      res.status(201).json({ id });
+
+      // A new enabled rule can tighten access — re-check any already-active
+      // sessions in scope and kill the ones that no longer pass, instead of
+      // leaving them alive until they naturally refresh (see
+      // services/ipAllowlist.js's revokeSessionsOutsideAllowlist for why).
+      let sessionsRevoked = 0;
+      if (enabled) {
+        const result = await ipSvc.revokeSessionsOutsideAllowlist({ userId: user_id || null, role: role || null });
+        sessionsRevoked = result.revoked;
+        if (sessionsRevoked) {
+          await audit.log({
+            userId: req.user.id, username: req.user.username, action: 'sessions_revoked_ip_allowlist',
+            targetType: 'ip_allowlist', targetId: id, targetName: cidr, ipSource: req.realIp, result: 'success',
+            details: `${sessionsRevoked} session(s) revoked — no longer within the allowlist`,
+          });
+        }
+      }
+
+      res.status(201).json({ id, sessionsRevoked });
     } catch (e) { res.status(500).json({ error: e.message }); }
   }
 );
@@ -57,7 +75,27 @@ router.put('/ip-allowlist/:id', param('id').isUUID(), async (req, res) => {
   if (validate(req, res)) return;
   try {
     await ipSvc.updateRule(req.params.id, req.body);
-    res.json({ ok: true });
+
+    // Re-fetch the row post-update (patch may be partial) so scope/enabled
+    // reflect the final state, then re-check sessions the same way the
+    // create route does — editing a rule to be stricter (narrower CIDR,
+    // newly enabled, etc.) should also close the gap immediately.
+    let sessionsRevoked = 0;
+    const { queryOne: qOne } = require('../db');
+    const row = await qOne('SELECT * FROM ip_allowlist WHERE id = ?', [req.params.id]);
+    if (row && row.enabled) {
+      const result = await ipSvc.revokeSessionsOutsideAllowlist({ userId: row.user_id || null, role: row.role || null });
+      sessionsRevoked = result.revoked;
+      if (sessionsRevoked) {
+        await audit.log({
+          userId: req.user.id, username: req.user.username, action: 'sessions_revoked_ip_allowlist',
+          targetType: 'ip_allowlist', targetId: req.params.id, targetName: row.cidr, ipSource: req.realIp, result: 'success',
+          details: `${sessionsRevoked} session(s) revoked — no longer within the allowlist`,
+        });
+      }
+    }
+
+    res.json({ ok: true, sessionsRevoked });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

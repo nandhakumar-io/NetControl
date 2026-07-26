@@ -172,6 +172,67 @@ async function deleteRule(id) {
   invalidateCache();
 }
 
+/**
+ * When an admin adds/enables an allowlist rule, existing sessions from
+ * now-disallowed IPs previously stayed alive until they naturally
+ * refreshed — the allowlist only gated the *login* request, never anything
+ * already signed in. This re-checks every currently-active session against
+ * the (now-tightened) rules and revokes the ones that no longer pass, so
+ * tightening the allowlist takes effect immediately instead of on next
+ * refresh.
+ *
+ * Scoped the same way a rule is scoped (mirrors isIPAllowed's precedence):
+ *   - userId set  -> only that user's sessions are re-checked
+ *   - role set    -> only sessions belonging to users with that role
+ *   - neither     -> every active session (a new global rule)
+ * This keeps the check cheap — a user-scoped rule doesn't force a
+ * full-table scan.
+ *
+ * Also denylists the live access token for each revoked session (see
+ * middleware/auth.js's revokeUserTokens) — otherwise, exactly like a
+ * force-revoke, the still-valid JWT would keep working until it expires
+ * even though the session list says it's gone.
+ */
+async function revokeSessionsOutsideAllowlist({ userId = null, role = null } = {}) {
+  invalidateCache(); // make sure isIPAllowed sees the rule that was just written
+
+  let sql = `SELECT rt.id, rt.user_id, rt.ip_address, u.role AS user_role
+               FROM refresh_tokens rt
+               JOIN users u ON u.id = rt.user_id
+              WHERE rt.revoked = 0 AND rt.expires_at > UNIX_TIMESTAMP()`;
+  const params = [];
+  if (userId)      { sql += ' AND rt.user_id = ?'; params.push(userId); }
+  else if (role)    { sql += ' AND u.role = ?';    params.push(role); }
+
+  let sessions;
+  try {
+    sessions = await query(sql, params);
+  } catch {
+    return { revoked: 0, checked: 0 };
+  }
+
+  const revokedUserIds = new Set();
+  let revoked = 0;
+  for (const s of sessions) {
+    const check = await isIPAllowed(s.ip_address, s.user_id, s.user_role);
+    if (!check.allowed) {
+      await execute('UPDATE refresh_tokens SET revoked = 1 WHERE id = ?', [s.id]).catch(() => {});
+      revokedUserIds.add(s.user_id);
+      revoked++;
+    }
+  }
+
+  if (revokedUserIds.size) {
+    // Best-effort — kills the live JWT too, not just the refresh token.
+    try {
+      const { revokeUserTokens } = require('../middleware/auth');
+      await Promise.all([...revokedUserIds].map(uid => revokeUserTokens(uid)));
+    } catch { /* non-fatal — sessions are still revoked, just not the live JWT */ }
+  }
+
+  return { revoked, checked: sessions.length };
+}
+
 async function logBlockedAttempt({ username, ip, reason }) {
   const now = Math.floor(Date.now() / 1000);
   await execute(
@@ -190,5 +251,5 @@ module.exports = {
   deleteRule,
   logBlockedAttempt,
   invalidateCache,
+  revokeSessionsOutsideAllowlist,
 };
-

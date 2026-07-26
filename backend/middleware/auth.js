@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { queryOne, execute } = require('../db');
 const bus = require('../services/bus');
+const { redisReady, withRedisTimeout } = require('../services/redisSafe');
 require('dotenv').config();
 
 // ── Personal/automation API keys ─────────────────────────────────────────────
@@ -14,6 +15,76 @@ require('dotenv').config();
 // device's agent registration, and vice versa. See routes/apiKeys.js.
 const API_KEY_PREFIX = 'nck_';
 function hashApiKey(key) { return crypto.createHash('sha256').update(key).digest('hex'); }
+
+// ── Force-revoke denylist ─────────────────────────────────────────────────────
+// A forced admin revoke (POST /api/sessions/user/:id/revoke-all) only marks
+// refresh_tokens as revoked, which blocks the next /api/auth/refresh — the
+// access token itself is a stateless JWT and stays valid until it naturally
+// expires (up to JWT_EXPIRY, 8h by default). That's a long window for a
+// token an admin just tried to kill because of a suspected compromise.
+//
+// This adds a cheap denylist: `revokeUserTokens(userId)` stamps "anything
+// issued before right now is dead" for that user, and requireAuth rejects
+// any JWT whose `iat` is at or before that stamp — so a force-revoke takes
+// effect on the very next request, not at natural token expiry.
+//
+// Same dual-mode pattern as the action-PIN limiter below this file: real
+// Redis (via bus.js's shared client, so the stamp is visible to every
+// worker/process) when configured, in-memory Map fallback for single-
+// process/dev. The TTL is bounded by JWT_EXPIRY, since nothing older than
+// that could still be a live token anyway — no need to remember it forever.
+function jwtExpirySeconds() {
+  const raw = process.env.JWT_EXPIRY || '8h';
+  const m = /^(\d+)\s*([smhd])?$/i.exec(String(raw).trim());
+  if (!m) return 8 * 3600;
+  const n = parseInt(m[1], 10);
+  switch ((m[2] || 's').toLowerCase()) {
+    case 'd': return n * 86400;
+    case 'h': return n * 3600;
+    case 'm': return n * 60;
+    default:  return n;
+  }
+}
+const TOKEN_DENYLIST_TTL_SEC = jwtExpirySeconds();
+const denylistLocal = new Map(); // userId -> revokedAtEpochSec
+
+/**
+ * Denylist every access token currently held by `userId`, effective
+ * immediately. Called from POST /api/sessions/user/:id/revoke-all — the
+ * refresh-token revoke there already stops re-issuance; this stops the
+ * live JWT too.
+ */
+async function revokeUserTokens(userId) {
+  const now = Math.floor(Date.now() / 1000);
+  const redis = bus.getClient();
+  if (redisReady(redis, bus)) {
+    try {
+      await withRedisTimeout(redis.set(`revoke:${userId}`, String(now), 'EX', TOKEN_DENYLIST_TTL_SEC));
+      return;
+    } catch (e) {
+      console.error('[Auth] revokeUserTokens: Redis write failed, falling back to in-memory:', e.message);
+    }
+  }
+  denylistLocal.set(userId, now);
+}
+
+/** True if a token for `userId` issued at `issuedAt` (JWT `iat`, seconds) has been force-revoked. */
+async function isTokenRevoked(userId, issuedAt) {
+  if (!issuedAt) return false;
+  const redis = bus.getClient();
+  if (redisReady(redis, bus)) {
+    try {
+      const val = await withRedisTimeout(redis.get(`revoke:${userId}`));
+      if (val === null || val === undefined) return false;
+      return issuedAt <= parseInt(val, 10);
+    } catch (e) {
+      console.error('[Auth] isTokenRevoked: Redis read failed, falling back to in-memory:', e.message);
+    }
+  }
+  const revokedAt = denylistLocal.get(userId);
+  if (revokedAt === undefined) return false;
+  return issuedAt <= revokedAt;
+}
 
 // Fire-and-forget last-used stamp — must never slow down or fail the request
 // that's using the key.
@@ -78,6 +149,9 @@ async function requireAuth(req, res, next) {
       if (!liveUser || !liveUser.enabled) {
         return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
       }
+      if (await isTokenRevoked(payload.id, payload.iat)) {
+        return res.status(401).json({ error: 'Session was revoked. Please sign in again.', code: 'TOKEN_REVOKED' });
+      }
       req.user = {
         ...payload, role: liveUser.role, permissions: liveUser.permissions || 0,
         activeOrgId: liveUser.active_org_id || null,
@@ -96,6 +170,9 @@ async function requireAuth(req, res, next) {
       );
       if (!liveUser || !liveUser.enabled) {
         return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
+      }
+      if (await isTokenRevoked(payload.id, payload.iat)) {
+        return res.status(401).json({ error: 'Session was revoked. Please sign in again.', code: 'TOKEN_REVOKED' });
       }
 
       // Attach fresh data (role/permissions may have changed since the token was issued)
@@ -332,5 +409,5 @@ async function requireActionPin(req, res, next) {
 
 module.exports = {
   requireAuth, requireRole, requirePermission, requireActionPin, ROLE_PERMISSIONS,
-  API_KEY_PREFIX, hashApiKey,
+  API_KEY_PREFIX, hashApiKey, revokeUserTokens, isTokenRevoked,
 };

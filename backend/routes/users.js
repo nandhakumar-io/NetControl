@@ -20,7 +20,20 @@ function sanitizeUser(u) {
 // Columns safe to return to the client. google_linked is derived so we never
 // leak the raw Google subject id, just whether an account is linked.
 const USER_FIELDS = `id, username, email, display_name, role, permissions, enabled,
-  has_password, totp_enabled, totp_required, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
+  has_password, totp_enabled, totp_required, totp_required_at, (google_id IS NOT NULL) AS google_linked, created_at, last_login`;
+
+// Shared with GET /me/2fa/status's inline calc below — returns null when
+// there's nothing to show (2FA not mandated, or already enrolled), else the
+// number of full days left in the grace window (0 = elapsed, next login
+// forces enrollment). Grace length is org-configurable (see
+// db/migrate-2fa-grace.js), same default as routes/auth.js's
+// twoFactorGraceRemaining().
+async function graceDaysLeftFor(user, graceDaysSetting) {
+  if (!user.totp_required || user.totp_enabled) return null;
+  if (user.totp_required_at === null || user.totp_required_at === undefined) return 0;
+  const elapsedDays = (Math.floor(Date.now() / 1000) - user.totp_required_at) / 86400;
+  return Math.max(0, Math.ceil(graceDaysSetting - elapsedDays));
+}
 
 // ── POST /api/users/me/change-password — any authenticated user ──────────────
 // Used to satisfy must_change_password after the random one-time admin
@@ -231,7 +244,13 @@ router.get('/', requireRole('admin'), async (req, res) => {
     const users = await query(
       `SELECT ${USER_FIELDS} FROM users ORDER BY created_at ASC`
     );
-    res.json(users);
+    const setting = await queryOne(`SELECT value FROM system_settings WHERE \`key\` = 'totp_grace_period_days'`);
+    const graceDays = setting?.value ? parseInt(setting.value, 10) : 7;
+    const shaped = await Promise.all(users.map(async u => ({
+      ...u,
+      totp_grace_days_left: await graceDaysLeftFor(u, graceDays),
+    })));
+    res.json(shaped);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

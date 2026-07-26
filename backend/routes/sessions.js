@@ -18,7 +18,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { param, validationResult } = require('express-validator');
 const { query, queryOne, execute } = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, revokeUserTokens } = require('../middleware/auth');
 const audit = require('../services/audit');
 
 const router = express.Router();
@@ -136,6 +136,12 @@ router.post('/user/:userId/revoke-all', requireRole('admin'), [param('userId').i
       'UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0',
       [req.params.userId]
     );
+
+    // Refresh-token revoke above only blocks the NEXT refresh — any access
+    // token already issued to this user stays valid until it naturally
+    // expires (up to JWT_EXPIRY). Denylisting kills those live tokens too,
+    // so a force-revoke takes effect on this user's very next request.
+    await revokeUserTokens(target.id);
 
     await audit.log({
       userId: req.user.id, username: req.user.username, action: 'sessions_force_revoked_admin',
