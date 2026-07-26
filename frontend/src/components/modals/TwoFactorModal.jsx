@@ -64,6 +64,19 @@ export default function TwoFactorModal({ open, onClose }) {
     } finally { setLoading(false) }
   }
 
+  const regenerateBackupCodes = async (e) => {
+    e.preventDefault()
+    setLoading(true)
+    try {
+      const { data } = await api.post('/users/me/2fa/backup-codes/regenerate', { code: code.trim() })
+      setBackupCodes(data.backupCodes)
+      setStep('backup-codes')
+      toast.success('Backup codes regenerated — old codes no longer work')
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Invalid code')
+    } finally { setLoading(false) }
+  }
+
   const copySecret = () => {
     navigator.clipboard.writeText(setupData.secret)
     setCopied(true)
@@ -95,6 +108,9 @@ export default function TwoFactorModal({ open, onClose }) {
                   <p className="text-sm font-body" style={{ color: 'var(--text-secondary)' }}>
                     Two-factor authentication is <span className="text-accent-green">enabled</span> on your account.
                   </p>
+                  <button className="btn-secondary w-full justify-center" onClick={() => { setCode(''); setStep('regenerate') }}>
+                    <Copy size={14} /> Regenerate backup codes
+                  </button>
                   {status.required ? (
                     <p className="text-xs font-body" style={{ color: 'var(--text-muted)' }}>
                       Your administrator requires 2FA on this account, so it can't be disabled here. Contact them if you need it turned off.
@@ -107,6 +123,19 @@ export default function TwoFactorModal({ open, onClose }) {
                 </>
               ) : (
                 <>
+                  {status.required && (
+                    <div className="rounded-lg p-3 flex items-start gap-2"
+                      style={{
+                        background: status.graceDaysLeft > 0 ? 'rgba(251,191,36,0.08)' : 'rgba(248,113,113,0.08)',
+                        border: `1px solid ${status.graceDaysLeft > 0 ? 'rgba(251,191,36,0.25)' : 'rgba(248,113,113,0.25)'}`,
+                      }}>
+                      <p className="text-xs font-body" style={{ color: 'var(--text-secondary)' }}>
+                        {status.graceDaysLeft > 0
+                          ? <>Your administrator requires 2FA on this account. You have <strong>{status.graceDaysLeft} day{status.graceDaysLeft === 1 ? '' : 's'}</strong> left to set it up before it's enforced at login.</>
+                          : <>Your administrator requires 2FA on this account — the grace period has ended. You'll need to complete setup at your next login.</>}
+                      </p>
+                    </div>
+                  )}
                   <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
                     Add an authenticator app (Google Authenticator, Authy, 1Password, etc.) as a second sign-in factor.
                   </p>
@@ -146,6 +175,31 @@ export default function TwoFactorModal({ open, onClose }) {
               </div>
               <button type="submit" className="btn-primary w-full justify-center" disabled={loading}>
                 Confirm &amp; Enable
+              </button>
+            </form>
+          )}
+
+          {step === 'regenerate' && (
+            <form onSubmit={regenerateBackupCodes} className="flex flex-col gap-4">
+              <p className="text-sm font-body" style={{ color: 'var(--text-muted)' }}>
+                Enter a current authenticator code to generate a fresh set of backup codes. Your existing backup codes will stop working immediately.
+              </p>
+              <div>
+                <label className="label">Authentication code</label>
+                <input
+                  className="input-field text-center tracking-[0.3em] font-mono"
+                  value={code}
+                  onChange={e => setCode(e.target.value)}
+                  maxLength={6}
+                  inputMode="numeric"
+                  autoFocus
+                />
+              </div>
+              <button type="submit" className="btn-primary w-full justify-center" disabled={loading}>
+                Regenerate codes
+              </button>
+              <button type="button" className="btn-ghost w-full justify-center" onClick={() => setStep('status')}>
+                Cancel
               </button>
             </form>
           )}

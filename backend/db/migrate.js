@@ -988,6 +988,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  agent-canary:', e.message);
     }
+    try {
+      const { migrateSessions } = require('./migrate-sessions');
+      await migrateSessions();
+      console.log('  ✓ refresh_tokens.ip_address/user_agent/last_used_at (session management UI)');
+    } catch (e) {
+      console.warn('  ⚠  sessions:', e.message);
+    }
+    try {
+      const { migrateTwoFactorGrace } = require('./migrate-2fa-grace');
+      await migrateTwoFactorGrace();
+      console.log('  ✓ users.totp_required_at (2FA enforcement grace period)');
+    } catch (e) {
+      console.warn('  ⚠  two-factor-grace:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

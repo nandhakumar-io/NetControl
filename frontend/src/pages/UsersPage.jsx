@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Users, Plus, Shield, ShieldOff, Trash2, Pencil,
   Activity, Search, RefreshCw, CheckCircle2, XCircle,
-  Clock, Layers, X, Check, AlertTriangle, Lock, Link2
+  Clock, Layers, X, Check, AlertTriangle, Lock, Link2, LogOut
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -122,7 +122,7 @@ function GroupAccessPanel({ user, allGroups, onClose, onSaved }) {
 }
 
 // ── User row ──────────────────────────────────────────────────────────────────
-function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onActivity, onAssignGroups, highlighted }) {
+function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onActivity, onAssignGroups, onRevokeSessions, highlighted }) {
   const isSelf = user.id === currentUserId
   return (
     <div id={`hl-${user.id}`} className="grid items-center gap-3 px-5 py-4 transition-colors group"
@@ -203,6 +203,12 @@ function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onAc
           <Pencil size={13} />
         </button>
         {!isSelf && <>
+          <button onClick={() => onRevokeSessions(user)} title="Force sign-out everywhere (revoke all sessions)"
+            className="p-1.5 rounded-lg transition-all" style={{ color: 'var(--text-muted)' }}
+            onMouseEnter={e => { e.currentTarget.style.color = '#fbbf24'; e.currentTarget.style.background = 'rgba(251,191,36,0.1)' }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent' }}>
+            <LogOut size={13} />
+          </button>
           <button onClick={() => onToggle(user)} title={user.enabled ? 'Disable' : 'Enable'}
             className="p-1.5 rounded-lg transition-all" style={{ color: 'var(--text-muted)' }}
             onMouseEnter={e => { e.currentTarget.style.color = user.enabled ? '#f87171' : '#34d399'; e.currentTarget.style.background = user.enabled ? 'rgba(248,113,113,0.1)' : 'rgba(52,211,153,0.1)' }}
@@ -232,6 +238,7 @@ export default function UsersPage() {
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [activityTarget, setActivityTarget] = useState(null)
   const [groupAccessTarget, setGroupAccessTarget] = useState(null)
+  const [revokeTarget, setRevokeTarget] = useState(null)
 
   const { isAdmin } = usePermissions()
   const currentUser = useAuthStore(s => s.user)
@@ -271,6 +278,15 @@ export default function UsersPage() {
       toast.success(`${deleteTarget.username} deleted`)
       setDeleteTarget(null); load()
     } catch (e) { toast.error(e.response?.data?.error || 'Delete failed') }
+  }
+
+  const handleRevokeSessions = async () => {
+    if (!revokeTarget) return
+    try {
+      const { data } = await api.post(`/sessions/user/${revokeTarget.id}/revoke-all`)
+      toast.success(`Signed ${revokeTarget.username} out of ${data.revoked} session${data.revoked === 1 ? '' : 's'}`)
+      setRevokeTarget(null)
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed to revoke sessions') }
   }
 
   const filtered = users.filter(u => {
@@ -377,7 +393,7 @@ export default function UsersPage() {
           <UserRow key={u.id} user={u} currentUserId={currentUser?.id} groups={groups}
             onEdit={setEditTarget} onDelete={setDeleteTarget}
             onToggle={handleToggle} onActivity={setActivityTarget}
-            onAssignGroups={setGroupAccessTarget}
+            onAssignGroups={setGroupAccessTarget} onRevokeSessions={setRevokeTarget}
             highlighted={String(u.id) === highlightId} />
         ))}
       </div>
@@ -402,6 +418,31 @@ export default function UsersPage() {
             <div className="flex gap-3">
               <button onClick={() => setDeleteTarget(null)} className="btn-ghost flex-1 justify-center">Cancel</button>
               <button onClick={handleDelete} className="btn-danger flex-1 justify-center">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Force-revoke sessions confirm */}
+      {revokeTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setRevokeTarget(null)}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className="relative z-10 w-full max-w-sm rounded-2xl p-6 animate-slide-up"
+            style={{ background: 'var(--bg-card)', border: '1px solid rgba(251,191,36,0.3)' }}
+            onClick={e => e.stopPropagation()}>
+            <div className="w-10 h-10 rounded-full flex items-center justify-center mb-4"
+              style={{ background: 'rgba(251,191,36,0.12)' }}>
+              <LogOut size={18} style={{ color: '#fbbf24' }} />
+            </div>
+            <h3 className="font-display text-base mb-1" style={{ color: 'var(--text-primary)' }}>
+              Sign {revokeTarget.username} out everywhere?
+            </h3>
+            <p className="text-sm font-body mb-5" style={{ color: 'var(--text-muted)' }}>
+              This revokes every active session for this account across all browsers and devices. They'll need to log in again next time their session refreshes. Use this if you suspect the account is compromised.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setRevokeTarget(null)} className="btn-ghost flex-1 justify-center">Cancel</button>
+              <button onClick={handleRevokeSessions} className="btn-danger flex-1 justify-center">Sign out everywhere</button>
             </div>
           </div>
         </div>

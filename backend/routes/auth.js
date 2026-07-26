@@ -54,13 +54,37 @@ function verifyEnrollToken(token) {
 function publicUser(user) {
   return { id: user.id, username: user.username, role: user.role, permissions: user.permissions || 0 };
 }
-async function createRefreshToken(userId, res) {
+
+// ── 2FA enrollment grace period ──────────────────────────────────────────────
+// Returns null if this account isn't under a grace window at all (2FA not
+// required, or totp_required_at was never set — pre-migration accounts, or
+// enrollment already forced with no grace). Otherwise returns the number of
+// FULL days left before enrollment is force-blocked at next login (0 once
+// elapsed). Grace length is org-configurable via system_settings
+// ('totp_grace_period_days'), defaulting to 7 — see migrate-2fa-grace.js.
+const DEFAULT_GRACE_DAYS = 7;
+async function twoFactorGraceRemaining(user) {
+  if (user.totp_required_at === null || user.totp_required_at === undefined) return 0; // no grace recorded — treat as elapsed
+  const setting = await queryOne(`SELECT value FROM system_settings WHERE \`key\` = 'totp_grace_period_days'`);
+  const graceDays = setting?.value ? parseInt(setting.value, 10) : DEFAULT_GRACE_DAYS;
+  const now = Math.floor(Date.now() / 1000);
+  const elapsedDays = (now - user.totp_required_at) / 86400;
+  const remaining = Math.max(0, Math.ceil(graceDays - elapsedDays));
+  return remaining;
+}
+async function createRefreshToken(userId, res, req) {
   const raw  = crypto.randomBytes(64).toString('hex');
   const hash = crypto.createHash('sha256').update(raw).digest('hex');
   const exp  = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+  const now  = Math.floor(Date.now() / 1000);
+  // ip/user_agent are for the Session Management UI (routes/sessions.js) —
+  // best-effort only, so a missing req (or headers) never blocks issuing
+  // the token itself.
+  const ip = req ? (req.realIp || req.ip || null) : null;
+  const ua = req ? (req.headers?.['user-agent'] || null)?.slice(0, 255) : null;
   await execute(
-    'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)',
-    [uuidv4(), userId, hash, exp]
+    'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, ip_address, user_agent, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [uuidv4(), userId, hash, exp, ip, ua, now]
   );
   // BUG FIX ("login session expired" after Google sign-in):
   // Local logins POST to /api/auth/login through the frontend's own nginx
@@ -166,7 +190,7 @@ router.post('/setup',
       // login prompt right after they just typed this password in.
       const user = { id, username, role: 'admin', permissions: 0xFFFF };
       const accessToken = signAccess(user);
-      await createRefreshToken(id, res);
+      await createRefreshToken(id, res, req);
 
       res.status(201).json({ accessToken, user: publicUser(user) });
     } catch (e) {
@@ -250,24 +274,32 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     // Admin has mandated 2FA for this account (Users page → "Require 2FA")
-    // but the user hasn't enrolled yet. Don't complete the login — hand
-    // back a scope-limited enroll token so the frontend can walk them
+    // but the user hasn't enrolled yet. If the grace period (see
+    // twoFactorGraceRemaining()) has elapsed, don't complete the login —
+    // hand back a scope-limited enroll token so the frontend can walk them
     // through setup, then finish the login itself once a code is confirmed.
+    // Within the grace window, log in normally but surface how many days
+    // are left so the frontend can nag (banner + TwoFactorModal).
+    let graceDaysLeft = null;
     if (user.totp_required) {
-      await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa_enrollment', ipSource: ip, result: 'success' });
-      return res.json({ requiresEnrollment: true, enrollToken: signEnrollToken(user.id) });
+      graceDaysLeft = await twoFactorGraceRemaining(user);
+      if (graceDaysLeft === 0) {
+        await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa_enrollment', ipSource: ip, result: 'success' });
+        return res.json({ requiresEnrollment: true, enrollToken: signEnrollToken(user.id) });
+      }
     }
 
     const accessToken = signAccess(user);
-    await createRefreshToken(user.id, res);
+    await createRefreshToken(user.id, res, req);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
-    await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success' });
+    await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: graceDaysLeft !== null ? `2FA enrollment grace: ${graceDaysLeft}d left` : null });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip}` }).catch(() => {});
 
     res.json({
       accessToken,
       user: publicUser(user),
       mustChangePassword: !!user.must_change_password,
+      twoFactorGraceDaysLeft: graceDaysLeft, // null = 2FA not required; number = days left to enroll
     });
   } catch (e) {
     console.error(e);
@@ -331,7 +363,7 @@ router.post('/2fa/verify', authLimiter, async (req, res) => {
 
     bf.recordSuccess(ip);
     const accessToken = signAccess(user);
-    await createRefreshToken(user.id, res);
+    await createRefreshToken(user.id, res, req);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: usedBackupCode ? 'via 2FA backup code' : 'via 2FA TOTP' });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip}${usedBackupCode ? ' (backup code used)' : ''}` }).catch(() => {});
@@ -464,7 +496,7 @@ router.post('/2fa/enroll/confirm', authLimiter, async (req, res) => {
 
     bf.recordSuccess(ip);
     const accessToken = signAccess(user);
-    await createRefreshToken(user.id, res);
+    await createRefreshToken(user.id, res, req);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'login', ipSource: ip, result: 'success', details: 'via mandated 2FA enrollment' });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in from ${ip} (completed mandated 2FA enrollment)` }).catch(() => {});
@@ -593,18 +625,23 @@ router.get('/google/callback', authLimiter, async (req, res) => {
       return res.redirect(`${frontendUrl}/auth/callback#requires2FA=1&mfaToken=${encodeURIComponent(signMfaToken(user.id))}`);
     }
 
+    let googleGraceDaysLeft = null;
     if (user.totp_required) {
-      await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa_enrollment', ipSource: ip, result: 'success', details: 'via Google' });
-      return res.redirect(`${frontendUrl}/auth/callback#requiresEnrollment=1&enrollToken=${encodeURIComponent(signEnrollToken(user.id))}`);
+      googleGraceDaysLeft = await twoFactorGraceRemaining(user);
+      if (googleGraceDaysLeft === 0) {
+        await audit.log({ userId: user.id, username: user.username, action: 'login_password_ok_awaiting_2fa_enrollment', ipSource: ip, result: 'success', details: 'via Google' });
+        return res.redirect(`${frontendUrl}/auth/callback#requiresEnrollment=1&enrollToken=${encodeURIComponent(signEnrollToken(user.id))}`);
+      }
     }
 
     const accessToken = signAccess(user);
-    await createRefreshToken(user.id, res);
+    await createRefreshToken(user.id, res, req);
     await execute('UPDATE users SET last_login = ? WHERE id = ?', [Math.floor(Date.now() / 1000), user.id]);
     await audit.log({ userId: user.id, username: user.username, action: 'google_login', ipSource: ip, result: 'success', details: `via Google (${email})` });
     webhook.fire('auth.login', { username: user.username, ip, role: user.role, message: `${user.username} logged in via Google from ${ip}` }).catch(() => {});
 
-    res.redirect(`${frontendUrl}/auth/callback#token=${encodeURIComponent(accessToken)}&user=${encodeURIComponent(JSON.stringify(publicUser(user)))}`);
+    const graceParam = googleGraceDaysLeft !== null ? `&twoFactorGraceDaysLeft=${googleGraceDaysLeft}` : '';
+    res.redirect(`${frontendUrl}/auth/callback#token=${encodeURIComponent(accessToken)}&user=${encodeURIComponent(JSON.stringify(publicUser(user)))}${graceParam}`);
   } catch (e) {
     console.error('[Google OAuth]', e.message);
     return fail('An unexpected error occurred.');
@@ -630,6 +667,7 @@ router.post('/refresh', async (req, res) => {
       res.clearCookie('refreshToken', { path: '/api/auth', ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}) });
       return res.status(403).json({ error: 'Account is disabled.', code: 'ACCOUNT_DISABLED' });
     }
+    execute('UPDATE refresh_tokens SET last_used_at = ? WHERE id = ?', [Math.floor(Date.now() / 1000), record.id]).catch(() => {});
     res.json({ accessToken: jwt.sign(
       { id: record.user_id, username: record.username, role: record.role, permissions: liveUser.permissions || 0 },
       process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRY || '8h' }

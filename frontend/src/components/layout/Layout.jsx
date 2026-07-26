@@ -15,6 +15,7 @@ import { usePermissions } from '../../hooks/usePermissions'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import TwoFactorModal from '../modals/TwoFactorModal'
+import SessionsModal from '../modals/SessionsModal'
 import NotificationPrefsModal from '../modals/NotificationPrefsModal'
 import OrgSwitcher from './OrgSwitcher'
 import CommandPalette from './CommandPalette'
@@ -353,6 +354,7 @@ export default function Layout() {
   // had no home. This was the only reason 2FA was invisible even though
   // the whole backend flow already worked end to end.
   const [show2FA, setShow2FA] = useState(false)
+  const [showSessions, setShowSessions] = useState(false)
   // Per-user in-app/push notification preferences (severity thresholds +
   // temporary mute) — same "backend existed, needed a home" situation as
   // TwoFactorModal above. See routes/notificationPrefs.js.
@@ -747,6 +749,18 @@ export default function Layout() {
             {!collapsed && <span className="text-sm font-body font-medium">Security</span>}
           </button>
 
+          {/* Active sessions — see/revoke your own logged-in devices */}
+          <button
+            onClick={() => setShowSessions(true)}
+            title="Active sessions"
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
+                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
+          >
+            <Monitor size={16} className="shrink-0" />
+            {!collapsed && <span className="text-sm font-body font-medium">Sessions</span>}
+          </button>
+
           {/* Logout */}
           <button
             onClick={handleLogout}
@@ -759,6 +773,7 @@ export default function Layout() {
         </div>
 
         <TwoFactorModal open={show2FA} onClose={() => setShow2FA(false)} />
+        <SessionsModal open={showSessions} onClose={() => setShowSessions(false)} />
         <NotificationPrefsModal open={showNotifPrefs} onClose={() => setShowNotifPrefs(false)} />
 
         {/* Collapse toggle — anchored to a fixed offset near the logo

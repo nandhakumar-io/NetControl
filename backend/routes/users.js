@@ -59,10 +59,28 @@ router.post('/me/change-password',
 const twoFactor = require('../services/twoFactor');
 
 // GET /api/users/me/2fa/status — is 2FA on for the current account?
+// graceDaysLeft mirrors the same calc login uses (routes/auth.js's
+// twoFactorGraceRemaining) so the in-app banner/modal stays consistent
+// with what happens at next login: null when 2FA isn't mandated or the
+// user has already enrolled, a number of days otherwise (0 = elapsed).
 router.get('/me/2fa/status', async (req, res) => {
   try {
-    const user = await queryOne('SELECT totp_enabled, totp_required, totp_confirmed_at FROM users WHERE id = ?', [req.user.id]);
-    res.json({ enabled: !!user?.totp_enabled, required: !!user?.totp_required, confirmedAt: user?.totp_confirmed_at || null });
+    const user = await queryOne('SELECT totp_enabled, totp_required, totp_required_at, totp_confirmed_at FROM users WHERE id = ?', [req.user.id]);
+    let graceDaysLeft = null;
+    if (user?.totp_required && !user?.totp_enabled) {
+      if (user.totp_required_at === null || user.totp_required_at === undefined) {
+        graceDaysLeft = 0;
+      } else {
+        const setting = await queryOne(`SELECT value FROM system_settings WHERE \`key\` = 'totp_grace_period_days'`);
+        const graceDays = setting?.value ? parseInt(setting.value, 10) : 7;
+        const elapsedDays = (Math.floor(Date.now() / 1000) - user.totp_required_at) / 86400;
+        graceDaysLeft = Math.max(0, Math.ceil(graceDays - elapsedDays));
+      }
+    }
+    res.json({
+      enabled: !!user?.totp_enabled, required: !!user?.totp_required,
+      confirmedAt: user?.totp_confirmed_at || null, graceDaysLeft,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -287,9 +305,9 @@ router.post('/',
       const id = uuidv4();
 
       await execute(
-        `INSERT INTO users (id, username, password, has_password, email, display_name, role, permissions, enabled, totp_required)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-        [id, lower, hash, hasPassword, email, displayName || null, role, permissions || 0, totpRequired]
+        `INSERT INTO users (id, username, password, has_password, email, display_name, role, permissions, enabled, totp_required, totp_required_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        [id, lower, hash, hasPassword, email, displayName || null, role, permissions || 0, totpRequired, totpRequired ? Math.floor(Date.now() / 1000) : null]
       );
 
       // Add the new user to an organization immediately — without this,
@@ -381,6 +399,14 @@ router.put('/:id',
       const displayName = req.body.displayName !== undefined ? (req.body.displayName || null) : existing.display_name;
       const email       = req.body.email       !== undefined ? (req.body.email ? req.body.email.toLowerCase().trim() : null) : existing.email;
       const totpRequired = req.body.totpRequired !== undefined ? (req.body.totpRequired ? 1 : 0) : existing.totp_required;
+      // Fresh grace period only on an actual 0→1 transition — flipping it
+      // off and back on later (or an unrelated edit that leaves it at 1)
+      // must not reset the clock for someone already mid-grace-period.
+      // Turning it off clears the timestamp so a later re-enable always
+      // starts clean rather than replaying a stale one.
+      const totpRequiredAt = totpRequired === 1
+        ? (existing.totp_required === 1 ? existing.totp_required_at : Math.floor(Date.now() / 1000))
+        : null;
 
       // Check username uniqueness if changing
       if (username !== existing.username) {
@@ -410,14 +436,14 @@ router.put('/:id',
         const hash = await bcrypt.hash(req.body.password, 12);
         await execute(
           `UPDATE users SET username=?, role=?, permissions=?, enabled=?, password=?, has_password=?,
-             email=?, display_name=?, google_id=?, totp_required=? WHERE id=?`,
-          [username, role, permissions, enabled, hash, hasPassword, email, displayName, googleId, totpRequired, req.params.id]
+             email=?, display_name=?, google_id=?, totp_required=?, totp_required_at=? WHERE id=?`,
+          [username, role, permissions, enabled, hash, hasPassword, email, displayName, googleId, totpRequired, totpRequiredAt, req.params.id]
         );
       } else {
         await execute(
           `UPDATE users SET username=?, role=?, permissions=?, enabled=?, has_password=?,
-             email=?, display_name=?, google_id=?, totp_required=? WHERE id=?`,
-          [username, role, permissions, enabled, hasPassword, email, displayName, googleId, totpRequired, req.params.id]
+             email=?, display_name=?, google_id=?, totp_required=?, totp_required_at=? WHERE id=?`,
+          [username, role, permissions, enabled, hasPassword, email, displayName, googleId, totpRequired, totpRequiredAt, req.params.id]
         );
       }
 
