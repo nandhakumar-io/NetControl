@@ -17,7 +17,7 @@ import {
   TerminalSquare, Search, Loader2, Play, RotateCcw, CheckCircle2, XCircle,
   Circle, ChevronDown, ChevronRight, Square, CheckSquare, ShieldAlert,
   X, Server, Wifi, WifiOff, HelpCircle, Copy, Check, Clock, Star, Trash2,
-  Download, AlertTriangle,
+  Download, AlertTriangle, Bookmark, Save, Pencil,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -114,6 +114,13 @@ export default function BulkCommandPage() {
   const [timeoutSec, setTimeoutSec] = useState(30)
   const [history, setHistory] = useState([])
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [templates, setTemplates] = useState([])
+  const [templatesOpen, setTemplatesOpen] = useState(false)
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
+  const [templateName, setTemplateName] = useState('')
+  const [templateDescription, setTemplateDescription] = useState('')
+  const [savingTemplate, setSavingTemplate] = useState(false)
+  const [templateSaveError, setTemplateSaveError] = useState('')
   const [pinOpen, setPinOpen] = useState(false)
   const [pin, setPin] = useState('')
   const [pinError, setPinError] = useState('')
@@ -149,7 +156,16 @@ export default function BulkCommandPage() {
     }
   }, [])
 
-  useEffect(() => { loadDevices(); loadHistory() }, [loadDevices, loadHistory])
+  const loadTemplates = useCallback(async () => {
+    try {
+      const { data } = await api.get('/bulk-command/templates')
+      setTemplates(data)
+    } catch {
+      // Non-critical, same reasoning as loadHistory.
+    }
+  }, [])
+
+  useEffect(() => { loadDevices(); loadHistory(); loadTemplates() }, [loadDevices, loadHistory, loadTemplates])
   useEffect(() => () => esRef.current?.close(), [])
 
   // ── Persist the active/last run across navigation ───────────────────────
@@ -242,6 +258,74 @@ export default function BulkCommandPage() {
     } catch {
       setHistory(prev)
       toast.error('Failed to remove')
+    }
+  }
+
+  // ── Templates: load command + saved device selection in one click ───────
+  // Unlike "Recent" (command text only), a template restores the full
+  // target list too — that's the whole point: no re-picking devices for a
+  // routine op. Devices removed since the template was saved are silently
+  // dropped by the backend; we surface that here so it's not a silent
+  // surprise when the run kicks off with fewer devices than expected.
+  const useTemplate = async (t) => {
+    try {
+      const { data } = await api.post(`/bulk-command/templates/${t.id}/use`)
+      setCommand(data.command)
+      setTimeoutSec(data.timeoutSec || 30)
+      setSelected(new Set(data.deviceIds))
+      setTemplatesOpen(false)
+      if (data.missingCount > 0) {
+        toast(`${data.missingCount} device${data.missingCount === 1 ? '' : 's'} from "${t.name}" no longer exist and were skipped`, { icon: '⚠️' })
+      } else {
+        toast.success(`Loaded "${t.name}" — ${data.deviceIds.length} device${data.deviceIds.length === 1 ? '' : 's'}`)
+      }
+      loadTemplates() // pick up bumped use_count/last_used_at ordering
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to load template')
+    }
+  }
+
+  const deleteTemplate = async (t, e) => {
+    e.stopPropagation()
+    if (!window.confirm(`Delete template "${t.name}"?`)) return
+    const prev = templates
+    setTemplates(prev.filter(x => x.id !== t.id)) // optimistic
+    try {
+      await api.delete(`/bulk-command/templates/${t.id}`)
+    } catch {
+      setTemplates(prev)
+      toast.error('Failed to delete template')
+    }
+  }
+
+  const openSaveTemplate = () => {
+    if (!command.trim()) { toast.error('Type a command first'); return }
+    if (selected.size === 0) { toast.error('Select at least one device first'); return }
+    setTemplateName('')
+    setTemplateDescription('')
+    setTemplateSaveError('')
+    setSaveTemplateOpen(true)
+  }
+
+  const saveTemplate = async () => {
+    if (!templateName.trim()) { setTemplateSaveError('Name is required'); return }
+    setSavingTemplate(true)
+    setTemplateSaveError('')
+    try {
+      await api.post('/bulk-command/templates', {
+        name: templateName.trim(),
+        description: templateDescription.trim() || null,
+        command,
+        deviceIds: [...selected],
+        timeoutSec,
+      })
+      toast.success(`Template "${templateName.trim()}" saved`)
+      setSaveTemplateOpen(false)
+      loadTemplates()
+    } catch (err) {
+      setTemplateSaveError(err.response?.data?.error || 'Failed to save template')
+    } finally {
+      setSavingTemplate(false)
     }
   }
 
@@ -483,6 +567,49 @@ export default function BulkCommandPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.1fr] gap-5">
         {/* ── Left: device picker + command ── */}
         <div className="space-y-4">
+          {templates.length > 0 && (
+            <div className="card p-0 overflow-hidden">
+              <button
+                onClick={() => setTemplatesOpen(o => !o)}
+                className="w-full flex items-center justify-between px-4 py-3"
+              >
+                <span className="flex items-center gap-2 text-sm font-display" style={{ color: 'var(--text-primary)' }}>
+                  <Bookmark size={14} style={{ color: '#a78bfa' }} /> Templates
+                  <span className="text-[11px] font-body px-1.5 py-0.5 rounded-full" style={{ background: 'var(--bg-surface-3)', color: 'var(--text-faint)' }}>
+                    {templates.length}
+                  </span>
+                </span>
+                {templatesOpen ? <ChevronDown size={14} style={{ color: 'var(--text-faint)' }} /> : <ChevronRight size={14} style={{ color: 'var(--text-faint)' }} />}
+              </button>
+              {templatesOpen && (
+                <div className="border-t max-h-56 overflow-y-auto" style={{ borderColor: 'var(--border-subtle)' }}>
+                  {templates.map(t => (
+                    <div key={t.id}
+                      onClick={() => useTemplate(t)}
+                      className="flex items-start gap-2.5 px-4 py-2.5 cursor-pointer hover:bg-white/[0.03] border-b last:border-b-0"
+                      style={{ borderColor: 'var(--border-subtle)' }}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-body truncate" style={{ color: 'var(--text-primary)' }}>{t.name}</p>
+                        {t.description && (
+                          <p className="text-[11px] font-body truncate" style={{ color: 'var(--text-muted)' }}>{t.description}</p>
+                        )}
+                        <p className="text-[11px] font-mono truncate mt-0.5" style={{ color: 'var(--text-faint)' }}>{t.command}</p>
+                        <p className="text-[10px] font-body mt-0.5" style={{ color: 'var(--text-faint)' }}>
+                          {t.device_ids.length} device{t.device_ids.length === 1 ? '' : 's'}
+                          {t.use_count > 0 ? ` · used ${t.use_count}×` : ''}
+                        </p>
+                      </div>
+                      <button onClick={(e) => deleteTemplate(t, e)} className="shrink-0 hover:text-accent-red mt-0.5" style={{ color: 'var(--text-faint)' }} title="Delete template">
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="card p-0 overflow-hidden">
             <div className="p-4 pb-3 flex items-center gap-2">
               <div className="relative flex-1">
@@ -615,14 +742,24 @@ export default function BulkCommandPage() {
               Linux devices run this over SSH, Windows devices over WinRM — up to 8 at a time. Raise the timeout above for
               large or piped commands (upgrades, multi-stage backups, etc.) that legitimately take longer than the 30s default.
             </p>
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || runStatus === 'running'}
-              className="btn-primary w-full justify-center mt-4 flex items-center gap-2 disabled:opacity-40"
-            >
-              {runStatus === 'running' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-              {runStatus === 'running' ? 'Running…' : `Run on ${selected.size} device${selected.size === 1 ? '' : 's'}`}
-            </button>
+            <div className="flex items-center gap-2 mt-4">
+              <button
+                onClick={handleSubmit}
+                disabled={submitting || runStatus === 'running'}
+                className="btn-primary flex-1 justify-center flex items-center gap-2 disabled:opacity-40"
+              >
+                {runStatus === 'running' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                {runStatus === 'running' ? 'Running…' : `Run on ${selected.size} device${selected.size === 1 ? '' : 's'}`}
+              </button>
+              <button
+                onClick={openSaveTemplate}
+                disabled={submitting || runStatus === 'running'}
+                title="Save this command + device selection as a reusable template"
+                className="btn-ghost px-3 flex items-center gap-1.5 disabled:opacity-40"
+              >
+                <Save size={14} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -744,6 +881,67 @@ export default function BulkCommandPage() {
                   <button onClick={confirmPin} disabled={submitting || !pin.trim()} className="btn-primary flex-1 justify-center flex items-center gap-2 disabled:opacity-40">
                     {submitting && <Loader2 size={14} className="animate-spin" />}
                     {submitting ? 'Starting…' : 'Confirm & Run'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {saveTemplateOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => !savingTemplate && setSaveTemplateOpen(false)}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className="relative z-10 w-full max-w-md animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--bg-card)', borderColor: 'rgba(167,139,250,0.25)', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+              <div className="h-0.5 opacity-70 bg-[#a78bfa]" />
+              <div className="flex items-start justify-between p-6 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-[#a78bfa]/15 border border-[#a78bfa]/25">
+                    <Bookmark size={18} className="text-[#a78bfa]" />
+                  </div>
+                  <div>
+                    <h3 className="font-display text-base" style={{ color: 'var(--text-primary)' }}>Save as Template</h3>
+                    <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                      {selected.size} device{selected.size === 1 ? '' : 's'} · <span className="font-mono">{command.slice(0, 40)}{command.length > 40 ? '…' : ''}</span>
+                    </p>
+                  </div>
+                </div>
+                <button onClick={() => setSaveTemplateOpen(false)} disabled={savingTemplate} className="p-1 rounded-lg hover:text-accent-red" style={{ color: 'var(--text-muted)' }}>
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="px-6 pb-6 space-y-3">
+                <div>
+                  <label className="label">Name</label>
+                  <input
+                    autoFocus
+                    value={templateName}
+                    onChange={e => { setTemplateName(e.target.value); setTemplateSaveError('') }}
+                    onKeyDown={e => e.key === 'Enter' && saveTemplate()}
+                    placeholder="e.g. Patch Tuesday reboot — branch switches"
+                    className={`input-field ${templateSaveError ? 'border-accent-red/50' : ''}`}
+                  />
+                </div>
+                <div>
+                  <label className="label">Description (optional)</label>
+                  <input
+                    value={templateDescription}
+                    onChange={e => setTemplateDescription(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && saveTemplate()}
+                    placeholder="What this is for, when to run it, etc."
+                    className="input-field"
+                  />
+                </div>
+                {templateSaveError && <p className="text-xs text-accent-red font-body">{templateSaveError}</p>}
+                <p className="text-[11px] font-body" style={{ color: 'var(--text-faint)' }}>
+                  Saves the current command, timeout, and the {selected.size} currently-selected device{selected.size === 1 ? '' : 's'} as a one-click preset.
+                </p>
+                <div className="flex gap-3 mt-2">
+                  <button onClick={() => setSaveTemplateOpen(false)} className="btn-ghost flex-1 justify-center" disabled={savingTemplate}>Cancel</button>
+                  <button onClick={saveTemplate} disabled={savingTemplate || !templateName.trim()} className="btn-primary flex-1 justify-center flex items-center gap-2 disabled:opacity-40">
+                    {savingTemplate && <Loader2 size={14} className="animate-spin" />}
+                    {savingTemplate ? 'Saving…' : 'Save Template'}
                   </button>
                 </div>
               </div>

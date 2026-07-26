@@ -954,6 +954,13 @@ run()
       console.warn('  ⚠  bulk-command-schedules:', e.message);
     }
     try {
+      const { migrateBulkCommandTemplates } = require('./migrate-bulk-command-templates');
+      await migrateBulkCommandTemplates();
+      console.log('  ✓ bulk_command_templates (reusable command + device-list presets for the Bulk Command console)');
+    } catch (e) {
+      console.warn('  ⚠  bulk-command-templates:', e.message);
+    }
+    try {
       const { migrateAuditChain } = require('./migrate-audit-chain');
       await migrateAuditChain();
       console.log('  ✓ audit_log hash chain (tamper-evident audit trail, per-org)');

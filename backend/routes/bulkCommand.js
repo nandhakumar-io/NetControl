@@ -199,6 +199,153 @@ router.delete('/history/:id', param('id').isUUID(), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Reusable command + device-list templates ────────────────────────────
+// Unlike history (dedupe by command text only), a template also snapshots
+// the target device selection, so "Patch Tuesday reboot — branch office
+// switches" can be loaded back with one click instead of re-picking
+// devices and retyping the command every time. See
+// db/migrate-bulk-command-templates.js for the full rationale, including
+// how this differs from bulk_command_schedules (cron-unattended runs).
+//
+// NOTE: like /devices and /active below, this must stay registered before
+// GET /:runId — otherwise Express would match "/templates" against the
+// ":runId" param first and the isUUID() validator would reject it.
+
+// GET /api/bulk-command/templates — most recently used first
+router.get('/templates', async (req, res) => {
+  try {
+    const rows = await query(
+      `SELECT id, name, description, command, device_ids, timeout_sec,
+              use_count, created_by_username, created_at, last_used_at
+         FROM bulk_command_templates
+        WHERE org_id = ?
+        ORDER BY last_used_at IS NULL, last_used_at DESC, created_at DESC
+        LIMIT 50`,
+      [req.orgId]
+    );
+    res.json(rows.map(r => ({ ...r, device_ids: JSON.parse(r.device_ids || '[]') })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/bulk-command/templates — save the current console state
+// (command + selected device ids) as a named, reusable preset.
+router.post('/templates',
+  [
+    body('name').notEmpty().isString().isLength({ max: 100 }),
+    body('description').optional({ nullable: true }).isString().isLength({ max: 255 }),
+    body('command').notEmpty().isString().isLength({ max: 1000 }),
+    body('deviceIds').isArray({ min: 1, max: 200 }),
+    body('deviceIds.*').isUUID(),
+    body('timeoutSec').optional().isInt({ min: 5, max: 3600 }),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const existing = await queryOne(
+        'SELECT id FROM bulk_command_templates WHERE org_id = ? AND name = ?',
+        [req.orgId, req.body.name]
+      );
+      if (existing) return res.status(409).json({ error: 'A template with that name already exists' });
+
+      const id = uuidv4();
+      await execute(
+        `INSERT INTO bulk_command_templates
+           (id, org_id, name, description, command, device_ids, timeout_sec, created_by, created_by_username, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          id, req.orgId, req.body.name, req.body.description || null,
+          req.body.command, JSON.stringify(req.body.deviceIds),
+          req.body.timeoutSec || 30, req.user.id, req.user.username,
+        ]
+      );
+      res.status(201).json({ id, ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// PUT /api/bulk-command/templates/:id — overwrite an existing template
+// (e.g. the target list drifted and someone re-saves it under the same name).
+router.put('/templates/:id',
+  [
+    param('id').isUUID(),
+    body('name').notEmpty().isString().isLength({ max: 100 }),
+    body('description').optional({ nullable: true }).isString().isLength({ max: 255 }),
+    body('command').notEmpty().isString().isLength({ max: 1000 }),
+    body('deviceIds').isArray({ min: 1, max: 200 }),
+    body('deviceIds.*').isUUID(),
+    body('timeoutSec').optional().isInt({ min: 5, max: 3600 }),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const row = await queryOne('SELECT id FROM bulk_command_templates WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+
+      const dupe = await queryOne(
+        'SELECT id FROM bulk_command_templates WHERE org_id = ? AND name = ? AND id != ?',
+        [req.orgId, req.body.name, req.params.id]
+      );
+      if (dupe) return res.status(409).json({ error: 'A template with that name already exists' });
+
+      await execute(
+        `UPDATE bulk_command_templates
+            SET name = ?, description = ?, command = ?, device_ids = ?, timeout_sec = ?
+          WHERE id = ?`,
+        [req.body.name, req.body.description || null, req.body.command, JSON.stringify(req.body.deviceIds), req.body.timeoutSec || 30, req.params.id]
+      );
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// DELETE /api/bulk-command/templates/:id
+router.delete('/templates/:id', param('id').isUUID(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const result = await execute('DELETE FROM bulk_command_templates WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!result.affectedRows) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/bulk-command/templates/:id/use — bump usage stats and hand
+// back the full template so the frontend can load command + device
+// selection into the console in one round trip. Devices that no longer
+// exist (or moved orgs) are silently filtered out here rather than left
+// for the frontend to guess about, since /run would skip them anyway.
+router.post('/templates/:id/use', param('id').isUUID(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const row = await queryOne('SELECT * FROM bulk_command_templates WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+
+    const savedIds = JSON.parse(row.device_ids || '[]');
+    const stillValid = savedIds.length
+      ? await query(
+          `SELECT id FROM devices WHERE org_id = ? AND id IN (${savedIds.map(() => '?').join(',')})`,
+          [req.orgId, ...savedIds]
+        )
+      : [];
+    const validIds = stillValid.map(d => d.id);
+    const missingCount = savedIds.length - validIds.length;
+
+    execute(
+      'UPDATE bulk_command_templates SET use_count = use_count + 1, last_used_at = NOW() WHERE id = ?',
+      [req.params.id]
+    ).catch(() => {}); // fire-and-forget, same pattern as recordHistory
+
+    res.json({
+      id: row.id, name: row.name, description: row.description,
+      command: row.command, deviceIds: validIds, timeoutSec: row.timeout_sec,
+      missingCount,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/bulk-command/devices — device picker list for the console,
 // same shape as GET /api/devices but trimmed to just what the picker needs ─
 // NOTE: this must stay registered before GET /:runId below — otherwise
