@@ -101,7 +101,7 @@ export default function OpsCalendarPage() {
   const isToday = (d) => d.toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10)
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1760px] mx-auto animate-fade-in">
+    <div className="page-shell animate-fade-in">
       <PageHeader
         icon={CalendarDays}
         title="Ops Calendar"

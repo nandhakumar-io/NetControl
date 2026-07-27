@@ -860,10 +860,13 @@ export default function Layout() {
       </div>
 
       {/* Main content */}
-      <main className={`flex-1 overflow-y-auto transition-colors duration-200 pt-14 md:pt-0 ${isLight ? 'text-[#1a1a2e]' : ''}`}>
+      <main className={`flex-1 overflow-y-auto overflow-x-hidden transition-colors duration-200 pt-14 md:pt-0 pb-6 ${isLight ? 'text-[#1a1a2e]' : ''}`}>
         {/* resetKey=pathname: a crash on one page can't follow you to the
             next — every navigation (including browser forward/back) mounts
-            a clean boundary instead of re-showing a stale error state. */}
+            a clean boundary instead of re-showing a stale error state.
+            pb-6 above is a small scroll-safe buffer so a page's last card
+            never sits flush against the bottom edge, on top of whatever
+            bottom padding that page already applies internally. */}
         <ErrorBoundary resetKey={location.pathname}>
           <Outlet />
         </ErrorBoundary>

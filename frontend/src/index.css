@@ -119,6 +119,26 @@ html.light {
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: rgba(167,139,250,0.25); border-radius: 99px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(167,139,250,0.5); }
+
+  /* Accessible, brand-consistent focus ring — replaces the browser default
+     blue outline everywhere (buttons, links, inputs, cards) without
+     removing focus visibility. Only shows for keyboard navigation
+     (:focus-visible), so mouse clicks stay clean. */
+  :focus-visible {
+    outline: 2px solid rgba(167,139,250,0.6);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Heading rhythm — headings previously had no shared baseline leading
+     or letter-spacing, so h1/h2/h3 usage across pages looked inconsistent
+     depending on which utility classes a given page happened to reach for. */
+  h1, h2, h3 { font-family: 'DM Sans', sans-serif; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { line-height: 1.25; }
+  h2, h3 { line-height: 1.35; }
+
+  /* Smooth in-page anchor/scroll-into-view jumps (tables, tabs, etc.) */
+  html { scroll-behavior: smooth; }
 }
 
 /* ── Components ───────────────────────────────────────────────────────────── */
@@ -261,8 +281,55 @@ html.light {
   }
 
   /* ── Card ───────────────────────────────────────────────────────────── */
-  .card { @apply glass rounded-2xl p-5 animate-fade-in; }
+  .card { @apply glass rounded-2xl p-5 sm:p-6 animate-fade-in; }
   html.light .card { border-radius: 1rem; }
+
+  /* ── Page shell ─────────────────────────────────────────────────────────
+     Standardizes the outer wrapper every page currently rolls by hand
+     (some used p-4 sm:p-5, others p-4 sm:p-6 or bare p-6, with
+     inconsistent max-widths and no guaranteed bottom breathing room).
+     One consistent gutter + max-width + bottom-safe padding, so no page's
+     content can touch the viewport edge, collide with the mobile top bar,
+     or end flush against the bottom of the scroll area. Opt in from a page
+     with: <div className="page-shell"> ... </div> */
+  /* ── Page shell ─────────────────────────────────────────────────────────
+     Standardizes the outer wrapper every page currently rolls by hand
+     (some used p-4 sm:p-5, others p-4 sm:p-6 or bare p-6, with
+     inconsistent max-widths and no guaranteed bottom breathing room).
+     .page-pad is the padding/bottom-safety rhythm alone, so pages that
+     intentionally use a narrower max-width (forms, single-column settings
+     pages, etc.) can keep that width and still share the same gutter.
+     .page-shell = .page-pad + the default 1600px content width, for pages
+     that don't need anything narrower. */
+  .page-pad {
+    padding: 1.25rem 1rem 3rem;
+  }
+  @media (min-width: 640px) {
+    .page-pad { padding: 1.75rem 1.5rem 3.5rem; }
+  }
+  @media (min-width: 1024px) {
+    .page-pad { padding: 2rem 2rem 3.5rem; }
+  }
+  .page-shell {
+    @apply page-pad w-full max-w-[1600px] mx-auto;
+  }
+
+  /* Consistent vertical rhythm between stacked sections/cards on a page —
+     replaces the mix of space-y-4/5/6 sprinkled ad hoc per page. */
+  .page-stack { @apply space-y-6; }
+
+  /* ── Section heading ────────────────────────────────────────────────── */
+  /* Small uppercase group headers used above tables/lists (e.g. "Recent
+     Alerts", "Offline Devices") — previously each page hand-rolled its own
+     px-5 py-3 border-bottom block with slightly different padding. */
+  .section-heading {
+    @apply px-5 py-3.5 flex items-center justify-between gap-3;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .section-heading > span:first-child {
+    @apply text-sm font-body font-semibold tracking-wide;
+    color: var(--text-primary);
+  }
 
   /* ── Modal backdrop ─────────────────────────────────────────────────── */
   .modal-backdrop {

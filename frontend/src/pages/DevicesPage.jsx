@@ -918,7 +918,7 @@ export default function DevicesPage() {
   })
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto animate-fade-in pb-28">
+    <div className="page-shell animate-fade-in">
 
       {/* Header */}
       <PageHeader

@@ -915,7 +915,7 @@ export default function MonitoringPage() {
   )
 
   return (
-    <div className="p-4 sm:p-5 space-y-5 animate-fade-in max-w-[1600px] mx-auto pb-10">
+    <div className="page-shell page-stack animate-fade-in">
 
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2">
