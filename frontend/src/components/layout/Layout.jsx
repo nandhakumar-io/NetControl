@@ -19,6 +19,7 @@ import SessionsModal from '../modals/SessionsModal'
 import NotificationPrefsModal from '../modals/NotificationPrefsModal'
 import OrgSwitcher from './OrgSwitcher'
 import CommandPalette from './CommandPalette'
+import ErrorBoundary from '../ErrorBoundary'
 
 const SECTION_ICONS = {
   Devices:     HardDrive,
@@ -525,7 +526,7 @@ export default function Layout() {
   )
 
   return (
-    <div className={`flex h-screen overflow-hidden transition-colors duration-200 ${isLight ? 'bg-[#eef0f5]' : 'grid-bg bg-surface-0'}`}>
+    <div className={`relative flex h-screen overflow-hidden transition-colors duration-200 ${isLight ? 'bg-[#eef0f5]' : 'grid-bg bg-surface-0'}`}>
 
       {/* Mobile drawer backdrop — tapping it closes the nav, same as tapping
           outside any other overlay in this app */}
@@ -777,23 +778,43 @@ export default function Layout() {
         <SessionsModal open={showSessions} onClose={() => setShowSessions(false)} />
         <NotificationPrefsModal open={showNotifPrefs} onClose={() => setShowNotifPrefs(false)} />
 
-        {/* Collapse toggle — anchored to a fixed offset near the logo
-            header, NOT top-1/2 of the sidebar's own height. top-1/2 was
-            fragile: it positions against whatever height <aside> computes
-            for itself, so if that height was ever taller than the visible
-            viewport for any reason, the button would visually float far
-            down the page instead of sitting next to the logo where it
-            belongs. A fixed pixel offset can't drift like that. */}
+        {/* Edge affordance — the whole right border of the sidebar is a
+            click target that shrinks/expands it, not just the small round
+            button. Gives a much bigger, more discoverable hit area (the
+            way a resizable panel's drag edge works), while the actual
+            resize/collapse action here is a simple toggle rather than a
+            drag. */}
         <button
           onClick={() => setCollapsed(c => !c)}
-          className={`hidden md:flex absolute top-8 w-6 h-6 rounded-full border items-center justify-center transition-all duration-150 z-50
-            ${isLight ? 'bg-white border-black/10 text-slate-400 hover:text-[#6c5ce7] hover:border-[#6c5ce7]/30'
-                      : 'bg-surface-4 border-white/10 text-slate-400 hover:text-slate-200'}`}
-          style={{ right: '-12px' }}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          className="hidden md:block absolute top-0 right-0 h-full w-2.5 translate-x-1/2 z-40 cursor-col-resize group"
         >
-          {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
+          <span className={`block h-full w-px mx-auto transition-colors duration-150
+            ${isLight ? 'bg-black/[0.06] group-hover:bg-[#6c5ce7]/40' : 'bg-white/6 group-hover:bg-brand-400/40'}`} />
         </button>
       </aside>
+
+      {/* Collapse toggle — deliberately rendered OUTSIDE <aside> (which has
+          overflow-hidden for its own scrolling nav content) and positioned
+          against the relative root container instead. A button placed at
+          right:-12px *inside* an overflow-hidden ancestor gets clipped and
+          is invisible — that was the whole reason it "wasn't showing up."
+          Anchored to a fixed top offset near the logo header (not top-1/2
+          of the sidebar's own height, which drifts if <aside>'s computed
+          height ever exceeds the viewport) and animates its left offset in
+          lockstep with the sidebar's own width transition so it never
+          looks detached mid-animation. */}
+      <button
+        onClick={() => setCollapsed(c => !c)}
+        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        className={`hidden md:flex absolute top-8 w-6 h-6 rounded-full border items-center justify-center transition-all duration-300 z-50
+          ${isLight ? 'bg-white border-black/10 text-slate-400 hover:text-[#6c5ce7] hover:border-[#6c5ce7]/30'
+                    : 'bg-surface-4 border-white/10 text-slate-400 hover:text-slate-200'}`}
+        style={{ left: collapsed ? '48px' : '208px' }}
+      >
+        {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
+      </button>
 
       {/* Mounted outside <aside> deliberately: that element gets a CSS
           transform (translate-x-full) on mobile when the drawer is closed,
@@ -840,7 +861,12 @@ export default function Layout() {
 
       {/* Main content */}
       <main className={`flex-1 overflow-y-auto transition-colors duration-200 pt-14 md:pt-0 ${isLight ? 'text-[#1a1a2e]' : ''}`}>
-        <Outlet />
+        {/* resetKey=pathname: a crash on one page can't follow you to the
+            next — every navigation (including browser forward/back) mounts
+            a clean boundary instead of re-showing a stale error state. */}
+        <ErrorBoundary resetKey={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   )

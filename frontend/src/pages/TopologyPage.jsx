@@ -398,10 +398,13 @@ function DeviceNode({ node, selected, dimmed, pulsing, onClick, onHover, onLeave
       <foreignObject x={-8} y={-8} width={16} height={16} style={{ pointerEvents: 'none' }}>
         <Icon size={16} color={color} />
       </foreignObject>
-      <title>{device.name}</title>
+      <title>{device.name || 'Unnamed device'}</title>
       <text y={r + 14} textAnchor="middle" fontSize="10.5" fontFamily="DM Sans, sans-serif"
         fill="var(--text-secondary)" style={{ pointerEvents: 'none' }}>
-        {device.name.length > 15 ? device.name.slice(0, 14) + '…' : device.name}
+        {(() => {
+          const name = device.name || 'Unnamed device'
+          return name.length > 15 ? name.slice(0, 14) + '…' : name
+        })()}
       </text>
     </g>
   )
@@ -888,7 +891,7 @@ export default function TopologyPage() {
     if (statusFilter !== 'all' && (d.status || 'unknown') !== statusFilter) return false
     if (search) {
       const q = search.toLowerCase()
-      if (!d.name.toLowerCase().includes(q) && !(d.ip_address || '').toLowerCase().includes(q) &&
+      if (!(d.name || '').toLowerCase().includes(q) && !(d.ip_address || '').toLowerCase().includes(q) &&
           !(d.group_name || '').toLowerCase().includes(q)) return false
     }
     return true
@@ -1057,7 +1060,7 @@ export default function TopologyPage() {
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: view.x, origY: view.y }
   }
   const onMouseMove = (e) => {
-    if (!dragRef.current) return
+    if (!dragRef.current || !containerRef.current) return
     const rect = containerRef.current.getBoundingClientRect()
     const dx = ((e.clientX - dragRef.current.startX) / rect.width) * VIEW_W
     const dy = ((e.clientY - dragRef.current.startY) / rect.height) * VIEW_H
@@ -1246,9 +1249,15 @@ export default function TopologyPage() {
       n.groupId === selectedNode.groupId && n.subnetKey === selectedNode.label)
   }, [selectedNode, nodesWithCounts])
 
+  // Same page-wrapper pattern every other page in the app uses (Devices,
+  // Groups, etc.) — top/side padding so content doesn't run up under the
+  // nav bar, a max width, and bottom padding so the page doesn't end flush
+  // against the viewport edge. This page was the only one missing it,
+  // which is why it looked jammed against the nav bar with no breathing
+  // room at the bottom.
   const wrapperClasses = fullscreen
     ? 'fixed inset-0 z-40 p-4 sm:p-6 overflow-auto'
-    : ''
+    : 'p-4 sm:p-6 max-w-[1600px] mx-auto animate-fade-in pb-28'
 
   return (
     <div className={wrapperClasses} style={fullscreen ? { background: 'var(--bg-page)' } : {}}>
