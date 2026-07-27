@@ -1,25 +1,27 @@
 // pages/TopologyPage.jsx — live, interactive network topology map.
 //
-// Renders the network the way a NOC/enterprise SaaS map does: a four-tier
-// tree — Core (org) → Site routers (Groups) → Subnet switches (derived from
-// each device's /24) → Devices — laid out with a tidy, width-aware tree
-// algorithm so nodes never overlap, whether you have 3 devices or 300.
-// Built on plain SVG + foreignObject (no new dependency) so it matches the
-// zero-extra-bundle approach the rest of the frontend uses.
+// Radial hub-and-spoke map: Organization (core) at the center → one Site
+// Router hub per group on an outer ring. Sites start collapsed (just the
+// hub + a device count) — click a site to expand it, fanning out its
+// Subnet Switches (derived from IP /24) and their Devices around it. This
+// keeps the map readable at a glance no matter how many devices a site
+// has: nothing is drawn until you ask to see it, so nodes never get
+// cramped into a single narrow lane.
 //
 // Data comes from the same endpoints DevicesPage/GroupsPage already use
 // (GET /devices, GET /groups) — there is no separate "topology" table, and
-// there's no subnet table either: the subnet tier is derived client-side
-// from each device's IP address. This keeps it truthful: a device can never
-// drift out of sync with what Devices/Monitoring show, because it's the
-// same rows, and the subnet grouping is just arithmetic on ip_address.
+// no subnet table either: the subnet tier is derived client-side from each
+// device's IP address. This keeps it truthful — a device can never drift
+// out of sync with what Devices/Monitoring show, because it's the same
+// rows, and the subnet grouping is just arithmetic on ip_address.
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Network, Search, RefreshCw, Loader2, ZoomIn, ZoomOut, Maximize2, Minimize2,
   Download, X, TerminalSquare, Activity, HardDrive, Layers, Filter,
-  LocateFixed, Building2, Wifi, WifiOff, Ban, Router, Waypoints, ShieldCheck,
-  Printer, Camera, Database, Monitor, Server, ChevronRight,
+  LocateFixed, Wifi, WifiOff, Ban, Router, Waypoints, ShieldCheck,
+  Printer, Camera, Database, Monitor, Server, ChevronRight, ChevronDown,
+  Maximize, Minimize, HelpCircle,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -47,6 +49,26 @@ const CORE_COLOR   = '#a78bfa' // violet — organization core
 const SITE_COLOR   = '#818cf8' // indigo — site router
 const SUBNET_COLOR = '#38bdf8' // sky — subnet switch
 
+// A site's hub used to be hardcoded as "Site Router" everywhere on the
+// map — wrong the moment a site's actual gateway is a firewall, an L3
+// switch, or anything else. groups.device_type (set by an admin in
+// Groups → Edit) now drives both the icon and the label here. Keep this
+// map in sync with GROUP_DEVICE_TYPE_OPTIONS in pages/GroupsPage.jsx and
+// DEVICE_TYPES in backend/db/migrate-group-device-type.js.
+const GROUP_DEVICE_TYPES = {
+  router:       { Icon: Router,      label: 'Router' },
+  switch:       { Icon: Waypoints,   label: 'Switch' },
+  firewall:     { Icon: ShieldCheck, label: 'Firewall' },
+  access_point: { Icon: Wifi,        label: 'Access Point' },
+  server:       { Icon: Server,      label: 'Server' },
+  other:        { Icon: HelpCircle,  label: 'Site Hub' },
+}
+function groupKind(deviceType) {
+  return GROUP_DEVICE_TYPES[deviceType] || GROUP_DEVICE_TYPES.router
+}
+
+const VIEW_W = 1200
+const VIEW_H = 760
 const MIN_SCALE = 0.3
 const MAX_SCALE = 2.5
 
@@ -86,32 +108,89 @@ function deviceKind(d) {
   return { Icon: Monitor, label: 'Workstation' }
 }
 
-// ── Tidy, width-aware tree layout ────────────────────────────────────────
-// Every device gets a dedicated horizontal slot; subnet & site clusters are
-// packed left-to-right from those slot widths. Nothing is ever placed by
-// angle/radius, so nothing can ever overlap regardless of device count.
-const DEVICE_SLOT  = 108   // horizontal space reserved per device leaf
-const SUBNET_GAP   = 58    // gap between sibling subnet clusters
-const GROUP_GAP     = 100  // gap between sibling site clusters
-const LEVEL_Y = { core: 56, group: 224, subnet: 396, device: 574 }
-const VIEW_H = LEVEL_Y.device + 96
+// ── Radial layout, with collapsible sites ───────────────────────────────
+// core (org) at the center → one hub per group on an outer ring. A group
+// only fans out its subnets (and each subnet its devices) when its id is
+// present in `expanded` — collapsed sites stay a single compact hub, which
+// is what keeps a 300-device map from turning into a wall of icons.
+//
+// Layout footprints — each tier's on-screen size plus a comfortable
+// margin, used below to work out how much room a *ring* of that many
+// siblings actually needs, instead of assuming a fixed radius fits any
+// count. This is the fix for the "too closely packed" complaint: the
+// previous version capped every fan's radius at a small constant no
+// matter how many nodes it held, so a subnet with 100+ devices had no
+// choice but to overlap them into a solid blob.
+const GROUP_GAP  = 190 // 152px card + margin
+const SUBNET_GAP = 168 // 136px card + margin
+const DEVICE_GAP = 58  // 30px icon + label headroom + margin
+const BAND_STEP  = { subnet: 118, device: 66 } // radial distance between successive bands
 
-function computeLayout(devices, groups) {
+// Places `count` children in concentric arc "bands" fanned out from
+// `originAngle`, opening a new band (one step further from the parent)
+// whenever the current band can't fit any more children at the minimum
+// safe spacing. This is what a real NOC map does with a large fan-out —
+// e.g. NetBox and LibreUI-style topology views ring large sets of leaves
+// around their parent in tiers rather than squeezing them into one arc —
+// so density stays readable at 5 devices or 500.
+function placeRadialBand({ count, originAngle, spreadCap, baseR, minGap, ringStep }) {
+  const placements = []
+  let placed = 0
+  let band = 0
+  while (placed < count) {
+    const r = baseR + band * ringStep
+    const isSingle = count === 1 && band === 0
+    const angle = isSingle ? 0 : spreadCap
+    // How many siblings fit on this band's arc without crowding, given the
+    // chord distance at this radius — i.e. more room further out.
+    const capacity = isSingle ? 1 : Math.max(1, Math.floor((angle * r) / minGap) + 1)
+    const take = Math.min(capacity, count - placed)
+    for (let i = 0; i < take; i++) {
+      const a = take <= 1 ? originAngle : originAngle - angle / 2 + (angle * i) / (take - 1)
+      placements.push({ x: r * Math.cos(a), y: r * Math.sin(a), angle: a })
+      placed++
+    }
+    band++
+  }
+  return placements
+}
+
+function computeLayout(devices, groups, expanded) {
   const byGroup = new Map()
   for (const d of devices) {
     const gid = d.group_id || '__ungrouped'
     if (!byGroup.has(gid)) byGroup.set(gid, [])
     byGroup.get(gid).push(d)
   }
-  const groupMeta = groups.filter(g => byGroup.has(g.id)).map(g => ({ id: g.id, name: g.name }))
-  if (byGroup.has('__ungrouped')) groupMeta.push({ id: '__ungrouped', name: 'Ungrouped devices' })
+  const groupMeta = groups.filter(g => byGroup.has(g.id))
+    .map(g => ({ id: g.id, name: g.name, deviceType: g.device_type || 'router' }))
+  if (byGroup.has('__ungrouped')) {
+    groupMeta.push({ id: '__ungrouped', name: 'Ungrouped devices', deviceType: 'other' })
+  }
 
-  const nodes = []
+  const n = Math.max(groupMeta.length, 1)
+  // Full ring around the core: radius derived from how much circumference
+  // n cards actually need, not a constant that only happens to work for a
+  // handful of sites.
+  const ringR = Math.max(240, (n * GROUP_GAP) / (2 * Math.PI))
+
+  const nodes = [{ id: 'core', type: 'core', x: 0, y: 0, label: 'Core' }]
   const edges = []
-  let cursor = 0
 
-  groupMeta.forEach(g => {
+  groupMeta.forEach((g, i) => {
+    const angle = (2 * Math.PI * i) / n - Math.PI / 2
+    const gx = ringR * Math.cos(angle)
+    const gy = ringR * Math.sin(angle)
     const devs = byGroup.get(g.id) || []
+    const isExpanded = expanded.has(g.id)
+    nodes.push({
+      id: `grp:${g.id}`, type: 'group', x: gx, y: gy, angle,
+      label: g.name, expanded: isExpanded, deviceType: g.deviceType,
+    })
+    edges.push({ id: `e-core-${g.id}`, from: 'core', to: `grp:${g.id}`, kind: 'trunk' })
+
+    if (!isExpanded || devs.length === 0) return
+
     const bySubnet = new Map()
     devs.forEach(d => {
       const key = cidr24(d.ip_address) || 'Unassigned'
@@ -121,57 +200,50 @@ function computeLayout(devices, groups) {
     const subnetKeys = [...bySubnet.keys()].sort((a, b) =>
       a === 'Unassigned' ? 1 : b === 'Unassigned' ? -1 : a.localeCompare(b))
 
-    const groupStart = cursor
-    subnetKeys.forEach(key => {
+    // Subnets fan outward from the site, away from the core, rather than
+    // wrapping a full circle (a site's children belong "beyond" it on the
+    // map, not looping back toward the org center).
+    const subnetSpots = placeRadialBand({
+      count: subnetKeys.length, originAngle: angle,
+      spreadCap: Math.min(Math.PI * 1.6, 0.7 + subnetKeys.length * 0.12),
+      baseR: 130, minGap: SUBNET_GAP, ringStep: BAND_STEP.subnet,
+    })
+
+    subnetKeys.forEach((key, si) => {
+      const spot = subnetSpots[si]
+      const sx = gx + spot.x, sy = gy + spot.y
       const sdevs = bySubnet.get(key)
-      const subnetStart = cursor
-      const deviceNodes = []
-      sdevs.forEach(d => {
-        const x = cursor + DEVICE_SLOT / 2
-        const devNode = {
-          id: `dev:${d.id}`, type: 'device', x, y: LEVEL_Y.device,
-          device: d, groupId: g.id, subnetKey: key,
-        }
-        nodes.push(devNode)
-        deviceNodes.push(devNode)
-        cursor += DEVICE_SLOT
-      })
-      const subnetWidth = Math.max(cursor - subnetStart, DEVICE_SLOT)
-      const subnetCx = subnetStart + subnetWidth / 2
       const subnetId = `sub:${g.id}:${key}`
       nodes.push({
-        id: subnetId, type: 'subnet', x: subnetCx, y: LEVEL_Y.subnet,
+        id: subnetId, type: 'subnet', x: sx, y: sy,
         label: key, groupId: g.id, siteLabel: g.name,
       })
       edges.push({ id: `e-grp-${subnetId}`, from: `grp:${g.id}`, to: subnetId, kind: 'trunk' })
-      deviceNodes.forEach(dn => edges.push({
-        id: `e-${subnetId}-${dn.id}`, from: subnetId, to: dn.id,
-        kind: 'leaf', status: dn.device.status || 'unknown',
-      }))
-      cursor += SUBNET_GAP
+
+      const deviceSpots = placeRadialBand({
+        count: sdevs.length, originAngle: spot.angle,
+        spreadCap: Math.min(Math.PI * 1.7, 0.6 + sdevs.length * 0.1),
+        baseR: 72, minGap: DEVICE_GAP, ringStep: BAND_STEP.device,
+      })
+      sdevs.forEach((d, di) => {
+        const dSpot = deviceSpots[di]
+        const dx = sx + dSpot.x, dy = sy + dSpot.y
+        nodes.push({
+          id: `dev:${d.id}`, type: 'device', x: dx, y: dy,
+          device: d, groupId: g.id, subnetKey: key,
+        })
+        edges.push({
+          id: `e-${subnetId}-${d.id}`, from: subnetId, to: `dev:${d.id}`,
+          kind: 'leaf', status: d.status || 'unknown',
+        })
+      })
     })
-    cursor -= SUBNET_GAP // strip trailing gap from the last subnet
-    const groupWidth = Math.max(cursor - groupStart, DEVICE_SLOT)
-    const groupCx = groupStart + groupWidth / 2
-    nodes.push({ id: `grp:${g.id}`, type: 'group', x: groupCx, y: LEVEL_Y.group, label: g.name })
-    edges.push({ id: `e-core-${g.id}`, from: 'core', to: `grp:${g.id}`, kind: 'trunk' })
-
-    cursor += GROUP_GAP
   })
-  if (groupMeta.length) cursor -= GROUP_GAP // strip trailing gap from the last group
 
-  const totalWidth = Math.max(cursor, 320)
-  const coreCx = totalWidth / 2
-  nodes.push({ id: 'core', type: 'core', x: coreCx, y: LEVEL_Y.core, label: 'Core' })
-
-  // Recenter the whole tree around x=0 so pan/zoom math stays simple.
-  const shift = totalWidth / 2
-  nodes.forEach(n => { n.x -= shift })
-
-  return { nodes, edges, width: totalWidth }
+  return { nodes, edges }
 }
 
-function nodeHalfH(type) {
+function nodeHalfSize(type) {
   if (type === 'core') return 37
   if (type === 'group') return 32
   if (type === 'subnet') return 28
@@ -179,8 +251,8 @@ function nodeHalfH(type) {
 }
 
 function linkPath(x1, y1, x2, y2) {
-  const midY = (y1 + y2) / 2
-  return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
+  return `M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`
 }
 
 // ── Small building blocks ────────────────────────────────────────────────
@@ -242,8 +314,8 @@ function DeviceNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight
 
 // Shared "rich card" renderer for Core / Site-router / Subnet-switch tiers —
 // an HTML card dropped into the SVG via foreignObject, the way enterprise
-// dashboards (Auvik/Datadog-style network maps) render hub nodes.
-function TierCard({ node, w, h, color, roleLabel, Icon, title, subtitle, badge, selected, dimmed, onClick, onHover, onLeave, isLight, glow }) {
+// dashboards render hub nodes, instead of a plain SVG circle.
+function TierCard({ node, w, h, color, roleLabel, Icon, title, subtitle, badge, corner, selected, dimmed, onClick, onHover, onLeave, isLight, glow }) {
   return (
     <g
       transform={`translate(${node.x},${node.y})`}
@@ -275,6 +347,7 @@ function TierCard({ node, w, h, color, roleLabel, Icon, title, subtitle, badge, 
             position: 'absolute', top: 4, left: 8, fontSize: 8, fontWeight: 700, letterSpacing: '0.06em',
             color, textTransform: 'uppercase', opacity: 0.85,
           }}>{roleLabel}</span>
+          {corner}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
             <div style={{
               width: 26, height: 26, borderRadius: 8, flexShrink: 0,
@@ -286,7 +359,7 @@ function TierCard({ node, w, h, color, roleLabel, Icon, title, subtitle, badge, 
             <div style={{ minWidth: 0 }}>
               <div style={{
                 fontSize: 12, fontWeight: 700, color: 'var(--text-primary)',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: w - 46,
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: w - 60,
               }}>{title}</div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{subtitle}</div>
             </div>
@@ -302,11 +375,21 @@ function SiteNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight }
   const online = node.onlineCount ?? 0
   const total = node.count ?? 0
   const pct = total ? Math.round((online / total) * 100) : 0
+  const ChevIcon = node.expanded ? ChevronDown : ChevronRight
+  const { Icon: KindIcon, label: kindLabel } = groupKind(node.deviceType)
   return (
     <TierCard
-      node={node} w={150} h={64} color={SITE_COLOR} roleLabel="Site Router" Icon={Router}
-      title={node.label} subtitle={`${online}/${total} online`}
+      node={node} w={152} h={66} color={SITE_COLOR} roleLabel={kindLabel} Icon={KindIcon}
+      title={node.label} subtitle={node.expanded ? `${online}/${total} online` : `${total} device${total === 1 ? '' : 's'} · tap to expand`}
       selected={selected} dimmed={dimmed} onClick={onClick} onHover={onHover} onLeave={onLeave} isLight={isLight}
+      corner={
+        <span style={{
+          position: 'absolute', top: 3, right: 5, width: 16, height: 16, borderRadius: 5,
+          background: 'var(--bg-surface-3)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <ChevIcon size={11} color={SITE_COLOR} />
+        </span>
+      }
       badge={
         <div style={{ marginTop: 6, height: 3, borderRadius: 2, background: 'var(--bg-surface-3)', overflow: 'hidden' }}>
           <div style={{ width: `${pct}%`, height: '100%', background: '#22c55e', transition: 'width 0.3s ease' }} />
@@ -322,7 +405,7 @@ function SubnetNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight
   const dots = Math.min(total, 10)
   return (
     <TierCard
-      node={node} w={134} h={56} color={SUBNET_COLOR} roleLabel="Subnet Switch" Icon={Waypoints}
+      node={node} w={136} h={56} color={SUBNET_COLOR} roleLabel="Subnet Switch" Icon={Waypoints}
       title={node.label} subtitle={`${total} device${total === 1 ? '' : 's'}`}
       selected={selected} dimmed={dimmed} onClick={onClick} onHover={onHover} onLeave={onLeave} isLight={isLight}
       badge={
@@ -343,7 +426,7 @@ function SubnetNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight
 function CoreNode({ node, orgName, isLight, onHover, onLeave, stats }) {
   return (
     <TierCard
-      node={node} w={176} h={74} color={CORE_COLOR} roleLabel="Network Core" Icon={Network}
+      node={node} w={178} h={76} color={CORE_COLOR} roleLabel="Network Core" Icon={Network}
       title={orgName || 'Organization'} subtitle={`${stats.total} devices · ${stats.sites} sites`}
       onHover={onHover} onLeave={onLeave} isLight={isLight} glow
     />
@@ -351,7 +434,7 @@ function CoreNode({ node, orgName, isLight, onHover, onLeave, stats }) {
 }
 
 // ── Hover popover — quick-glance info that follows the cursor ──────────────
-function HoverCard({ hover, groupOnlineTotals, isLight }) {
+function HoverCard({ hover }) {
   if (!hover) return null
   const { node, cx, cy, flipX, flipY } = hover
   const style = {
@@ -396,15 +479,18 @@ function HoverCard({ hover, groupOnlineTotals, isLight }) {
       </>
     )
   } else if (node.type === 'group') {
+    const { label: kindLabel } = groupKind(node.deviceType)
     body = (
       <>
         <p className="font-display text-sm truncate" style={{ color: SITE_COLOR }}>{node.label}</p>
-        <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>Site router</p>
+        <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>{kindLabel}</p>
         <div className="mt-2 flex gap-3 text-[11px] font-body">
           <span style={{ color: 'var(--text-secondary)' }}>{node.count ?? 0} devices</span>
           <span style={{ color: '#22c55e' }}>{node.onlineCount ?? 0} online</span>
         </div>
-        <p className="mt-2 text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>Click to inspect site</p>
+        <p className="mt-2 text-[10px] font-body" style={{ color: 'var(--text-faint)' }}>
+          Click to {node.expanded ? 'collapse' : 'expand'}
+        </p>
       </>
     )
   } else {
@@ -494,9 +580,10 @@ function DeviceDrawer({ device, onClose, isLight }) {
 }
 
 // ── Site (group) detail drawer ──────────────────────────────────────────────
-function SiteDrawer({ node, onClose, onIsolate, isolated, isLight, navigate }) {
+function SiteDrawer({ node, onClose, onIsolate, onToggleExpand, isolated, isLight, navigate }) {
   if (!node) return null
   const offline = (node.count ?? 0) - (node.onlineCount ?? 0)
+  const { Icon: KindIcon, label: kindLabel } = groupKind(node.deviceType)
   return (
     <div className="absolute top-0 right-0 h-full w-full sm:w-80 z-20 animate-fade-in"
       style={{
@@ -508,11 +595,11 @@ function SiteDrawer({ node, onClose, onIsolate, isolated, isLight, navigate }) {
         <div className="min-w-0 flex items-start gap-2.5">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
             style={{ background: `${SITE_COLOR}22`, border: `1px solid ${SITE_COLOR}66` }}>
-            <Router size={15} color={SITE_COLOR} />
+            <KindIcon size={15} color={SITE_COLOR} />
           </div>
           <div className="min-w-0">
             <p className="font-display text-base truncate" style={{ color: 'var(--text-primary)' }}>{node.label}</p>
-            <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>Site router · {node.count} device{node.count === 1 ? '' : 's'}</p>
+            <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>{kindLabel} · {node.count} device{node.count === 1 ? '' : 's'}</p>
           </div>
         </div>
         <button onClick={onClose} className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0" style={{ color: 'var(--text-muted)' }}>
@@ -530,6 +617,10 @@ function SiteDrawer({ node, onClose, onIsolate, isolated, isLight, navigate }) {
             <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>Offline / other</p>
           </div>
         </div>
+        <button className="btn-ghost w-full justify-center" onClick={onToggleExpand}>
+          {node.expanded ? <Minimize size={15} /> : <Maximize size={15} />}
+          {node.expanded ? 'Collapse this site' : 'Expand this site'}
+        </button>
         <button className="btn-ghost w-full justify-center" onClick={() => onIsolate(isolated ? null : node.id)}>
           <Filter size={15} /> {isolated ? 'Show full topology' : 'Isolate this site'}
         </button>
@@ -541,7 +632,7 @@ function SiteDrawer({ node, onClose, onIsolate, isolated, isLight, navigate }) {
   )
 }
 
-// ── Subnet detail drawer — new: lists the actual devices on that segment ───
+// ── Subnet detail drawer — lists the actual devices on that segment ────────
 function SubnetDrawer({ node, devices, onClose, onSelectDevice, isLight }) {
   if (!node) return null
   return (
@@ -606,7 +697,14 @@ export default function TopologyPage() {
   const [selectedNode, setSelectedNode] = useState(null)
   const [hover, setHover] = useState(null)
   const [fullscreen, setFullscreen] = useState(false)
+  // Sites start collapsed — this is the whole fix for "too much on screen
+  // at once": nothing fans out until the person asks for it.
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set())
   const containerRef = useRef(null)
+
+  // pan/zoom transform
+  const [view, setView] = useState({ scale: 1, x: VIEW_W / 2, y: VIEW_H / 2 })
+  const dragRef = useRef(null)
 
   const load = useCallback(async (silent) => {
     if (!silent) setLoading(true); else setRefreshing(true)
@@ -631,23 +729,6 @@ export default function TopologyPage() {
     return () => clearInterval(t)
   }, [load])
 
-  const { nodes, edges, width: treeWidth } = useMemo(() => computeLayout(devices, groups), [devices, groups])
-  const VIEW_W = Math.max(1200, treeWidth + 220)
-
-  // pan/zoom transform — x centers the (already-centered) tree horizontally,
-  // y is a small top margin so the core card sits near the top of frame.
-  const [view, setView] = useState({ scale: 1, x: VIEW_W / 2, y: 0 })
-  const dragRef = useRef(null)
-  const prevWidthRef = useRef(VIEW_W)
-  useEffect(() => {
-    // Re-center only when the tree's width actually changes (new data), not
-    // on every render, so a manual pan/zoom isn't clobbered by the 20s poll.
-    if (prevWidthRef.current !== VIEW_W) {
-      prevWidthRef.current = VIEW_W
-      setView(v => ({ ...v, x: VIEW_W / 2 }))
-    }
-  }, [VIEW_W])
-
   const deviceMatches = useCallback((d) => {
     if (statusFilter !== 'all' && (d.status || 'unknown') !== statusFilter) return false
     if (search) {
@@ -659,33 +740,57 @@ export default function TopologyPage() {
   }, [statusFilter, search])
   const activeFilter = statusFilter !== 'all' || !!search
 
-  // Attach onlineCount / total / hasMatch to group & subnet nodes now that
-  // we have the full device list.
+  // Per-site totals computed from the raw device list (not the tree), so a
+  // *collapsed* site still shows an accurate online/total count and search
+  // match indicator even though its devices aren't in the node tree yet.
+  const groupStatsById = useMemo(() => {
+    const m = new Map()
+    devices.forEach(d => {
+      const gid = d.group_id || '__ungrouped'
+      if (!m.has(gid)) m.set(gid, { total: 0, online: 0, matches: false })
+      const s = m.get(gid)
+      s.total += 1
+      if (d.status === 'online') s.online += 1
+      if (deviceMatches(d)) s.matches = true
+    })
+    return m
+  }, [devices, deviceMatches])
+
+  const allGroupIds = useMemo(() => [...groupStatsById.keys()], [groupStatsById])
+
+  // A site auto-expands while it's isolated, or while it contains a search
+  // / status match — so filtering actually surfaces the matching device
+  // instead of leaving it hidden inside a collapsed hub.
+  const effectiveExpanded = useMemo(() => {
+    const s = new Set(expandedGroups)
+    if (isolatedGroup) s.add(isolatedGroup.slice(4))
+    if (activeFilter) groupStatsById.forEach((v, gid) => { if (v.matches) s.add(gid) })
+    return s
+  }, [expandedGroups, isolatedGroup, activeFilter, groupStatsById])
+
+  const { nodes, edges } = useMemo(() => computeLayout(devices, groups, effectiveExpanded), [devices, groups, effectiveExpanded])
+
   const nodesWithCounts = useMemo(() => {
-    const bySubnet = new Map()
-    const byGroupAll = new Map()
+    const bySubnetDevices = new Map()
     nodes.forEach(n => {
       if (n.type !== 'device') return
       const subId = `sub:${n.groupId}:${n.subnetKey}`
-      if (!bySubnet.has(subId)) bySubnet.set(subId, [])
-      bySubnet.get(subId).push(n)
-      if (!byGroupAll.has(n.groupId)) byGroupAll.set(n.groupId, [])
-      byGroupAll.get(n.groupId).push(n)
+      if (!bySubnetDevices.has(subId)) bySubnetDevices.set(subId, [])
+      bySubnetDevices.get(subId).push(n)
     })
     return nodes.map(n => {
       if (n.type === 'subnet') {
-        const devs = bySubnet.get(n.id) || []
+        const devs = bySubnetDevices.get(n.id) || []
         const online = devs.filter(d => d.device.status === 'online').length
         return { ...n, count: devs.length, onlineCount: online, hasMatch: devs.some(d => deviceMatches(d.device)) }
       }
       if (n.type === 'group') {
-        const devs = byGroupAll.get(n.id.slice(4)) || []
-        const online = devs.filter(d => d.device.status === 'online').length
-        return { ...n, count: devs.length, onlineCount: online, hasMatch: devs.some(d => deviceMatches(d.device)) }
+        const gs = groupStatsById.get(n.id.slice(4)) || { total: 0, online: 0, matches: false }
+        return { ...n, count: gs.total, onlineCount: gs.online, hasMatch: gs.matches }
       }
       return n
     })
-  }, [nodes, deviceMatches])
+  }, [nodes, deviceMatches, groupStatsById])
 
   const matchesFilters = useCallback((node) => {
     if (node.type === 'core') return true
@@ -712,6 +817,16 @@ export default function TopologyPage() {
     return { total, online, offline, sites: groups.length, subnets }
   }, [devices, groups])
 
+  const toggleExpand = useCallback((groupId) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(groupId)) next.delete(groupId); else next.add(groupId)
+      return next
+    })
+  }, [])
+  const expandAll = () => setExpandedGroups(new Set(allGroupIds))
+  const collapseAll = () => setExpandedGroups(new Set())
+
   // ── Pan / zoom handlers ────────────────────────────────────────────────
   const zoomBy = (factor, cx = VIEW_W / 2, cy = VIEW_H / 2) => {
     setView(v => {
@@ -720,7 +835,7 @@ export default function TopologyPage() {
       return { scale: nextScale, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k }
     })
   }
-  const resetView = () => setView({ scale: 1, x: VIEW_W / 2, y: 0 })
+  const resetView = () => setView({ scale: 1, x: VIEW_W / 2, y: VIEW_H / 2 })
 
   const onWheel = (e) => {
     e.preventDefault()
@@ -756,8 +871,14 @@ export default function TopologyPage() {
     setView(v => ({
       scale: Math.max(v.scale, 1.1),
       x: VIEW_W / 2 - node.x * Math.max(v.scale, 1.1),
-      y: -node.y * Math.max(v.scale, 1.1) + 140,
+      y: VIEW_H / 2 - node.y * Math.max(v.scale, 1.1),
     }))
+  }
+  // Clicking a site both toggles its expansion and pans/selects it — one
+  // click reveals its subnets & devices, a second click tidies it away.
+  const onSiteClick = (node) => {
+    toggleExpand(node.id.slice(4))
+    focusNode(node)
   }
 
   const exportSvg = () => {
@@ -809,9 +930,15 @@ export default function TopologyPage() {
       <PageHeader
         icon={Network}
         title="Network Topology"
-        description="Live map of every site, subnet and device — derived from your groups, IP addresses and monitoring status"
+        description="Organization-centered map — click a site to expand its subnets and devices"
         actions={
           <>
+            <button className="btn-ghost" onClick={expandAll}>
+              <Maximize size={15} /> Expand all
+            </button>
+            <button className="btn-ghost" onClick={collapseAll}>
+              <Minimize size={15} /> Collapse all
+            </button>
             <button className="btn-ghost" onClick={() => load(true)} disabled={refreshing}>
               {refreshing ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
               Refresh
@@ -841,7 +968,7 @@ export default function TopologyPage() {
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
           <input
             className="input-field pl-9"
-            placeholder="Search device, IP, or site…"
+            placeholder="Search device, IP, or site… (auto-expands matching sites)"
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
@@ -913,9 +1040,13 @@ export default function TopologyPage() {
                   const from = nodeById.get(e.from), to = nodeById.get(e.to)
                   if (!from || !to) return null
                   const visible = matchesFilters(from) && matchesFilters(to)
-                  const y1 = from.y + nodeHalfH(from.type)
-                  const y2 = to.y - nodeHalfH(to.type)
-                  const d = linkPath(from.x, y1, to.x, y2)
+                  const fromH = nodeHalfSize(from.type), toH = nodeHalfSize(to.type)
+                  // aim the edge from the near edge of each card toward the other, not center-to-center
+                  const dx0 = to.x - from.x, dy0 = to.y - from.y
+                  const dist = Math.max(1, Math.hypot(dx0, dy0))
+                  const x1 = from.x + (dx0 / dist) * fromH, y1 = from.y + (dy0 / dist) * fromH
+                  const x2 = to.x - (dx0 / dist) * toH, y2 = to.y - (dy0 / dist) * toH
+                  const d = linkPath(x1, y1, x2, y2)
                   if (e.kind === 'trunk') {
                     const color = e.to.startsWith('sub:') ? SUBNET_COLOR : SITE_COLOR
                     return (
@@ -944,7 +1075,7 @@ export default function TopologyPage() {
                       <SiteNode key={n.id} node={n} isLight={isLight}
                         selected={selectedNode?.id === n.id}
                         dimmed={!visible}
-                        onClick={focusNode} onHover={handleHover} onLeave={handleLeaveHover} />
+                        onClick={onSiteClick} onHover={handleHover} onLeave={handleLeaveHover} />
                     )
                   }
                   if (n.type === 'subnet') {
@@ -966,7 +1097,7 @@ export default function TopologyPage() {
             </svg>
 
             {/* Hover popover */}
-            <HoverCard hover={hover} isLight={isLight} />
+            <HoverCard hover={hover} />
 
             {/* Zoom controls */}
             <div className="absolute bottom-3 left-3 flex flex-col gap-1.5">
@@ -1017,6 +1148,7 @@ export default function TopologyPage() {
               <SiteDrawer node={nodeById.get(selectedNode.id) || selectedNode} onClose={() => setSelectedNode(null)} isLight={isLight}
                 isolated={isolatedGroup === selectedNode.id}
                 onIsolate={(id) => setIsolatedGroup(id)}
+                onToggleExpand={() => toggleExpand(selectedNode.id.slice(4))}
                 navigate={navigate} />
             )}
             {selectedNode?.type === 'subnet' && (

@@ -3,7 +3,7 @@ import {
   Layers, Plus, Pencil, Trash2, Monitor, Zap, Power,
   RotateCcw, X, Loader2, ChevronDown, ChevronRight,
   Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon, LayoutGrid,
-  TrendingUp, TrendingDown
+  TrendingUp, TrendingDown, Router, Waypoints, ShieldCheck, HelpCircle,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -15,23 +15,42 @@ import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
 import { useHighlightParam } from '../hooks/useHighlightParam'
 
+// Keep in sync with backend/db/migrate-group-device-type.js DEVICE_TYPES
+// and frontend/src/pages/TopologyPage.jsx's GROUP_DEVICE_TYPES — this is
+// the single list an admin picks from when labeling what a site's hub
+// actually is, instead of the topology map assuming every site is a
+// router.
+export const GROUP_DEVICE_TYPE_OPTIONS = [
+  { value: 'router',       label: 'Router',       Icon: Router },
+  { value: 'switch',       label: 'Switch',       Icon: Waypoints },
+  { value: 'firewall',     label: 'Firewall',     Icon: ShieldCheck },
+  { value: 'access_point', label: 'Access Point', Icon: Wifi },
+  { value: 'server',       label: 'Server',       Icon: Server },
+  { value: 'other',        label: 'Other',        Icon: HelpCircle },
+]
+
 // ── Group form modal ──────────────────────────────────────────────────────────
 function GroupFormModal({ open, onClose, onSaved, group }) {
   const [name, setName]       = useState('')
   const [desc, setDesc]       = useState('')
+  const [deviceType, setDeviceType] = useState('router')
   const [loading, setLoading] = useState(false)
   const isLight = useThemeStore(s => s.theme === 'light')
 
   useEffect(() => {
-    if (open) { setName(group?.name || ''); setDesc(group?.description || '') }
+    if (open) {
+      setName(group?.name || '')
+      setDesc(group?.description || '')
+      setDeviceType(group?.device_type || 'router')
+    }
   }, [open, group])
 
   const submit = async () => {
     if (!name.trim()) { toast.error('Name is required'); return }
     setLoading(true)
     try {
-      if (group) await api.put(`/groups/${group.id}`, { name, description: desc })
-      else       await api.post('/groups', { name, description: desc })
+      if (group) await api.put(`/groups/${group.id}`, { name, description: desc, device_type: deviceType })
+      else       await api.post('/groups', { name, description: desc, device_type: deviceType })
       toast.success(group ? 'Group updated' : 'Group created')
       onSaved(); onClose()
     } catch (err) {
@@ -83,6 +102,33 @@ function GroupFormModal({ open, onClose, onSaved, group }) {
               <textarea rows={2} className="input-field resize-none"
                 placeholder="Room number, purpose, or any notes…"
                 value={desc} onChange={e => setDesc(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">
+                Hub device type
+                <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}> — how this site shows up on the topology map</span>
+              </label>
+              <div className="grid grid-cols-3 gap-2 mt-1">
+                {GROUP_DEVICE_TYPE_OPTIONS.map(({ value, label, Icon }) => {
+                  const selected = deviceType === value
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setDeviceType(value)}
+                      className="flex flex-col items-center gap-1 py-2.5 rounded-xl text-xs font-medium transition-all"
+                      style={{
+                        border: `1.5px solid ${selected ? '#a78bfa' : 'var(--border-subtle)'}`,
+                        background: selected ? 'rgba(167,139,250,0.12)' : 'var(--bg-surface-2)',
+                        color: selected ? '#a78bfa' : 'var(--text-secondary)',
+                      }}
+                    >
+                      <Icon size={16} />
+                      {label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           </div>
 

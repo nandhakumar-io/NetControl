@@ -6,6 +6,7 @@ const { query, queryOne, execute } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 const { requireOrgContext } = require('../middleware/tenant');
 const audit = require('../services/audit');
+const { DEVICE_TYPES } = require('../db/migrate-group-device-type');
 
 const router = express.Router();
 router.use(requireAuth, requireOrgContext);
@@ -72,14 +73,15 @@ router.post('/',
   requireManageGroups,
   body('name').trim().notEmpty().isLength({ max: 100 }),
   body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
+  body('device_type').optional().isIn(DEVICE_TYPES),
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
       const id = uuidv4();
-      const { name, description } = req.body;
-      await execute('INSERT INTO `groups` (id, name, description, org_id) VALUES (?, ?, ?, ?)',
-        [id, name, description || null, req.orgId]);
+      const { name, description, device_type } = req.body;
+      await execute('INSERT INTO `groups` (id, name, description, device_type, org_id) VALUES (?, ?, ?, ?, ?)',
+        [id, name, description || null, device_type || 'router', req.orgId]);
       await audit.log({ userId: req.user.id, username: req.user.username,
         action: 'add_group', targetType: 'group', targetId: id,
         targetName: name, ipSource: req.realIp, result: 'success' });
@@ -97,15 +99,16 @@ router.put('/:id',
   param('id').isUUID(),
   body('name').trim().notEmpty().isLength({ max: 100 }),
   body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
+  body('device_type').optional().isIn(DEVICE_TYPES),
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
       if (!await queryOne('SELECT id FROM `groups` WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]))
         return res.status(404).json({ error: 'Group not found' });
-      const { name, description } = req.body;
-      await execute('UPDATE `groups` SET name = ?, description = ? WHERE id = ? AND org_id = ?',
-        [name, description || null, req.params.id, req.orgId]);
+      const { name, description, device_type } = req.body;
+      await execute('UPDATE `groups` SET name = ?, description = ?, device_type = ? WHERE id = ? AND org_id = ?',
+        [name, description || null, device_type || 'router', req.params.id, req.orgId]);
       res.json(await queryOne('SELECT * FROM `groups` WHERE id = ?', [req.params.id]));
     } catch (e) { res.status(500).json({ error: e.message }); }
   }

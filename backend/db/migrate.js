@@ -1002,6 +1002,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  two-factor-grace:', e.message);
     }
+    try {
+      const { migrateGroupDeviceType } = require('./migrate-group-device-type');
+      await migrateGroupDeviceType();
+      console.log('  ✓ groups.device_type (admin-selectable hub icon/label on the topology map)');
+    } catch (e) {
+      console.warn('  ⚠  group-device-type:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node
