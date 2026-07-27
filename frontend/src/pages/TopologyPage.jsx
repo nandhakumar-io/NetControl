@@ -108,51 +108,83 @@ function deviceKind(d) {
   return { Icon: Monitor, label: 'Workstation' }
 }
 
-// ── Radial layout, with collapsible sites ───────────────────────────────
+// ── Non-overlapping "orbital" layout, with collapsible sites ────────────
 // core (org) at the center → one hub per group on an outer ring. A group
 // only fans out its subnets (and each subnet its devices) when its id is
 // present in `expanded` — collapsed sites stay a single compact hub, which
 // is what keeps a 300-device map from turning into a wall of icons.
 //
-// Layout footprints — each tier's on-screen size plus a comfortable
-// margin, used below to work out how much room a *ring* of that many
-// siblings actually needs, instead of assuming a fixed radius fits any
-// count. This is the fix for the "too closely packed" complaint: the
-// previous version capped every fan's radius at a small constant no
-// matter how many nodes it held, so a subnet with 100+ devices had no
-// choice but to overlap them into a solid blob.
-const GROUP_GAP  = 190 // 152px card + margin
-const SUBNET_GAP = 168 // 136px card + margin
-const DEVICE_GAP = 58  // 30px icon + label headroom + margin
-const BAND_STEP  = { subnet: 118, device: 66 } // radial distance between successive bands
+// Every tier below is placed with an explicit minimum-clearance guarantee
+// instead of an approximate chord formula. The old approach only checked
+// how many siblings fit on one arc — fine for a handful of nodes, but a
+// subnet with 100–300 devices (real-world here) still ended up with bands
+// overlapping into a solid blob. The fix:
+//   • Devices ring their subnet in full concentric "shells" — like
+//     electrons around a nucleus, hence the globe look — each shell
+//     filled to its actual chord capacity before opening the next one
+//     further out. Zero pairwise checks needed: it can't overlap by
+//     construction, whether a subnet has 3 devices or 300.
+//   • Subnets ring their site with real pairwise distance checks against
+//     every previously placed subnet's full device-cloud radius, since
+//     subnets vary hugely in size (one might hold 4 devices, the next
+//     200) — a formulaic ring can't safely assume uniform spacing there.
+const GROUP_GAP        = 190 // 152px site card + margin, used for ring spacing
+const DEVICE_R         = 15  // device node radius
+const DEVICE_CHORD     = 50  // min center-to-center spacing on a device shell
+const DEVICE_SHELL_STEP = 56 // radial gap between successive device shells
+const DEVICE_BASE_R    = 62  // first device shell's radius (clears the subnet card)
+const SITE_CLEARANCE   = 92  // distance from a site hub where its subnets start
+const SUBNET_GAP       = 40  // min gap between two subnet clusters' outer edges
 
-// Places `count` children in concentric arc "bands" fanned out from
-// `originAngle`, opening a new band (one step further from the parent)
-// whenever the current band can't fit any more children at the minimum
-// safe spacing. This is what a real NOC map does with a large fan-out —
-// e.g. NetBox and LibreUI-style topology views ring large sets of leaves
-// around their parent in tiers rather than squeezing them into one arc —
-// so density stays readable at 5 devices or 500.
-function placeRadialBand({ count, originAngle, spreadCap, baseR, minGap, ringStep }) {
+// Rings `count` devices in full concentric circles ("shells") around a
+// subnet's local origin. Returns both the placements and the cluster's
+// total footprint radius, which the subnet-packing step below treats as
+// that subnet's "personal space" when placing it among its siblings.
+function orbitDevices(count) {
+  if (count === 0) return { placements: [], footprint: SITE_CLEARANCE * 0.4 }
   const placements = []
-  let placed = 0
-  let band = 0
+  let placed = 0, shell = 0, lastR = DEVICE_BASE_R
   while (placed < count) {
-    const r = baseR + band * ringStep
-    const isSingle = count === 1 && band === 0
-    const angle = isSingle ? 0 : spreadCap
-    // How many siblings fit on this band's arc without crowding, given the
-    // chord distance at this radius — i.e. more room further out.
-    const capacity = isSingle ? 1 : Math.max(1, Math.floor((angle * r) / minGap) + 1)
+    const r = DEVICE_BASE_R + shell * DEVICE_SHELL_STEP
+    lastR = r
+    const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / DEVICE_CHORD))
     const take = Math.min(capacity, count - placed)
+    // Stagger alternating shells by half a step so shells don't line up
+    // into visible spokes — reads as an organic globe, not a dartboard.
+    const offset = (shell % 2) * (Math.PI / take)
     for (let i = 0; i < take; i++) {
-      const a = take <= 1 ? originAngle : originAngle - angle / 2 + (angle * i) / (take - 1)
-      placements.push({ x: r * Math.cos(a), y: r * Math.sin(a), angle: a })
+      const a = offset + (2 * Math.PI * i) / take
+      placements.push({ x: r * Math.cos(a), y: r * Math.sin(a) })
       placed++
     }
-    band++
+    shell++
   }
-  return placements
+  return { placements, footprint: lastR + DEVICE_R + 22 }
+}
+
+// Places `items` (each carrying its own required clearance radius `r`)
+// around a local origin, fanning out from `biasAngle` first and pushing
+// each new item further out — along its own angle — until it actually
+// clears every previously placed item's footprint. This keeps the classic
+// "fan away from the parent" look while making overlap structurally
+// impossible, regardless of how differently-sized the clusters are.
+function packClusters(items, biasAngle) {
+  const placed = []
+  const n = items.length
+  const spreadCap = Math.min(Math.PI * 1.7, 0.7 + n * 0.16)
+  items.forEach((item, idx) => {
+    const angle = n <= 1 ? biasAngle
+      : biasAngle - spreadCap / 2 + (spreadCap * idx) / (n - 1)
+    let r = SITE_CLEARANCE + item.r + 40
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const x = r * Math.cos(angle), y = r * Math.sin(angle)
+      const clear = placed.every(p => Math.hypot(x - p.x, y - p.y) >= item.r + p.r + SUBNET_GAP)
+      if (clear) { placed.push({ ...item, x, y }); return }
+      r += 24
+    }
+    placed.push({ ...item, x: r * Math.cos(angle), y: r * Math.sin(angle) })
+  })
+  return placed
 }
 
 function computeLayout(devices, groups, expanded) {
@@ -169,28 +201,17 @@ function computeLayout(devices, groups, expanded) {
   }
 
   const n = Math.max(groupMeta.length, 1)
-  // Full ring around the core: radius derived from how much circumference
-  // n cards actually need, not a constant that only happens to work for a
-  // handful of sites.
-  const ringR = Math.max(240, (n * GROUP_GAP) / (2 * Math.PI))
 
-  const nodes = [{ id: 'core', type: 'core', x: 0, y: 0, label: 'Core' }]
-  const edges = []
-
-  groupMeta.forEach((g, i) => {
-    const angle = (2 * Math.PI * i) / n - Math.PI / 2
-    const gx = ringR * Math.cos(angle)
-    const gy = ringR * Math.sin(angle)
+  // Pass 1 — build each expanded site's subnet/device cluster in *local*
+  // coordinates (relative to that site's own hub, fanned along the local
+  // +x axis) and measure its total footprint. This has to happen before
+  // we know the site's final angle on the ring, so the fan is rotated
+  // into the site's real "away from the core" direction afterward — pure
+  // rotation, so the clearance math done here stays valid either way.
+  const siteClusters = new Map()
+  groupMeta.forEach(g => {
     const devs = byGroup.get(g.id) || []
-    const isExpanded = expanded.has(g.id)
-    nodes.push({
-      id: `grp:${g.id}`, type: 'group', x: gx, y: gy, angle,
-      label: g.name, expanded: isExpanded, deviceType: g.deviceType,
-    })
-    edges.push({ id: `e-core-${g.id}`, from: 'core', to: `grp:${g.id}`, kind: 'trunk' })
-
-    if (!isExpanded || devs.length === 0) return
-
+    if (!expanded.has(g.id) || devs.length === 0) return
     const bySubnet = new Map()
     devs.forEach(d => {
       const key = cidr24(d.ip_address) || 'Unassigned'
@@ -200,37 +221,59 @@ function computeLayout(devices, groups, expanded) {
     const subnetKeys = [...bySubnet.keys()].sort((a, b) =>
       a === 'Unassigned' ? 1 : b === 'Unassigned' ? -1 : a.localeCompare(b))
 
-    // Subnets fan outward from the site, away from the core, rather than
-    // wrapping a full circle (a site's children belong "beyond" it on the
-    // map, not looping back toward the org center).
-    const subnetSpots = placeRadialBand({
-      count: subnetKeys.length, originAngle: angle,
-      spreadCap: Math.min(Math.PI * 1.6, 0.7 + subnetKeys.length * 0.12),
-      baseR: 130, minGap: SUBNET_GAP, ringStep: BAND_STEP.subnet,
-    })
-
-    subnetKeys.forEach((key, si) => {
-      const spot = subnetSpots[si]
-      const sx = gx + spot.x, sy = gy + spot.y
+    const subnetItems = subnetKeys.map(key => {
       const sdevs = bySubnet.get(key)
-      const subnetId = `sub:${g.id}:${key}`
+      const { placements, footprint } = orbitDevices(sdevs.length)
+      return { key, sdevs, placements, r: footprint }
+    })
+    const packed = packClusters(subnetItems, 0)
+    const footprint = packed.reduce((m, p) => Math.max(m, Math.hypot(p.x, p.y) + p.r), SITE_CLEARANCE)
+    siteClusters.set(g.id, { packed, footprint })
+  })
+
+  // A site's own subnet cloud can dwarf the site card itself (a 200+
+  // device subnet reaches hundreds of px out) — grow the site ring so a
+  // big expanded site's cloud can't reach into its neighbor's hub.
+  const maxFootprint = [...siteClusters.values()].reduce((m, c) => Math.max(m, c.footprint), 0)
+  const ringR = Math.max(240, (n * GROUP_GAP) / (2 * Math.PI), maxFootprint ? maxFootprint + GROUP_GAP * 0.7 : 0)
+
+  const nodes = [{ id: 'core', type: 'core', x: 0, y: 0, label: 'Core' }]
+  const edges = []
+
+  groupMeta.forEach((g, i) => {
+    const angle = (2 * Math.PI * i) / n - Math.PI / 2
+    const gx = ringR * Math.cos(angle)
+    const gy = ringR * Math.sin(angle)
+    const isExpanded = expanded.has(g.id)
+    nodes.push({
+      id: `grp:${g.id}`, type: 'group', x: gx, y: gy, angle,
+      label: g.name, expanded: isExpanded, deviceType: g.deviceType,
+    })
+    edges.push({ id: `e-core-${g.id}`, from: 'core', to: `grp:${g.id}`, kind: 'trunk' })
+
+    const cluster = siteClusters.get(g.id)
+    if (!cluster) return
+
+    // Rotate the pass-1 cluster (fanned along local +x) into the site's
+    // actual outward direction. Device shells are full 360° rings, so
+    // they're rotationally symmetric already — no extra rotation needed
+    // for them, only for each subnet's own offset from the site hub.
+    const cosA = Math.cos(angle), sinA = Math.sin(angle)
+    cluster.packed.forEach(sub => {
+      const sx = gx + (sub.x * cosA - sub.y * sinA)
+      const sy = gy + (sub.x * sinA + sub.y * cosA)
+      const subnetId = `sub:${g.id}:${sub.key}`
       nodes.push({
         id: subnetId, type: 'subnet', x: sx, y: sy,
-        label: key, groupId: g.id, siteLabel: g.name,
+        label: sub.key, groupId: g.id, siteLabel: g.name,
       })
       edges.push({ id: `e-grp-${subnetId}`, from: `grp:${g.id}`, to: subnetId, kind: 'trunk' })
 
-      const deviceSpots = placeRadialBand({
-        count: sdevs.length, originAngle: spot.angle,
-        spreadCap: Math.min(Math.PI * 1.7, 0.6 + sdevs.length * 0.1),
-        baseR: 72, minGap: DEVICE_GAP, ringStep: BAND_STEP.device,
-      })
-      sdevs.forEach((d, di) => {
-        const dSpot = deviceSpots[di]
-        const dx = sx + dSpot.x, dy = sy + dSpot.y
+      sub.sdevs.forEach((d, di) => {
+        const dp = sub.placements[di]
         nodes.push({
-          id: `dev:${d.id}`, type: 'device', x: dx, y: dy,
-          device: d, groupId: g.id, subnetKey: key,
+          id: `dev:${d.id}`, type: 'device', x: sx + dp.x, y: sy + dp.y,
+          device: d, groupId: g.id, subnetKey: sub.key,
         })
         edges.push({
           id: `e-${subnetId}-${d.id}`, from: subnetId, to: `dev:${d.id}`,
@@ -242,6 +285,7 @@ function computeLayout(devices, groups, expanded) {
 
   return { nodes, edges }
 }
+
 
 function nodeHalfSize(type) {
   if (type === 'core') return 37
@@ -827,9 +871,43 @@ export default function TopologyPage() {
   const expandAll = () => setExpandedGroups(new Set(allGroupIds))
   const collapseAll = () => setExpandedGroups(new Set())
 
+  // ── Pan bounds ───────────────────────────────────────────────────────────
+  // Content bounds in local layout units — this is what stops the map from
+  // being dragged arbitrarily far off into empty space with nothing but the
+  // recenter button to find your way back.
+  const bounds = useMemo(() => {
+    const xs = nodesWithCounts.map(n => n.x), ys = nodesWithCounts.map(n => n.y)
+    const pad = 70
+    return {
+      minX: Math.min(...xs) - pad, maxX: Math.max(...xs) + pad,
+      minY: Math.min(...ys) - pad, maxY: Math.max(...ys) + pad,
+    }
+  }, [nodesWithCounts])
+
+  // Keeps a soft margin of real content on-screen at all times. Panning
+  // still feels free — there's genuine travel before you hit an edge — it
+  // just can't be dragged out into open space with no way back except the
+  // recenter button. Falls back to centering when the whole map already
+  // fits inside the viewport (so it doesn't fight a zoomed-out view).
+  const clampView = useCallback((v) => {
+    const margin = 220
+    const minX = VIEW_W - bounds.maxX * v.scale - margin
+    const maxX = -bounds.minX * v.scale + margin
+    const minY = VIEW_H - bounds.maxY * v.scale - margin
+    const maxY = -bounds.minY * v.scale + margin
+    return {
+      scale: v.scale,
+      x: minX <= maxX ? Math.min(maxX, Math.max(minX, v.x)) : (minX + maxX) / 2,
+      y: minY <= maxY ? Math.min(maxY, Math.max(minY, v.y)) : (minY + maxY) / 2,
+    }
+  }, [bounds])
+  const setViewClamped = useCallback((updater) => {
+    setView(v => clampView(typeof updater === 'function' ? updater(v) : updater))
+  }, [clampView])
+
   // ── Pan / zoom handlers ────────────────────────────────────────────────
   const zoomBy = (factor, cx = VIEW_W / 2, cy = VIEW_H / 2) => {
-    setView(v => {
+    setViewClamped(v => {
       const nextScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * factor))
       const k = nextScale / v.scale
       return { scale: nextScale, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k }
@@ -852,7 +930,7 @@ export default function TopologyPage() {
       zoomBy(e.deltaY < 0 ? 1.12 : 0.89, cx, cy)
     } else {
       const scaleX = VIEW_W / rect.width, scaleY = VIEW_H / rect.height
-      setView(v => ({ ...v, x: v.x - e.deltaX * scaleX, y: v.y - e.deltaY * scaleY }))
+      setViewClamped(v => ({ ...v, x: v.x - e.deltaX * scaleX, y: v.y - e.deltaY * scaleY }))
     }
   }
   const onMouseDown = (e) => {
@@ -863,7 +941,7 @@ export default function TopologyPage() {
     const rect = containerRef.current.getBoundingClientRect()
     const dx = ((e.clientX - dragRef.current.startX) / rect.width) * VIEW_W
     const dy = ((e.clientY - dragRef.current.startY) / rect.height) * VIEW_H
-    setView(v => ({ ...v, x: dragRef.current.origX + dx, y: dragRef.current.origY + dy }))
+    setViewClamped(v => ({ ...v, x: dragRef.current.origX + dx, y: dragRef.current.origY + dy }))
   }
   const endDrag = () => { dragRef.current = null }
 
@@ -900,7 +978,7 @@ export default function TopologyPage() {
       const t = e.touches[0]
       const dx = (t.clientX - touchRef.current.startX) * scaleX
       const dy = (t.clientY - touchRef.current.startY) * scaleY
-      setView(v => ({ ...v, x: touchRef.current.origX + dx, y: touchRef.current.origY + dy }))
+      setViewClamped(v => ({ ...v, x: touchRef.current.origX + dx, y: touchRef.current.origY + dy }))
     } else if (touchRef.current.mode === 'pinch' && e.touches.length === 2) {
       const [t0, t1] = e.touches
       const dist = touchDist(t0, t1)
@@ -913,7 +991,7 @@ export default function TopologyPage() {
       // also let the two-finger midpoint drift (so pinch + shift pans too)
       const dmx = (mid.x - touchRef.current.startMid.x) * scaleX
       const dmy = (mid.y - touchRef.current.startMid.y) * scaleY
-      setView({
+      setViewClamped({
         scale: nextScale,
         x: cx - (cx - touchRef.current.origX) * k + dmx,
         y: cy - (cy - touchRef.current.origY) * k + dmy,
@@ -947,7 +1025,7 @@ export default function TopologyPage() {
   const focusNode = (node) => {
     setSelectedNode(node)
     setHover(null)
-    setView(v => ({
+    setViewClamped(v => ({
       scale: v.scale,
       x: VIEW_W / 2 - node.x * v.scale,
       y: VIEW_H / 2 - node.y * v.scale,
@@ -974,14 +1052,6 @@ export default function TopologyPage() {
 
   // ── Minimap geometry ─────────────────────────────────────────────────────
   const mapW = 150, mapH = 96
-  const bounds = useMemo(() => {
-    const xs = nodesWithCounts.map(n => n.x), ys = nodesWithCounts.map(n => n.y)
-    const pad = 70
-    return {
-      minX: Math.min(...xs) - pad, maxX: Math.max(...xs) + pad,
-      minY: Math.min(...ys) - pad, maxY: Math.max(...ys) + pad,
-    }
-  }, [nodesWithCounts])
   const bw = Math.max(1, bounds.maxX - bounds.minX)
   const bh = Math.max(1, bounds.maxY - bounds.minY)
   const mScale = Math.min(mapW / bw, mapH / bh)
