@@ -21,7 +21,7 @@ import {
   Download, X, TerminalSquare, Activity, HardDrive, Layers, Filter,
   LocateFixed, Wifi, WifiOff, Ban, Router, Waypoints, ShieldCheck,
   Printer, Camera, Database, Monitor, Server, ChevronRight, ChevronDown,
-  Maximize, Minimize, HelpCircle,
+  Maximize, Minimize, HelpCircle, AlertTriangle, Link2,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -321,9 +321,50 @@ function LegendRole({ Icon, color, label }) {
   )
 }
 
+// Small triage list of everything that isn't online — the whole point is
+// to answer "what needs attention" without scanning a few hundred dots
+// for the handful of gray/red/amber ones. Clicking a row jumps the map
+// straight to that device (expanding its site first if it's collapsed).
+function AlertsPanel({ devices, open, onToggle, onJump, isLight }) {
+  const errorCount = devices.filter(d => d.status === 'error').length
+  const offlineCount = devices.filter(d => d.status === 'offline').length
+  const otherCount = devices.length - errorCount - offlineCount
+  return (
+    <div className="rounded-xl glass-sm overflow-hidden" style={{ width: 240 }}>
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left"
+        style={{ color: 'var(--text-secondary)' }}
+      >
+        <AlertTriangle size={13} color={STATUS_COLOR.error} />
+        <span className="text-xs font-body font-semibold flex-1">
+          {devices.length} need{devices.length === 1 ? 's' : ''} attention
+        </span>
+        <ChevronDown size={13} style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
+      </button>
+      {open && (
+        <div className="max-h-[220px] overflow-y-auto" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+          {devices.map(d => (
+            <button
+              key={d.id}
+              onClick={() => onJump(d)}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/5"
+              style={{ fontSize: 11 }}
+            >
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor(d.status) }} />
+              <span className="flex-1 min-w-0 truncate font-body" style={{ color: 'var(--text-primary)' }}>{d.name}</span>
+              <span className="shrink-0 font-body" style={{ color: 'var(--text-faint)' }}>{timeAgo(d.last_seen)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Node components ──────────────────────────────────────────────────────
 
-function DeviceNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight }) {
+function DeviceNode({ node, selected, dimmed, pulsing, onClick, onHover, onLeave, isLight }) {
   const { device } = node
   const { Icon } = deviceKind(device)
   const color = statusColor(device.status)
@@ -342,6 +383,15 @@ function DeviceNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight
         <circle r={r} fill={color} opacity="0.18">
           <animate attributeName="r" values={`${r};${r + 8};${r}`} dur="2.6s" repeatCount="indefinite" />
           <animate attributeName="opacity" values="0.18;0;0.18" dur="2.6s" repeatCount="indefinite" />
+        </circle>
+      )}
+      {/* Status-transition flash — a brief expanding ring the moment this
+          device's status changes on a background refresh, so a device
+          going offline is noticeable without staring at the map. */}
+      {pulsing && (
+        <circle r={r} fill="none" stroke={color} strokeWidth="3" opacity="0.9">
+          <animate attributeName="r" values={`${r};${r + 16}`} dur="1.3s" repeatCount="2" />
+          <animate attributeName="opacity" values="0.9;0" dur="1.3s" repeatCount="2" />
         </circle>
       )}
       <circle r={r} fill={isLight ? '#ffffff' : 'rgba(20,20,36,0.95)'} stroke={color} strokeWidth="2.5" />
@@ -737,15 +787,36 @@ export default function TopologyPage() {
   const [groups, setGroups]     = useState([])
   const [loading, setLoading]   = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [search, setSearch]     = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [isolatedGroup, setIsolatedGroup] = useState(null)
+  // Read a previously-shared view out of the URL once on load (see
+  // shareView() below) so a link can drop a teammate straight into "this
+  // site, zoomed in, offline devices only" instead of a blank map.
+  const urlInit = useMemo(() => {
+    try {
+      const p = new URLSearchParams(window.location.search)
+      return {
+        search: p.get('q') || '',
+        status: p.get('status') || 'all',
+        iso: p.get('iso') || null,
+        exp: p.get('exp') ? new Set(p.get('exp').split(',').filter(Boolean)) : new Set(),
+        scale: p.has('scale') ? parseFloat(p.get('scale')) : null,
+        x: p.has('x') ? parseFloat(p.get('x')) : null,
+        y: p.has('y') ? parseFloat(p.get('y')) : null,
+      }
+    } catch { return null }
+  }, [])
+  const [search, setSearch]     = useState(urlInit?.search || '')
+  const [statusFilter, setStatusFilter] = useState(urlInit?.status || 'all')
+  const [isolatedGroup, setIsolatedGroup] = useState(urlInit?.iso || null)
   const [selectedNode, setSelectedNode] = useState(null)
   const [hover, setHover] = useState(null)
   const [fullscreen, setFullscreen] = useState(false)
   // Sites start collapsed — this is the whole fix for "too much on screen
   // at once": nothing fans out until the person asks for it.
-  const [expandedGroups, setExpandedGroups] = useState(() => new Set())
+  const [expandedGroups, setExpandedGroups] = useState(() => urlInit?.exp || new Set())
+  const [pendingFocusId, setPendingFocusId] = useState(null)
+  const [alertsOpen, setAlertsOpen] = useState(false)
+  const [pulsingIds, setPulsingIds] = useState(() => new Set())
+  const prevStatusRef = useRef(new Map())
   const containerRef = useRef(null)
   const searchInputRef = useRef(null)
 
@@ -768,14 +839,33 @@ export default function TopologyPage() {
   }, [selectedNode, fullscreen])
 
   // pan/zoom transform
-  const [view, setView] = useState({ scale: 1, x: VIEW_W / 2, y: VIEW_H / 2 })
+  const [view, setView] = useState({
+    scale: urlInit?.scale ?? 1,
+    x: urlInit?.x ?? VIEW_W / 2,
+    y: urlInit?.y ?? VIEW_H / 2,
+  })
   const dragRef = useRef(null)
 
   const load = useCallback(async (silent) => {
     if (!silent) setLoading(true); else setRefreshing(true)
     try {
       const [dRes, gRes] = await Promise.all([api.get('/devices'), api.get('/groups')])
-      setDevices(dRes.data || [])
+      const nextDevices = dRes.data || []
+      // Flag any device whose status just changed since the last poll —
+      // DeviceNode renders a brief flash ring for these so a device going
+      // offline is noticeable without staring at the map. Skipped on the
+      // very first load (nothing to compare against yet).
+      if (prevStatusRef.current.size > 0) {
+        const changed = nextDevices
+          .filter(d => prevStatusRef.current.has(d.id) && prevStatusRef.current.get(d.id) !== d.status)
+          .map(d => d.id)
+        if (changed.length) {
+          setPulsingIds(new Set(changed))
+          setTimeout(() => setPulsingIds(new Set()), 2600)
+        }
+      }
+      prevStatusRef.current = new Map(nextDevices.map(d => [d.id, d.status]))
+      setDevices(nextDevices)
       setGroups(gRes.data || [])
     } catch (e) {
       toast.error('Failed to load topology data')
@@ -873,6 +963,15 @@ export default function TopologyPage() {
     nodesWithCounts.forEach(n => m.set(n.id, n))
     return m
   }, [nodesWithCounts])
+
+  // When a device is selected, trace its route back to the core (device →
+  // subnet → site → org) so the render pass can dim everything else —
+  // makes "how does this thing actually connect" a glance instead of a
+  // manual trace across the map.
+  const highlightPath = useMemo(() => {
+    if (selectedNode?.type !== 'device') return null
+    return new Set(['core', `grp:${selectedNode.groupId}`, `sub:${selectedNode.groupId}:${selectedNode.subnetKey}`, selectedNode.id])
+  }, [selectedNode])
 
   const stats = useMemo(() => {
     const total = devices.length
@@ -1059,6 +1158,32 @@ export default function TopologyPage() {
     focusNode(node)
   }
 
+  // Everything that isn't cleanly online, worst-first — feeds the Alerts
+  // panel so triage is a glance-and-click instead of a visual hunt.
+  const problemDevices = useMemo(() => {
+    const rank = { error: 0, offline: 1, needs_approval: 2, unknown: 2 }
+    return devices
+      .filter(d => (d.status || 'unknown') !== 'online')
+      .sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3))
+  }, [devices])
+
+  // Jumping to a device from the Alerts panel (or anywhere off-canvas) has
+  // to expand its site first if collapsed — the device has no coordinates
+  // in the tree until then — so the actual focus happens a tick later,
+  // once nodeById has the freshly-expanded node.
+  const jumpToDevice = useCallback((d) => {
+    const gid = d.group_id || '__ungrouped'
+    setExpandedGroups(prev => (prev.has(gid) ? prev : new Set(prev).add(gid)))
+    setPendingFocusId(`dev:${d.id}`)
+    setAlertsOpen(false)
+  }, [])
+
+  useEffect(() => {
+    if (!pendingFocusId) return
+    const n = nodeById.get(pendingFocusId)
+    if (n) { focusNode(n); setPendingFocusId(null) }
+  }, [pendingFocusId, nodeById])
+
   // Typing a search term jumps the map to the first matching device
   // instead of leaving the person to hunt for a highlighted dot across a
   // few hundred nodes — the auto-expand alone only got a matching site
@@ -1069,6 +1194,25 @@ export default function TopologyPage() {
     if (match) focusNode(match)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search])
+
+  // Bundles the current pan/zoom, expanded sites, isolation, filter and
+  // search into a link a teammate can open to land in exactly this view —
+  // "this site, zoomed in, offline only" — instead of a blank map.
+  const shareView = async () => {
+    const p = new URLSearchParams()
+    if (search) p.set('q', search)
+    if (statusFilter !== 'all') p.set('status', statusFilter)
+    if (isolatedGroup) p.set('iso', isolatedGroup)
+    if (expandedGroups.size) p.set('exp', [...expandedGroups].join(','))
+    p.set('scale', view.scale.toFixed(3)); p.set('x', view.x.toFixed(1)); p.set('y', view.y.toFixed(1))
+    const url = `${window.location.origin}${window.location.pathname}?${p.toString()}`
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.success('Link copied — opens to this exact view')
+    } catch {
+      toast.error('Could not copy link')
+    }
+  }
 
   const exportSvg = () => {
     const svgEl = containerRef.current?.querySelector('svg')
@@ -1123,6 +1267,9 @@ export default function TopologyPage() {
             <button className="btn-ghost" onClick={() => load(true)} disabled={refreshing}>
               {refreshing ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
               Refresh
+            </button>
+            <button className="btn-ghost" onClick={shareView}>
+              <Link2 size={15} /> Share view
             </button>
             <button className="btn-ghost" onClick={exportSvg}>
               <Download size={15} /> Export SVG
@@ -1237,6 +1384,7 @@ export default function TopologyPage() {
                   const from = nodeById.get(e.from), to = nodeById.get(e.to)
                   if (!from || !to) return null
                   const visible = matchesFilters(from) && matchesFilters(to)
+                  const onPath = highlightPath && highlightPath.has(e.from) && highlightPath.has(e.to)
                   const fromH = nodeHalfSize(from.type), toH = nodeHalfSize(to.type)
                   // aim the edge from the near edge of each card toward the other, not center-to-center
                   const dx0 = to.x - from.x, dy0 = to.y - from.y
@@ -1246,18 +1394,20 @@ export default function TopologyPage() {
                   const d = linkPath(x1, y1, x2, y2)
                   if (e.kind === 'trunk') {
                     const color = e.to.startsWith('sub:') ? SUBNET_COLOR : SITE_COLOR
+                    const opacity = highlightPath ? (onPath ? 0.95 : 0.06) : (visible ? 0.55 : 0.08)
                     return (
-                      <path key={e.id} d={d} fill="none" stroke={color} strokeWidth="2"
-                        strokeDasharray="7 5" opacity={visible ? 0.55 : 0.08}>
+                      <path key={e.id} d={d} fill="none" stroke={color} strokeWidth={onPath ? 3 : 2}
+                        strokeDasharray="7 5" opacity={opacity}>
                         <animate attributeName="stroke-dashoffset" values="24;0" dur="1.4s" repeatCount="indefinite" />
                       </path>
                     )
                   }
                   const color = statusColor(e.status)
+                  const opacity = highlightPath ? (onPath ? 0.95 : 0.06) : (visible ? 0.55 : 0.08)
                   return (
-                    <path key={e.id} d={d} fill="none" stroke={color} strokeWidth="1.5"
+                    <path key={e.id} d={d} fill="none" stroke={color} strokeWidth={onPath ? 2.5 : 1.5}
                       strokeDasharray={e.status === 'online' ? '4 3' : 'none'}
-                      opacity={visible ? 0.55 : 0.08} />
+                      opacity={opacity} />
                   )
                 })}
                 {/* nodes */}
@@ -1266,7 +1416,7 @@ export default function TopologyPage() {
                     return <CoreNode key={n.id} node={n} orgName={orgName} isLight={isLight}
                       onHover={handleHover} onLeave={handleLeaveHover} stats={stats} />
                   }
-                  const visible = matchesFilters(n)
+                  const visible = matchesFilters(n) && (!highlightPath || highlightPath.has(n.id))
                   if (n.type === 'group') {
                     return (
                       <SiteNode key={n.id} node={n} isLight={isLight}
@@ -1287,6 +1437,7 @@ export default function TopologyPage() {
                     <DeviceNode key={n.id} node={n} isLight={isLight}
                       selected={selectedNode?.id === n.id}
                       dimmed={!visible}
+                      pulsing={pulsingIds.has(n.device.id)}
                       onClick={focusNode} onHover={handleHover} onLeave={handleLeaveHover} />
                   )
                 })}
@@ -1313,12 +1464,23 @@ export default function TopologyPage() {
               Scroll or drag to pan · Ctrl/⌘ + scroll to zoom · / to search · Esc to close
             </div>
 
-            {/* Status legend */}
-            <div className="absolute top-3 left-3 rounded-xl px-3 py-2 flex items-center gap-3 glass-sm flex-wrap max-w-[55%]">
-              <LegendDot color={STATUS_COLOR.online} label="Online" />
-              <LegendDot color={STATUS_COLOR.offline} label="Offline" />
-              <LegendDot color={STATUS_COLOR.unknown} label="Unknown" />
-              <LegendDot color={STATUS_COLOR.error} label="Error" />
+            {/* Status legend + Alerts panel */}
+            <div className="absolute top-3 left-3 flex flex-col items-start gap-2 max-w-[70%]">
+              <div className="rounded-xl px-3 py-2 flex items-center gap-3 glass-sm flex-wrap">
+                <LegendDot color={STATUS_COLOR.online} label="Online" />
+                <LegendDot color={STATUS_COLOR.offline} label="Offline" />
+                <LegendDot color={STATUS_COLOR.unknown} label="Unknown" />
+                <LegendDot color={STATUS_COLOR.error} label="Error" />
+              </div>
+              {problemDevices.length > 0 && (
+                <AlertsPanel
+                  devices={problemDevices}
+                  open={alertsOpen}
+                  onToggle={() => setAlertsOpen(o => !o)}
+                  onJump={jumpToDevice}
+                  isLight={isLight}
+                />
+              )}
             </div>
 
             {/* Network tier legend */}
