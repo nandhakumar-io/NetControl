@@ -348,6 +348,7 @@ function DeviceNode({ node, selected, dimmed, onClick, onHover, onLeave, isLight
       <foreignObject x={-8} y={-8} width={16} height={16} style={{ pointerEvents: 'none' }}>
         <Icon size={16} color={color} />
       </foreignObject>
+      <title>{device.name}</title>
       <text y={r + 14} textAnchor="middle" fontSize="10.5" fontFamily="DM Sans, sans-serif"
         fill="var(--text-secondary)" style={{ pointerEvents: 'none' }}>
         {device.name.length > 15 ? device.name.slice(0, 14) + '…' : device.name}
@@ -378,6 +379,7 @@ function TierCard({ node, w, h, color, roleLabel, Icon, title, subtitle, badge, 
       )}
       <foreignObject x={-w / 2} y={-h / 2} width={w} height={h} style={{ overflow: 'visible' }}>
         <div
+          title={subtitle ? `${title} — ${subtitle}` : title}
           style={{
             width: w, height: h, borderRadius: 14,
             background: isLight ? '#ffffff' : 'rgba(22,22,40,0.92)',
@@ -745,6 +747,25 @@ export default function TopologyPage() {
   // at once": nothing fans out until the person asks for it.
   const [expandedGroups, setExpandedGroups] = useState(() => new Set())
   const containerRef = useRef(null)
+  const searchInputRef = useRef(null)
+
+  // Keyboard shortcuts — Esc backs out (closes a drawer, then exits
+  // fullscreen), and "/" jumps into search without reaching for the mouse.
+  // Skipped while typing anywhere else so it doesn't hijack other inputs.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)
+      if (e.key === 'Escape') {
+        if (selectedNode) setSelectedNode(null)
+        else if (fullscreen) setFullscreen(false)
+      } else if (e.key === '/' && !typing) {
+        e.preventDefault()
+        searchInputRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedNode, fullscreen])
 
   // pan/zoom transform
   const [view, setView] = useState({ scale: 1, x: VIEW_W / 2, y: VIEW_H / 2 })
@@ -1038,6 +1059,17 @@ export default function TopologyPage() {
     focusNode(node)
   }
 
+  // Typing a search term jumps the map to the first matching device
+  // instead of leaving the person to hunt for a highlighted dot across a
+  // few hundred nodes — the auto-expand alone only got a matching site
+  // open, it never actually brought the match into view.
+  useEffect(() => {
+    if (!search.trim()) return
+    const match = nodesWithCounts.find(n => n.type === 'device' && deviceMatches(n.device))
+    if (match) focusNode(match)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search])
+
   const exportSvg = () => {
     const svgEl = containerRef.current?.querySelector('svg')
     if (!svgEl) return
@@ -1116,11 +1148,16 @@ export default function TopologyPage() {
         <div className="relative flex-1 min-w-0">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
           <input
+            ref={searchInputRef}
             className="input-field pl-9"
             placeholder="Search device, IP, or site… (auto-expands matching sites)"
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
+          {!search && (
+            <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] px-1.5 py-0.5 rounded font-body"
+              style={{ background: 'var(--bg-surface-3)', color: 'var(--text-faint)' }}>/</kbd>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {['all', 'online', 'offline', 'unknown'].map(v => (
@@ -1146,11 +1183,18 @@ export default function TopologyPage() {
         </div>
       </div>
 
-      {/* Canvas */}
+      {/* Canvas — fills whatever vertical space is left in the viewport
+          instead of a fixed 640px box, so large screens don't end up with
+          a stretch of dead space under the map (min-height keeps it usable
+          on short viewports). */}
       <div
         ref={containerRef}
         className="card relative p-0 overflow-hidden select-none"
-        style={{ height: fullscreen ? 'calc(100vh - 260px)' : '640px', touchAction: 'none' }}
+        style={{
+          height: fullscreen ? 'calc(100vh - 260px)' : 'calc(100vh - 330px)',
+          minHeight: 520,
+          touchAction: 'none',
+        }}
         onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
@@ -1262,6 +1306,13 @@ export default function TopologyPage() {
                 style={{ color: 'var(--text-secondary)' }}><LocateFixed size={15} /></button>
             </div>
 
+            {/* Pan/zoom hint — the canvas already pans on scroll/drag and
+                zooms on ctrl+scroll, but nothing on screen said so. */}
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-lg px-2.5 py-1 text-[10px] font-body glass-sm"
+              style={{ color: 'var(--text-muted)' }}>
+              Scroll or drag to pan · Ctrl/⌘ + scroll to zoom · / to search · Esc to close
+            </div>
+
             {/* Status legend */}
             <div className="absolute top-3 left-3 rounded-xl px-3 py-2 flex items-center gap-3 glass-sm flex-wrap max-w-[55%]">
               <LegendDot color={STATUS_COLOR.online} label="Online" />
@@ -1277,10 +1328,18 @@ export default function TopologyPage() {
               <LegendRole Icon={Waypoints} color={SUBNET_COLOR} label="Subnet" />
             </div>
 
-            {/* Minimap */}
+            {/* Minimap — click anywhere on it to jump the main view there,
+                the way real NOC dashboards let you navigate a big topology
+                without hunting through it node by node. */}
             <div className="absolute bottom-3 right-3 rounded-xl overflow-hidden glass-sm"
               style={{ width: mapW, height: mapH }}>
-              <svg width={mapW} height={mapH}>
+              <svg width={mapW} height={mapH} style={{ cursor: 'pointer' }}
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  const mx = e.clientX - rect.left, my = e.clientY - rect.top
+                  const worldX = mx / mScale + bounds.minX, worldY = my / mScale + bounds.minY
+                  setViewClamped(v => ({ scale: v.scale, x: VIEW_W / 2 - worldX * v.scale, y: VIEW_H / 2 - worldY * v.scale }))
+                }}>
                 {nodesWithCounts.map(n => {
                   const [mx, my] = toMap(n.x, n.y)
                   const r = n.type === 'core' ? 3.5 : n.type === 'group' ? 2.8 : n.type === 'subnet' ? 2.2 : 1.3
