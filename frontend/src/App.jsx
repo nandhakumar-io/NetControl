@@ -34,6 +34,7 @@ import BulkCommandPage from './pages/BulkCommandPage'
 import BulkCommandSchedulesPage from './pages/BulkCommandSchedulesPage'
 import OpsCalendarPage from './pages/OpsCalendarPage'
 import AgentReleasePage from './pages/AgentReleasePage'
+import TopologyPage    from './pages/TopologyPage'
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,7 @@ export default function App() {
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard"     element={<DashboardPage />} />
           <Route path="devices"       element={<RequirePermission bit={1}><DevicesPage /></RequirePermission>} />
+          <Route path="topology"      element={<RequirePermission bit={1}><TopologyPage /></RequirePermission>} />
           <Route path="groups"        element={<RequirePermission bit={8}><GroupsPage /></RequirePermission>} />
           <Route path="remote-access" element={<RequirePermission bit={1}><RemoteAccessPage /></RequirePermission>} />
           <Route path="file-push"     element={<RequirePermission bit={1}><FilePushPage /></RequirePermission>} />

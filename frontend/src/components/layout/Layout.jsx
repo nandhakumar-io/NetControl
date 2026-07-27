@@ -7,7 +7,7 @@ import {
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
   PackageCheck, CalendarClock, CalendarDays, BellRing, ChevronDown,
-  HardDrive, Gauge, Workflow, ClipboardCheck, Settings2,
+  HardDrive, Gauge, Workflow, ClipboardCheck, Settings2, Network,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -417,6 +417,7 @@ export default function Layout() {
       label: 'Devices',
       items: [
         { to: '/devices',       icon: Monitor,   label: 'Devices',       show: can(1) },
+        { to: '/topology',      icon: Network,   label: 'Topology',      show: can(1) },
         { to: '/groups',        icon: Layers,    label: 'Labs & Groups', show: can(8) },
         { to: '/remote-access', icon: Share2,    label: 'Remote Access', show: can(1) },
         { to: '/file-push',     icon: FolderOpen,label: 'File Push',     show: can(1) },
