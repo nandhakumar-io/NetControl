@@ -837,12 +837,23 @@ export default function TopologyPage() {
   }
   const resetView = () => setView({ scale: 1, x: VIEW_W / 2, y: VIEW_H / 2 })
 
+  // A trackpad reports a pinch-zoom gesture as a wheel event with
+  // ctrlKey/metaKey set to true (this is a real, if odd, browser
+  // convention) — a plain two-finger scroll/swipe fires the same wheel
+  // event but WITHOUT that flag. Previously every wheel event was treated
+  // as zoom, so a normal two-finger swipe forward/back got misread as
+  // "zoom in/out" instead of panning. Now: pinch → zoom, swipe → pan.
   const onWheel = (e) => {
     e.preventDefault()
     const rect = e.currentTarget.getBoundingClientRect()
-    const cx = ((e.clientX - rect.left) / rect.width) * VIEW_W
-    const cy = ((e.clientY - rect.top) / rect.height) * VIEW_H
-    zoomBy(e.deltaY < 0 ? 1.12 : 0.89, cx, cy)
+    if (e.ctrlKey || e.metaKey) {
+      const cx = ((e.clientX - rect.left) / rect.width) * VIEW_W
+      const cy = ((e.clientY - rect.top) / rect.height) * VIEW_H
+      zoomBy(e.deltaY < 0 ? 1.12 : 0.89, cx, cy)
+    } else {
+      const scaleX = VIEW_W / rect.width, scaleY = VIEW_H / rect.height
+      setView(v => ({ ...v, x: v.x - e.deltaX * scaleX, y: v.y - e.deltaY * scaleY }))
+    }
   }
   const onMouseDown = (e) => {
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: view.x, origY: view.y }
@@ -856,6 +867,69 @@ export default function TopologyPage() {
   }
   const endDrag = () => { dragRef.current = null }
 
+  // ── Touch: one finger pans, two fingers pinch-zoom ──────────────────────
+  // There was previously no touch handling at all, so on any touchscreen
+  // the browser's own page-zoom took over a pinch gesture instead of the
+  // map — that's the "expands instead of moving" behaviour on touch
+  // devices. touchAction: 'none' (set on the canvas div below) hands the
+  // gesture to us instead of the browser.
+  const touchRef = useRef(null)
+  const touchDist = (t0, t1) => Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+  const touchMid  = (t0, t1) => ({ x: (t0.clientX + t1.clientX) / 2, y: (t0.clientY + t1.clientY) / 2 })
+
+  const onTouchStart = (e) => {
+    if (e.touches.length === 1) {
+      const t = e.touches[0]
+      touchRef.current = { mode: 'pan', startX: t.clientX, startY: t.clientY, origX: view.x, origY: view.y }
+    } else if (e.touches.length === 2) {
+      const [t0, t1] = e.touches
+      touchRef.current = {
+        mode: 'pinch',
+        startDist: touchDist(t0, t1),
+        startMid: touchMid(t0, t1),
+        origScale: view.scale, origX: view.x, origY: view.y,
+      }
+    }
+  }
+  const onTouchMove = (e) => {
+    if (!touchRef.current || !containerRef.current) return
+    e.preventDefault()
+    const rect = containerRef.current.getBoundingClientRect()
+    const scaleX = VIEW_W / rect.width, scaleY = VIEW_H / rect.height
+    if (touchRef.current.mode === 'pan' && e.touches.length === 1) {
+      const t = e.touches[0]
+      const dx = (t.clientX - touchRef.current.startX) * scaleX
+      const dy = (t.clientY - touchRef.current.startY) * scaleY
+      setView(v => ({ ...v, x: touchRef.current.origX + dx, y: touchRef.current.origY + dy }))
+    } else if (touchRef.current.mode === 'pinch' && e.touches.length === 2) {
+      const [t0, t1] = e.touches
+      const dist = touchDist(t0, t1)
+      const mid = touchMid(t0, t1)
+      const ratio = dist / touchRef.current.startDist
+      const nextScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, touchRef.current.origScale * ratio))
+      const k = nextScale / touchRef.current.origScale
+      const cx = (touchRef.current.startMid.x - rect.left) * scaleX
+      const cy = (touchRef.current.startMid.y - rect.top) * scaleY
+      // also let the two-finger midpoint drift (so pinch + shift pans too)
+      const dmx = (mid.x - touchRef.current.startMid.x) * scaleX
+      const dmy = (mid.y - touchRef.current.startMid.y) * scaleY
+      setView({
+        scale: nextScale,
+        x: cx - (cx - touchRef.current.origX) * k + dmx,
+        y: cy - (cy - touchRef.current.origY) * k + dmy,
+      })
+    }
+  }
+  const onTouchEnd = (e) => {
+    if (e.touches.length === 0) {
+      touchRef.current = null
+    } else if (e.touches.length === 1) {
+      // pinch → pan hand-off: one finger lifted, keep panning with the other
+      const t = e.touches[0]
+      touchRef.current = { mode: 'pan', startX: t.clientX, startY: t.clientY, origX: view.x, origY: view.y }
+    }
+  }
+
   const handleHover = useCallback((node, e) => {
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -865,13 +939,18 @@ export default function TopologyPage() {
   }, [])
   const handleLeaveHover = useCallback(() => setHover(null), [])
 
+  // Selecting a node just opens its drawer and gently recenters the map on
+  // it — it used to also force-zoom to at least 110%, which is what made
+  // tapping a device feel like the whole map "jumped" or spilled past the
+  // canvas edge. Zoom level is the person's choice (pinch / scroll / +−
+  // buttons); clicking a node should never change it on their behalf.
   const focusNode = (node) => {
     setSelectedNode(node)
     setHover(null)
     setView(v => ({
-      scale: Math.max(v.scale, 1.1),
-      x: VIEW_W / 2 - node.x * Math.max(v.scale, 1.1),
-      y: VIEW_H / 2 - node.y * Math.max(v.scale, 1.1),
+      scale: v.scale,
+      x: VIEW_W / 2 - node.x * v.scale,
+      y: VIEW_H / 2 - node.y * v.scale,
     }))
   }
   // Clicking a site both toggles its expansion and pans/selects it — one
@@ -1001,12 +1080,16 @@ export default function TopologyPage() {
       <div
         ref={containerRef}
         className="card relative p-0 overflow-hidden select-none"
-        style={{ height: fullscreen ? 'calc(100vh - 260px)' : '640px' }}
+        style={{ height: fullscreen ? 'calc(100vh - 260px)' : '640px', touchAction: 'none' }}
         onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={endDrag}
         onMouseLeave={endDrag}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchEnd}
       >
         {loading ? (
           <div className="w-full h-full flex items-center justify-center">
