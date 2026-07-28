@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
-  LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
+  LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon, Rows2, Rows3,
   Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
+import { useDensityStore } from '../../store/densityStore'
 import { usePermissions } from '../../hooks/usePermissions'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
@@ -384,6 +385,8 @@ export default function Layout() {
   const navigate = useNavigate()
 
   const { theme, toggleTheme, applyTheme } = useThemeStore()
+  const { density, toggleDensity } = useDensityStore()
+  const isCompact = density === 'compact'
   const isLight = theme === 'light'
   const { isAdmin, can } = usePermissions()
 
@@ -725,6 +728,21 @@ export default function Layout() {
               </div>
             </div>
             {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{isLight ? 'Light mode' : 'Dark mode'}</span>}
+          </button>
+
+          {/* Table density toggle — compact/comfortable, persisted and
+              applied globally via a class on <html> (see densityStore.js),
+              so Devices/Audit/Users tables all pick it up without local
+              per-page state. */}
+          <button
+            onClick={toggleDensity}
+            title={isCompact ? 'Switch to comfortable rows' : 'Switch to compact rows'}
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
+                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
+          >
+            {isCompact ? <Rows2 size={16} className="shrink-0" /> : <Rows3 size={16} className="shrink-0" />}
+            {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{isCompact ? 'Compact rows' : 'Comfortable rows'}</span>}
           </button>
 
           {/* Notification preferences (per-user severity thresholds + mute) */}

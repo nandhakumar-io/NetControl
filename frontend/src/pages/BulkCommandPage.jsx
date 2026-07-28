@@ -557,7 +557,7 @@ export default function BulkCommandPage() {
   }, [pinTargetDevices])
 
   return (
-    <div>
+    <div className="page-shell page-stack pb-24 md:pb-[3.5rem]">
       <PageHeader
         icon={TerminalSquare}
         title="Bulk Command"
@@ -949,6 +949,36 @@ export default function BulkCommandPage() {
           </div>
         </div>
       )}
+
+      {/* ── Mobile sticky footer: selection summary + run ──────────────────
+          On small screens the Run button lives inline in the left-column
+          form, which can scroll off-screen once a device list gets long.
+          This mirrors it as a fixed bottom bar (md:hidden — the inline
+          button is already visible on desktop's wider layout) so the most
+          important action is always reachable with a thumb. Sits above the
+          safe-area inset so it doesn't collide with iOS/Android home
+          indicators; page-shell above reserves matching pb-24 so page
+          content never ends up hidden underneath it. */}
+      <div
+        className="md:hidden fixed bottom-0 inset-x-0 z-30 flex items-center gap-3 px-4 py-3 border-t"
+        style={{
+          background: 'var(--bg-card)',
+          borderColor: 'var(--border-subtle)',
+          paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+        }}
+      >
+        <span className="text-xs font-body flex-1 min-w-0 truncate" style={{ color: 'var(--text-muted)' }}>
+          {selected.size} device{selected.size === 1 ? '' : 's'} selected
+        </span>
+        <button
+          onClick={handleSubmit}
+          disabled={submitting || runStatus === 'running' || selected.size === 0}
+          className="btn-primary flex items-center gap-2 px-4 disabled:opacity-40 shrink-0"
+        >
+          {runStatus === 'running' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+          {runStatus === 'running' ? 'Running…' : 'Run'}
+        </button>
+      </div>
     </div>
   )
 }

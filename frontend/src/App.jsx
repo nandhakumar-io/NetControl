@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import { useAuthStore } from './store/authStore'
 import { useThemeStore } from './store/themeStore'
+import { useDensityStore } from './store/densityStore'
 import { usePermissions } from './hooks/usePermissions'
 import Layout          from './components/layout/Layout'
 import LoginPage       from './pages/LoginPage'
@@ -75,10 +76,12 @@ function RequirePermission({ bit, children }) {
 export default function App() {
   const fetchMe = useAuthStore(s => s.fetchMe)
   const { theme, applyTheme } = useThemeStore()
+  const { density, applyDensity } = useDensityStore()
   const isLight = theme === 'light'
 
   useEffect(() => { fetchMe() }, [])
   useEffect(() => { applyTheme(theme) }, [])
+  useEffect(() => { applyDensity(density) }, [])
 
   return (
     <BrowserRouter>
