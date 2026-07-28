@@ -17,7 +17,7 @@ import {
   TerminalSquare, Search, Loader2, Play, RotateCcw, CheckCircle2, XCircle,
   Circle, ChevronDown, ChevronRight, Square, CheckSquare, ShieldAlert,
   X, Server, Wifi, WifiOff, HelpCircle, Copy, Check, Clock, Star, Trash2,
-  Download, AlertTriangle, Bookmark, Save, Pencil,
+  Download, AlertTriangle, Bookmark, Save, Pencil, Eye,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -124,6 +124,7 @@ export default function BulkCommandPage() {
   const [pinOpen, setPinOpen] = useState(false)
   const [pin, setPin] = useState('')
   const [pinError, setPinError] = useState('')
+  const [dryRunOpen, setDryRunOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   const [pinTargetIds, setPinTargetIds] = useState(null) // ids the PIN dialog will actually run against (null = use `selected`)
@@ -482,6 +483,14 @@ export default function BulkCommandPage() {
       toast.error('Timeout must be between 5 and 3600 seconds'); return
     }
     setPinTargetIds(null) // run against the current picker selection, not a stale retry target
+    setDryRunOpen(true)
+  }
+
+  // Dry run's "Continue" hands off to the exact same PIN-confirmation flow
+  // a direct run would use — dry run is a review step in front of it, not
+  // a separate execution path with its own risk of drifting out of sync.
+  const confirmDryRun = () => {
+    setDryRunOpen(false)
     setPinOpen(true)
   }
 
@@ -821,6 +830,80 @@ export default function BulkCommandPage() {
           )}
         </div>
       </div>
+
+      {/* ── Dry run: preview affected devices + exact command before the
+          PIN gate ── Same card chrome as the PIN modal below (same
+          overlay, border radius, accent bar, header layout) so the two
+          read as one continuous confirmation flow rather than two
+          different UI patterns bolted together. "Continue" hands off
+          straight into the existing PIN modal — dry run never runs
+          anything itself, it's purely a review step. ── */}
+      {dryRunOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setDryRunOpen(false)}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className="relative z-10 w-full max-w-lg animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="rounded-2xl border overflow-hidden" style={{ background: 'var(--bg-card)', borderColor: 'rgba(56,189,248,0.25)', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+              <div className="h-0.5 opacity-70 bg-sky-400" />
+              <div className="flex items-start justify-between p-6 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-sky-400/15 border border-sky-400/25">
+                    <Eye size={20} className="text-sky-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-display text-base" style={{ color: 'var(--text-primary)' }}>Preview Run</h3>
+                    <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                      Nothing runs yet — review the command and target devices below.
+                    </p>
+                  </div>
+                </div>
+                <button onClick={() => setDryRunOpen(false)} className="p-1 rounded-lg hover:text-accent-red" style={{ color: 'var(--text-muted)' }}>
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="mx-6 mb-3 px-3 py-2.5 rounded-lg" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
+                <p className="text-[10px] font-body font-semibold uppercase tracking-widest mb-1" style={{ color: 'var(--text-faint)' }}>Command</p>
+                <p className="text-xs font-mono break-all" style={{ color: 'var(--text-primary)' }}>{command}</p>
+                <p className="text-[11px] font-body mt-1.5" style={{ color: 'var(--text-faint)' }}>{timeoutSec}s timeout · up to 8 devices at a time</p>
+              </div>
+
+              {(pinTargetBreakdown.offline > 0 || pinTargetBreakdown.unknown > 0 || pinTargetBreakdown.error > 0) && (
+                <div className="mx-6 mb-3 px-3 py-2.5 rounded-lg flex items-start gap-2"
+                  style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.25)' }}>
+                  <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{ color: '#fbbf24' }} />
+                  <p className="text-xs font-body leading-relaxed" style={{ color: '#fbbf24' }}>
+                    {pinTargetBreakdown.online} online, {pinTargetBreakdown.offline} offline, {pinTargetBreakdown.unknown + pinTargetBreakdown.error} unreachable/unknown —
+                    devices that aren't online will very likely fail or time out.
+                  </p>
+                </div>
+              )}
+
+              <div className="mx-6 mb-4">
+                <p className="text-[10px] font-body font-semibold uppercase tracking-widest mb-1.5" style={{ color: 'var(--text-faint)' }}>
+                  {pinTargetDevices.length} target device{pinTargetDevices.length === 1 ? '' : 's'}
+                </p>
+                <div className="rounded-lg border max-h-52 overflow-y-auto divide-y" style={{ borderColor: 'var(--border-subtle)' }}>
+                  {pinTargetDevices.map(d => (
+                    <div key={d.id} className="flex items-center gap-2.5 px-3 py-2" style={{ borderColor: 'var(--border-subtle)' }}>
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[d.status] || STATUS_DOT.unknown}`} />
+                      <span className="text-xs font-medium truncate flex-1" style={{ color: 'var(--text-primary)' }}>{d.name}</span>
+                      <span className="text-[11px] font-mono shrink-0" style={{ color: 'var(--text-faint)' }}>{d.ip_address}</span>
+                      <span className="text-[10px] font-body uppercase tracking-wide shrink-0" style={{ color: 'var(--text-faint)' }}>{d.status}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="px-6 pb-6 flex gap-3">
+                <button onClick={() => setDryRunOpen(false)} className="btn-ghost flex-1 justify-center">Cancel</button>
+                <button onClick={confirmDryRun} className="btn-primary flex-1 justify-center flex items-center gap-2">
+                  <ShieldAlert size={14} /> Continue to Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── PIN confirmation ── */}
       {pinOpen && (

@@ -476,11 +476,25 @@ router.put('/:id',
         await execute('UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?', [req.params.id]);
       }
 
+      // Structured before/after diff — same shape as edit_device's, so the
+      // Audit page's diff view renders both with one component. Password
+      // is reported as changed/unchanged only, never its value.
+      const DIFF_FIELDS = ['username', 'role', 'permissions', 'enabled', 'email', 'display_name', 'totp_required']
+      const newUserValues = { username, role, permissions, enabled, email, display_name: displayName, totp_required: totpRequired }
+      const userChanged = {}
+      for (const field of DIFF_FIELDS) {
+        const before = existing[field] ?? null
+        const after = newUserValues[field] ?? null
+        if (String(before) !== String(after)) userChanged[field] = { before, after }
+      }
+      if (req.body.password) userChanged.password = { before: 'unchanged', after: 'updated' }
+      if (unlinkGoogle) userChanged.google_account = { before: 'linked', after: 'unlinked' }
+
       await audit.log({
         userId: req.user.id, username: req.user.username,
         action: unlinkGoogle ? 'unlink_google_account' : 'edit_user', targetType: 'user', targetId: req.params.id,
         targetName: username, ipSource: req.realIp, result: 'success',
-        details: `role=${role} enabled=${enabled}`,
+        details: Object.keys(userChanged).length ? JSON.stringify({ diff: userChanged }) : `role=${role} enabled=${enabled}`,
       });
 
       const user = await queryOne(

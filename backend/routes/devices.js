@@ -1070,6 +1070,23 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       ]
     );
 
+    // Structured before/after diff — powers the Audit page's side-by-side
+    // diff view for this event. Only fields that actually changed are
+    // included, and credential fields (ssh_password, ssh_key, rpc_password)
+    // are reported as changed/unchanged only — their values are secrets
+    // and never belong in the audit trail, even encrypted.
+    const DIFF_FIELDS = ['name', 'ip_address', 'mac_address', 'os_type', 'group_id'];
+    const newValues = { name, ip_address: ip_address, mac_address: normalizedMac, os_type, group_id: group_id || null };
+    const changed = {};
+    for (const field of DIFF_FIELDS) {
+      const before = device[field] ?? null;
+      const after = newValues[field] ?? null;
+      if (String(before) !== String(after)) changed[field] = { before, after };
+    }
+    if (ssh_password || ssh_key || rpc_password) {
+      changed.credentials = { before: 'unchanged', after: 'updated' };
+    }
+
     await audit.log({
       userId: req.user.id,
       username: req.user.username,
@@ -1079,6 +1096,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       targetName: name,
       ipSource: req.realIp,
       result: 'success',
+      details: Object.keys(changed).length ? JSON.stringify({ diff: changed }) : null,
     });
 
     const updated = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);

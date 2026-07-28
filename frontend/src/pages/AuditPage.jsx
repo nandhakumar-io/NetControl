@@ -128,6 +128,68 @@ function DetailField({ label, value, mono = false }) {
   )
 }
 
+// Attempts to parse log.details as a structured { diff: { field: {before,
+// after} } } payload — the shape edit_device/edit_user now write. Returns
+// null for every other event, which is most of them (wake/shutdown/login/
+// etc. have nothing to diff), so the drawer falls back to plain text.
+function parseAuditDiff(details) {
+  if (!details || typeof details !== 'string' || details[0] !== '{') return null
+  try {
+    const parsed = JSON.parse(details)
+    if (parsed && typeof parsed === 'object' && parsed.diff && typeof parsed.diff === 'object') {
+      return parsed.diff
+    }
+  } catch { /* not JSON — a normal free-text details string, nothing to do */ }
+  return null
+}
+
+const DIFF_FIELD_LABELS = {
+  ip_address: 'IP Address', mac_address: 'MAC Address', os_type: 'OS Type',
+  group_id: 'Group', display_name: 'Display Name', totp_required: '2FA Required',
+  google_account: 'Google Account',
+}
+function diffFieldLabel(field) {
+  return DIFF_FIELD_LABELS[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+// Side-by-side before/after for a config-changing event — one row per
+// changed field, red strike-through on the old value, green on the new
+// one. Deliberately simpler than Compliance's DiffView (that one handles
+// added/removed *lists* per category; this handles single before/after
+// *values* per field), but shares the same red/green visual language so
+// the two read as the same idea across pages.
+function AuditDiffView({ diff }) {
+  const fields = Object.keys(diff)
+  if (fields.length === 0) return null
+  return (
+    <div className="rounded-lg border overflow-hidden" style={{ borderColor: 'var(--border-subtle)' }}>
+      <div className="grid grid-cols-[1fr_1fr] text-[11px] font-body font-bold uppercase tracking-wider px-3 py-2"
+        style={{ background: 'var(--bg-surface-3)', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-subtle)' }}>
+        <span>Before</span>
+        <span>After</span>
+      </div>
+      {fields.map(field => {
+        const { before, after } = diff[field]
+        return (
+          <div key={field} className="px-3 py-2" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+            <p className="text-[10px] font-body font-semibold uppercase tracking-widest mb-1" style={{ color: 'var(--text-faint)' }}>
+              {diffFieldLabel(field)}
+            </p>
+            <div className="grid grid-cols-[1fr_1fr] gap-2 text-xs font-mono">
+              <span className="truncate px-1.5 py-0.5 rounded line-through" style={{ color: '#f87171', background: 'rgba(239,68,68,0.08)' }}>
+                {before === null || before === '' ? '—' : String(before)}
+              </span>
+              <span className="truncate px-1.5 py-0.5 rounded" style={{ color: '#34d399', background: 'rgba(34,197,94,0.08)' }}>
+                {after === null || after === '' ? '—' : String(after)}
+              </span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function AuditDetailDrawer({ log, showSync, onClose }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose() }
@@ -142,6 +204,7 @@ function AuditDetailDrawer({ log, showSync, onClose }) {
   const result  = log.result || 'unknown'
   const resMeta = RESULT_META[result]
   const ResIcon = resMeta?.icon ?? AlertCircle
+  const diff    = parseAuditDiff(log.details)
 
   return (
     <div className="fixed inset-0 z-50 animate-fade-in">
@@ -181,7 +244,16 @@ function AuditDetailDrawer({ log, showSync, onClose }) {
           <DetailField label="User ID" value={log.user_id} mono />
           <DetailField label="Target" value={getTarget(log)} mono />
           <DetailField label="Target Type" value={getTargetSub(log)} />
-          <DetailField label="Details" value={log.details} />
+          {diff ? (
+            <div>
+              <p className="text-xs font-body font-semibold uppercase tracking-widest mb-1.5 flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
+                <GitCompare size={12} /> What Changed
+              </p>
+              <AuditDiffView diff={diff} />
+            </div>
+          ) : (
+            <DetailField label="Details" value={log.details} />
+          )}
           <DetailField label="Source IP" value={log.ip_source} mono />
           <DetailField label="Timestamp (absolute)" value={formatTime(log.timestamp)} mono />
           <DetailField label="Timestamp (relative)" value={relativeTime(log.timestamp)} />
@@ -1268,6 +1340,9 @@ export default function AuditPage() {
                       <ActionIcon size={16} className={meta.color} />
                     </span>
                     <ExpandableCell text={meta.label} className={`font-medium ${meta.color}`} />
+                    {parseAuditDiff(log.details) && (
+                      <GitCompare size={12} className="shrink-0" style={{ color: 'var(--text-faint)' }} title="Has a before/after diff" />
+                    )}
                   </div>
 
                   {/* Target */}

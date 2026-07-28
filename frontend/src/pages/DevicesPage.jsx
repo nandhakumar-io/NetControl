@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown
+  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown, Columns3, Check
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -423,7 +423,62 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
 }
 
 // ── List row ──────────────────────────────────────────────────────────────────
-function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading }) {
+// Builds the list view's grid-template-columns string from which optional
+// columns (MAC/OS/Agent) are toggled on — shared by the header row and
+// every DeviceListRow so they can never drift out of alignment with
+// each other.
+function deviceGridCols(visibleCols) {
+  return [
+    '40px', '36px', '1fr', '140px',
+    visibleCols.mac   && '140px',
+    visibleCols.os    && '90px',
+    visibleCols.agent && '100px',
+    '90px', '100px', 'auto',
+  ].filter(Boolean).join(' ')
+}
+
+function ColumnsMenu({ visibleCols, onToggle, isLight }) {
+  const [open, setOpen] = React.useState(false)
+  const boxRef = React.useRef(null)
+  const COLS = [
+    { key: 'mac',   label: 'MAC Address' },
+    { key: 'os',    label: 'OS' },
+    { key: 'agent', label: 'Agent' },
+  ]
+
+  React.useEffect(() => {
+    const onDocClick = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [])
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <button onClick={() => setOpen(v => !v)}
+        className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg transition-all"
+        style={{ color: 'var(--text-muted)', border: '1px solid var(--border-subtle)', background: open ? 'var(--bg-surface-3)' : 'transparent' }}>
+        <Columns3 size={12} />
+        <span className="hidden sm:inline">Columns</span>
+        <ChevronDown size={11} />
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-2 w-48 rounded-xl shadow-xl z-50 overflow-hidden py-1"
+          style={{ background: 'var(--bg-surface-2)', border: '1px solid var(--border-subtle)' }}>
+          {COLS.map(c => (
+            <button key={c.key} onClick={() => onToggle(c.key)}
+              className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-white/[0.04]"
+              style={{ color: 'var(--text-primary)' }}>
+              {c.label}
+              {visibleCols[c.key] && <Check size={13} style={{ color: isLight ? '#6c5ce7' : '#a78bfa' }} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading, visibleCols }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -437,7 +492,7 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
     <div id={`hl-${device.id}`}
       className="table-row grid items-center gap-3 px-4 cursor-pointer transition-all group"
       style={{
-        gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
+        gridTemplateColumns: deviceGridCols(visibleCols),
         borderBottom: '1px solid var(--border-subtle)',
         background: highlighted ? (isLight ? 'rgba(108,92,231,0.08)' : 'rgba(167,139,250,0.10)')
           : selected ? (isLight ? 'rgba(108,92,231,0.04)' : 'rgba(167,139,250,0.05)') : 'transparent',
@@ -487,13 +542,13 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
       <p className="text-sm font-mono truncate" style={{ color: 'var(--text-muted)' }}>{device.ip_address}</p>
 
       {/* MAC */}
-      <p className="text-sm font-mono truncate" style={{ color: 'var(--text-faint)' }}>{device.mac_address}</p>
+      {visibleCols.mac && <p className="text-sm font-mono truncate" style={{ color: 'var(--text-faint)' }}>{device.mac_address}</p>}
 
       {/* OS badge */}
-      <div><OsBadge osType={device.os_type} /></div>
+      {visibleCols.os && <div><OsBadge osType={device.os_type} /></div>}
 
       {/* Agent version */}
-      <div><AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} /></div>
+      {visibleCols.agent && <div><AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} /></div>}
 
       {/* Health score */}
       <div><HealthBadge health={health} loading={healthLoading} /></div>
@@ -623,6 +678,12 @@ export default function DevicesPage() {
   const [healthLoading, setHealthLoading] = useState(true)
   const [sortKey, setSortKey] = useState(null) // null | 'health'
   const [sortDir, setSortDir] = useState('asc') // 'asc' surfaces worst-health-first, which is the point of sorting by it
+  // List view column visibility — MAC/OS/Agent are the columns worth
+  // hiding on a narrow monitor or when they're just not relevant to what
+  // you're triaging right now. Checkbox/Device/IP/Health/Status/Actions
+  // stay pinned since they're needed for the row's core actions.
+  const [visibleCols, setVisibleCols] = useState({ mac: true, os: true, agent: true })
+  const toggleCol = (key) => setVisibleCols(v => ({ ...v, [key]: !v[key] }))
   const isLight = useThemeStore(s => s.theme === 'light')
   const { isAdmin } = usePermissions()
 
@@ -890,13 +951,16 @@ export default function DevicesPage() {
   }, [highlightId])
 
   const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()) }
-  const currentFilters = { search, osFilter, statusFilter, groupFilter, tagFilter: [...tagFilter] }
+  const currentFilters = { search, osFilter, statusFilter, groupFilter, tagFilter: [...tagFilter], sortKey, sortDir, visibleCols }
   const applyView = (f) => {
     setSearch(f.search || '')
     setOsFilter(f.osFilter || 'all')
     setStatusFilter(f.statusFilter || 'all')
     setGroupFilter(f.groupFilter || 'all')
     setTagFilter(new Set(f.tagFilter || []))
+    setSortKey(f.sortKey ?? null)
+    setSortDir(f.sortDir || 'asc')
+    setVisibleCols(f.visibleCols || { mac: true, os: true, agent: true })
   }
   const toggleTagFilter = (tag) => {
     setTagFilter(prev => {
@@ -1087,6 +1151,11 @@ export default function DevicesPage() {
 
         <div className="flex-1" />
 
+        {/* List view column visibility — grid-only toggle */}
+        {viewMode === 'list' && (
+          <ColumnsMenu visibleCols={visibleCols} onToggle={toggleCol} isLight={isLight} />
+        )}
+
         {/* Saved views */}
         <SavedViews page="devices" filters={currentFilters} onApply={applyView} isLight={isLight} />
 
@@ -1161,7 +1230,7 @@ export default function DevicesPage() {
           style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-surface-2)' }}>
           {/* Table header */}
           <div className="table-row-head grid items-center gap-3 px-4 text-sm font-bold uppercase tracking-wider"
-            style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
+            style={{ gridTemplateColumns: deviceGridCols(visibleCols),
                      background: 'var(--bg-surface-3)', borderBottom: '1px solid var(--border-subtle)',
                      color: 'var(--text-muted)' }}>
             <button onClick={() => {
@@ -1175,9 +1244,9 @@ export default function DevicesPage() {
             <span />
             <span>Device</span>
             <span>IP Address</span>
-            <span>MAC Address</span>
-            <span>OS</span>
-            <span>Agent</span>
+            {visibleCols.mac && <span>MAC Address</span>}
+            {visibleCols.os && <span>OS</span>}
+            {visibleCols.agent && <span>Agent</span>}
             <button
               className="flex items-center gap-1 uppercase tracking-wider text-sm font-bold text-left"
               style={{ color: sortKey === 'health' ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-muted)' }}
@@ -1208,7 +1277,8 @@ export default function DevicesPage() {
                 onToggleMaintenance={handleToggleMaintenance}
                 latestAgentVersion={latestAgentVersion}
                 health={healthScores[d.id]}
-                healthLoading={healthLoading} />
+                healthLoading={healthLoading}
+                visibleCols={visibleCols} />
             ))}
           </div>
         </div>
