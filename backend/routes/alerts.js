@@ -650,6 +650,19 @@ async function evaluateAlerts(deviceId, snapshot) {
         }
       }
 
+      // BUG FIX: 'process_count' is an accepted metric on rule creation
+      // (see the POST/PUT validators below) and one of the built-in rule
+      // templates, but this breach-detection switch never had a branch for
+      // it — a process_count rule always evaluated breached=false and
+      // therefore never notified, never logged, and never ran its attached
+      // runbooks, no matter how high the count actually got. See
+      // routes/metrics.js's snapshot construction for the matching fix
+      // that makes snapshot.process_count exist at all.
+      if (rule.metric === 'process_count' && snapshot.process_count != null) {
+        breached = rule.operator === 'gt' ? snapshot.process_count > rule.threshold : snapshot.process_count < rule.threshold;
+        details = `Process count ${snapshot.process_count} (threshold ${rule.operator==='gt'?'>':'<'}${rule.threshold})`;
+      }
+
       // Fallback if the alert_state migration hasn't been applied yet (very
       // old install mid-upgrade): behave like the previous plain-cooldown
       // logic rather than crashing every evaluation.

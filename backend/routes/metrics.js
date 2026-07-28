@@ -458,6 +458,14 @@ router.post('/', agentIngestLimiter, agentAuth, async (req, res) => {
     uptime:       typeof uptime === 'number' ? uptime : null,
     os:           typeof os === 'string' ? os : null,
     hostname:     typeof hostname === 'string' ? hostname : null,
+    // BUG FIX: process_count alert rules (offered in rule creation and as
+    // a built-in template — "Process count spike (>400 processes)") never
+    // fired, silently, because nothing ever put a process count on the
+    // snapshot for evaluateAlerts to read. `processes` below is already
+    // sliced to the top 10 for storage/display, so the count has to be
+    // captured from the full agent-reported list BEFORE that slice, or
+    // every rule using this metric would cap out at "10" and never breach.
+    process_count: Array.isArray(processes) ? processes.length : null,
     processes:    Array.isArray(processes) ? processes.slice(0, 10) : null,
   };
 

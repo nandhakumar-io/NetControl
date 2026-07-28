@@ -83,6 +83,81 @@ function Toggle({ on, onChange }) {
   )
 }
 
+// Chip picker for attaching runbooks to an alert rule. Selected runbooks
+// always stay visible (so it's obvious what's already wired up); the
+// unselected pool is capped to VISIBLE_CAP unless the person searches for a
+// name or explicitly expands the list — avoids the old "every runbook in
+// the org as one big wall of chips" UI once there's more than a handful.
+const RUNBOOK_VISIBLE_CAP = 6
+function RunbookPicker({ runbooks, selectedIds, onToggle }) {
+  const [query, setQuery]     = useState('')
+  const [expanded, setExpanded] = useState(false)
+
+  const selected   = runbooks.filter(rb => selectedIds.includes(rb.id))
+  const unselected = runbooks.filter(rb => !selectedIds.includes(rb.id))
+  const needle     = query.trim().toLowerCase()
+  const filtered   = needle
+    ? unselected.filter(rb => rb.name.toLowerCase().includes(needle))
+    : unselected
+  const showAll    = expanded || !!needle
+  const visible    = showAll ? filtered : filtered.slice(0, RUNBOOK_VISIBLE_CAP)
+  const hiddenCount = filtered.length - visible.length
+
+  const chip = (rb, on) => (
+    <button key={rb.id} type="button" onClick={() => onToggle(rb.id)}
+      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all"
+      style={on
+        ? {background:'rgba(124,92,245,0.12)',borderColor:'rgba(167,139,250,0.35)',color:'#c4b5fd'}
+        : {background:'transparent',borderColor:'var(--border-subtle)',color:'var(--text-muted)'}}>
+      <Wrench size={11} /> {rb.name}
+    </button>
+  )
+
+  return (
+    <div className="mt-1 space-y-2">
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {selected.map(rb => chip(rb, true))}
+        </div>
+      )}
+
+      {runbooks.length > RUNBOOK_VISIBLE_CAP && (
+        <div className="relative">
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{color:'var(--text-faint)'}} />
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder={`Search ${unselected.length} runbook${unselected.length !== 1 ? 's' : ''}…`}
+            className="w-full pl-7 pr-2 py-1.5 rounded-lg border text-xs bg-transparent outline-none"
+            style={{borderColor:'var(--border-subtle)', color:'var(--text-primary)'}}
+          />
+        </div>
+      )}
+
+      {filtered.length === 0 ? (
+        needle && <p className="text-xs" style={{color:'var(--text-faint)'}}>No runbooks match "{query}"</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {visible.map(rb => chip(rb, false))}
+        </div>
+      )}
+
+      {!showAll && hiddenCount > 0 && (
+        <button type="button" onClick={() => setExpanded(true)}
+          className="flex items-center gap-1 text-xs font-semibold" style={{color:'var(--text-muted)'}}>
+          <ChevronDown size={12} /> Show {hiddenCount} more
+        </button>
+      )}
+      {expanded && !needle && filtered.length > RUNBOOK_VISIBLE_CAP && (
+        <button type="button" onClick={() => setExpanded(false)}
+          className="flex items-center gap-1 text-xs font-semibold" style={{color:'var(--text-muted)'}}>
+          Show fewer
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ── Rule form modal ────────────────────────────────────────────────────────────
 function RuleModal({ open, onClose, onSaved, rule, devices, groups, tags }) {
   const [form, setForm]   = useState(EMPTY)
@@ -278,7 +353,11 @@ function RuleModal({ open, onClose, onSaved, rule, devices, groups, tags }) {
             {/* Runbooks — reusable auto-remediation scripts, in addition to
                 the built-in shutdown/restart actions above. Empty state
                 links to the Runbooks page since there's nothing to pick
-                from until at least one exists. */}
+                from until at least one exists. Orgs with a lot of runbooks
+                used to get a wall of chips here with no way to find one by
+                name — now: selected ones always show, unselected ones are
+                capped to a handful (search to narrow, or expand to browse
+                everything). */}
             <div>
               <label className={lbl}>Runbooks on Trigger</label>
               {runbooks.length === 0 ? (
@@ -286,20 +365,7 @@ function RuleModal({ open, onClose, onSaved, rule, devices, groups, tags }) {
                   No runbooks yet. <Link to="/runbooks" className="text-brand-400 hover:underline">Create one</Link> to run custom remediation commands automatically.
                 </p>
               ) : (
-                <div className="flex flex-wrap gap-2 mt-1">
-                  {runbooks.map(rb => {
-                    const on = form.runbook_action_ids.includes(rb.id)
-                    return (
-                      <button key={rb.id} type="button" onClick={()=>toggleRunbook(rb.id)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all"
-                        style={on
-                          ? {background:'rgba(124,92,245,0.12)',borderColor:'rgba(167,139,250,0.35)',color:'#c4b5fd'}
-                          : {background:'transparent',borderColor:'var(--border-subtle)',color:'var(--text-muted)'}}>
-                        <Wrench size={11} /> {rb.name}
-                      </button>
-                    )
-                  })}
-                </div>
+                <RunbookPicker runbooks={runbooks} selectedIds={form.runbook_action_ids} onToggle={toggleRunbook} />
               )}
             </div>
 
