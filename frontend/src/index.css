@@ -360,6 +360,34 @@ html.light {
   html.light .status-dot-unknown,
   html.light .status-dot-error { box-shadow: none; }
 
+  /* ── Table row density ─────────────────────────────────────────────────
+     Row height was just unified to py-3 across Devices/Audit/Users. This
+     makes that single value swappable at runtime: pages opt in with
+     .table-row instead of a literal py-3, and toggling density (via
+     useDensityStore) flips --row-py for every table row on the page at
+     once, no per-page state needed. Header rows use .table-row-head so
+     they compress in lockstep with the body rows beneath them. */
+  :root { --row-py: 0.75rem; }   /* py-3, comfortable (default) */
+  html.density-compact { --row-py: 0.375rem; } /* py-1.5, compact */
+  .table-row,
+  .table-row-head {
+    padding-top: var(--row-py);
+    padding-bottom: var(--row-py);
+  }
+
+  /* ── Badges ─────────────────────────────────────────────────────────────
+     Status badges/pills were hand-rolled per page with mixed padding
+     (px-2 py-0.5, px-2.5 py-1, px-3 py-1). Two sizes cover every real
+     use case: .badge for standalone status pills (card headers, detail
+     panels), .badge-sm for dense contexts like table rows and inline
+     lists where a full-size pill would blow out row height. */
+  .badge {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-body font-semibold;
+  }
+  .badge-sm {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-body font-semibold;
+  }
+
   /* ── Chips ──────────────────────────────────────────────────────────── */
   .chip {
     @apply cursor-pointer transition-all duration-150 px-3 py-1 rounded-full text-xs font-body font-medium;

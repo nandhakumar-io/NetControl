@@ -201,7 +201,7 @@ function AuditDetailDrawer({ log, showSync, onClose }) {
 // ── Skeleton row ─────────────────────────────────────────────────────────────
 function SkeletonRow({ gridCols, showSync }) {
   return (
-    <div className="relative grid items-center gap-4 pl-4 pr-5 py-4 border-b animate-pulse"
+    <div className="relative grid items-center gap-4 pl-4 pr-5 py-3 border-b animate-pulse"
       style={{ gridTemplateColumns: gridCols, borderColor: 'var(--border-subtle)' }}>
       <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: 'var(--bg-input)' }} />
       <div className="h-3.5 rounded w-5/6" style={{background:"var(--bg-input)"}} />
@@ -887,7 +887,7 @@ export default function AuditPage() {
   }
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1760px] mx-auto animate-fade-in">
+    <div className="page-shell animate-fade-in">
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <PageHeader
@@ -1161,7 +1161,7 @@ export default function AuditPage() {
         {/* Table header — sticky so column labels stay visible once a
             filtered result set scrolls past a screen's height */}
         <div
-          className="sticky top-0 z-10 grid items-center gap-4 pl-4 pr-5 py-3 border-b border-white/10 bg-surface-2/95 backdrop-blur-sm"
+          className="table-row-head sticky top-0 z-10 grid items-center gap-4 pl-4 pr-5 border-b border-white/10 bg-surface-2/95 backdrop-blur-sm"
           style={{ gridTemplateColumns: gridCols }}
         >
           {['Timestamp', 'User', 'Action', 'Target', 'Source IP'].map(h => (
@@ -1236,7 +1236,7 @@ export default function AuditPage() {
                   tabIndex={0}
                   onClick={() => setSelectedLog(log)}
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedLog(log) } }}
-                  className="relative grid items-start gap-4 pl-4 pr-5 py-3.5 hover:bg-surface-3/60 transition-colors group cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-brand-400/50"
+                  className="table-row relative grid items-start gap-4 pl-4 pr-5 hover:bg-surface-3/60 transition-colors group cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-brand-400/50"
                   style={{
                     gridTemplateColumns: gridCols,
                     background: i % 2 === 1 ? 'var(--bg-surface-1, rgba(255,255,255,0.015))' : 'transparent',

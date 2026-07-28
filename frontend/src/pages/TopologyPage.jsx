@@ -1257,7 +1257,7 @@ export default function TopologyPage() {
   // room at the bottom.
   const wrapperClasses = fullscreen
     ? 'fixed inset-0 z-40 p-4 sm:p-6 overflow-auto'
-    : 'p-4 sm:p-6 max-w-[1600px] mx-auto animate-fade-in pb-28'
+    : 'page-shell animate-fade-in'
 
   return (
     <div className={wrapperClasses} style={fullscreen ? { background: 'var(--bg-page)' } : {}}>

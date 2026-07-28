@@ -19,7 +19,7 @@ const ROLE_BG    = { admin:'rgba(167,139,250,0.12)', operator:'rgba(56,189,248,0
 
 function RoleBadge({ role }) {
   return (
-    <span className="text-[11px] font-body font-bold capitalize px-2 py-0.5 rounded-full border"
+    <span className="badge-sm capitalize border"
       style={{ background: ROLE_BG[role]||ROLE_BG.viewer, borderColor: (ROLE_COLOR[role]||'#94a3b8')+'40', color: ROLE_COLOR[role]||'#94a3b8' }}>
       {role}
     </span>
@@ -125,7 +125,7 @@ function GroupAccessPanel({ user, allGroups, onClose, onSaved }) {
 function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onActivity, onAssignGroups, onRevokeSessions, highlighted }) {
   const isSelf = user.id === currentUserId
   return (
-    <div id={`hl-${user.id}`} className="grid items-center gap-3 px-5 py-4 transition-colors group"
+    <div id={`hl-${user.id}`} className="table-row grid items-center gap-3 px-5 transition-colors group"
       style={{
         gridTemplateColumns: '240px 120px 100px 160px 140px 96px',
         borderBottom: '1px solid var(--border-subtle)',
@@ -324,7 +324,7 @@ export default function UsersPage() {
   )
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto animate-fade-in pb-10">
+    <div className="page-shell animate-fade-in">
       <PageHeader icon={Users} title="User Management"
         description="Manage accounts, roles and group-level access"
         actions={
@@ -387,7 +387,7 @@ export default function UsersPage() {
 
       {/* Table */}
       <div className="glass rounded-2xl overflow-hidden">
-        <div className="grid gap-3 px-5 py-3 text-[10px] font-body font-bold uppercase tracking-wider"
+        <div className="table-row-head grid gap-3 px-5 text-[10px] font-body font-bold uppercase tracking-wider"
           style={{ gridTemplateColumns: '240px 120px 100px 160px 140px 96px',
                    background: 'var(--bg-input)', borderBottom: '1px solid var(--border-subtle)',
                    color: 'var(--text-muted)' }}>

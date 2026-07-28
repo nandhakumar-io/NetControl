@@ -32,7 +32,7 @@ const STATUS = {
 function StatusBadge({ status }) {
   const s = STATUS[status] || STATUS.unknown
   return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold"
+    <span className="badge text-sm"
       style={{
         background: status === 'online'  ? 'rgba(34,197,94,0.12)'  :
                     status === 'offline' ? 'rgba(100,116,139,0.12)' :
@@ -64,7 +64,7 @@ function MaintenanceBadge({ note, until }) {
   ].filter(Boolean).join('\n')
   return (
     <span title={title}
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold"
+      className="badge text-sm"
       style={{ background: 'rgba(251,146,60,0.12)', border: '1px solid rgba(251,146,60,0.3)', color: '#fb923c' }}>
       <Wrench size={10} />
       Maintenance
@@ -98,7 +98,7 @@ function HealthBadge({ health, loading }) {
 
   return (
     <span title={lines.join('\n')}
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-semibold cursor-help"
+      className="badge text-sm cursor-help"
       style={{ background: `${color}1f`, border: `1px solid ${color}40`, color }}>
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
       {score}
@@ -435,7 +435,7 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
 
   return (
     <div id={`hl-${device.id}`}
-      className="grid items-center gap-3 px-4 py-3.5 cursor-pointer transition-all group"
+      className="table-row grid items-center gap-3 px-4 cursor-pointer transition-all group"
       style={{
         gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
         borderBottom: '1px solid var(--border-subtle)',
@@ -1160,7 +1160,7 @@ export default function DevicesPage() {
         <div className="rounded-2xl overflow-hidden animate-fade-in"
           style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-surface-2)' }}>
           {/* Table header */}
-          <div className="grid items-center gap-3 px-4 py-3 text-sm font-bold uppercase tracking-wider"
+          <div className="table-row-head grid items-center gap-3 px-4 text-sm font-bold uppercase tracking-wider"
             style={{ gridTemplateColumns: '40px 36px 1fr 140px 140px 90px 100px 90px 100px auto',
                      background: 'var(--bg-surface-3)', borderBottom: '1px solid var(--border-subtle)',
                      color: 'var(--text-muted)' }}>
