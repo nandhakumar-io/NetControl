@@ -6,6 +6,7 @@ import {
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 // ── Status presentation ───────────────────────────────────────────────────────
 const STATUS_CFG = {
@@ -112,7 +113,7 @@ function CheckRow({ check, onChanged }) {
   }
 
   return (
-    <div className="card p-0 overflow-hidden" style={{ opacity: check.enabled ? 1 : 0.55 }}>
+    <div id={`hl-${check.id}`} className="card p-0 overflow-hidden" style={{ opacity: check.enabled ? 1 : 0.55 }}>
       <div className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-white/[0.02]" onClick={() => setOpen(o => !o)}>
         {open ? <ChevronDown size={12} style={{ color: 'var(--text-muted)' }} /> : <ChevronRight size={12} style={{ color: 'var(--text-muted)' }} />}
         <TypeIcon size={14} style={{ color: 'var(--text-muted)' }} />
@@ -293,6 +294,7 @@ export default function SyntheticChecksPage() {
   }, [])
   useEffect(() => { load() }, [load])
 
+  useHighlightParam(!loading && checks.length > 0)
   const unhealthyCount = checks.filter(c => c.status === 'unhealthy').length
 
   return (

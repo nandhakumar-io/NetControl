@@ -111,7 +111,62 @@ router.get('/',
       );
     }
 
+    // ── Alert rules — no dedicated view bit gates the list route itself
+    //    (GET /api/alerts/rules only requires org context; only create/edit
+    //    needs admin/operator), so match that same visibility here rather
+    //    than inventing a stricter rule the alerts page itself doesn't
+    //    enforce — gated on bit 1, same as the /alerts route itself. ────────
+    if (hasBit(req, 1)) {
+      tasks.push(
+        query(
+          `SELECT id, name, metric, severity FROM alert_rules
+            WHERE org_id = ? AND name LIKE ?
+            ORDER BY name LIMIT ${RESULT_LIMIT_PER_CATEGORY}`,
+          [req.orgId, like]
+        ).then(rows => { categories.alertRules = rows.map(a => ({
+          id: a.id, label: a.name, sublabel: `${a.metric} · ${a.severity}`,
+          type: 'alertRule', path: `/alerts?highlight=${a.id}`,
+        })); }).catch(() => { categories.alertRules = []; })
+      );
+    }
+
+    // ── Synthetic checks — same no-extra-bit visibility as its own list
+    //    route (GET /api/synthetic-checks needs MANAGE_SYNTHETIC_CHECKS,
+    //    so gate on that bit here too). ───────────────────────────────────────
+    if (hasBit(req, 65536)) {
+      tasks.push(
+        query(
+          `SELECT sc.id, sc.name, sc.check_type, sc.status, d.name AS device_name
+             FROM synthetic_checks sc
+             LEFT JOIN devices d ON d.id = sc.device_id
+            WHERE sc.org_id = ? AND sc.name LIKE ?
+            ORDER BY sc.name LIMIT ${RESULT_LIMIT_PER_CATEGORY}`,
+          [req.orgId, like]
+        ).then(rows => { categories.syntheticChecks = rows.map(c => ({
+          id: c.id, label: c.name, sublabel: c.device_name ? `${c.check_type} · ${c.device_name}` : c.check_type,
+          type: 'syntheticCheck', path: `/synthetic-checks?highlight=${c.id}`,
+        })); }).catch(() => { categories.syntheticChecks = []; })
+      );
+    }
+
+    // ── Bulk command templates — gated on bit 4, same as the
+    //    /bulk-command route itself (RequirePermission bit={4} in App.jsx). ──
+    if (hasBit(req, 4)) {
+      tasks.push(
+        query(
+          `SELECT id, name, description FROM bulk_command_templates
+            WHERE org_id = ? AND name LIKE ?
+            ORDER BY name LIMIT ${RESULT_LIMIT_PER_CATEGORY}`,
+          [req.orgId, like]
+        ).then(rows => { categories.bulkTemplates = rows.map(t => ({
+          id: t.id, label: t.name, sublabel: t.description || 'Bulk command template',
+          type: 'bulkTemplate', path: `/bulk-command?highlight=${t.id}`,
+        })); }).catch(() => { categories.bulkTemplates = []; })
+      );
+    }
+
     // ── Users — instance-wide, admin only, matches routes/users.js's own
+
     //    gating (requireRole('admin')), so this never leaks account names
     //    to non-admins the way the other categories are scoped by org. ─────
     if (req.user.role === 'admin') {

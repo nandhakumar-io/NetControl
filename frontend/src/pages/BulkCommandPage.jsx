@@ -23,6 +23,7 @@ import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 const STATUS_DOT = {
   online:  'bg-accent-green',
@@ -116,6 +117,10 @@ export default function BulkCommandPage() {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [templates, setTemplates] = useState([])
   const [templatesOpen, setTemplatesOpen] = useState(false)
+  const highlightId = useHighlightParam(templates.length > 0)
+  useEffect(() => {
+    if (highlightId && templates.some(t => t.id === highlightId)) setTemplatesOpen(true)
+  }, [highlightId, templates])
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
   const [templateName, setTemplateName] = useState('')
   const [templateDescription, setTemplateDescription] = useState('')
@@ -593,7 +598,7 @@ export default function BulkCommandPage() {
               {templatesOpen && (
                 <div className="border-t max-h-56 overflow-y-auto" style={{ borderColor: 'var(--border-subtle)' }}>
                   {templates.map(t => (
-                    <div key={t.id}
+                    <div key={t.id} id={`hl-${t.id}`}
                       onClick={() => useTemplate(t)}
                       className="flex items-start gap-2.5 px-4 py-2.5 cursor-pointer hover:bg-white/[0.03] border-b last:border-b-0"
                       style={{ borderColor: 'var(--border-subtle)' }}

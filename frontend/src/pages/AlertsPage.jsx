@@ -14,6 +14,7 @@ import { useThemeStore } from '../store/themeStore'
 import PageHeader from '../components/ui/PageHeader'
 import { Link } from 'react-router-dom'
 import { isPushSupported, getPushSubscriptionState, enablePush, disablePush, sendTestPush } from '../lib/push'
+import { useHighlightParam } from '../hooks/useHighlightParam'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const METRICS = [
@@ -473,6 +474,7 @@ export default function AlertsPage() {
   const [enablingKey, setEnablingKey] = useState(null)
   const [loading,   setLoading]   = useState(true)
   const [tab,       setTab]       = useState('rules')
+  useHighlightParam(!loading && rules.length > 0)
   const [showModal, setShowModal] = useState(false)
   const [editRule,  setEditRule]  = useState(null)
   const [search,    setSearch]    = useState('')
@@ -725,7 +727,7 @@ export default function AlertsPage() {
               const s  = sev(rule.severity)
               const fires = triggered.filter(t=>t.rule_id===rule.id).length
               return (
-                <div key={rule.id}
+                <div key={rule.id} id={`hl-${rule.id}`}
                   className={`glass rounded-2xl p-5 transition-all ${!rule.enabled?'opacity-45':''}`}
                   style={{border: rule.enabled ? `1px solid ${s.border}` : '1px solid var(--border-subtle)'}}>
                   <div className="flex items-start gap-4">
