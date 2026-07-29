@@ -120,6 +120,32 @@ html.light {
   ::-webkit-scrollbar-thumb { background: rgba(167,139,250,0.25); border-radius: 99px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(167,139,250,0.5); }
 
+  /* Sidebar nav scrollbar — the global 5px bar above looks fine in a wide
+     content area, but the sidebar's own scroll track sits directly against
+     the nav items and the default width crowds it, especially at 220px.
+     A slimmer, further-inset bar reads as part of the sidebar chrome
+     instead of a stray browser scrollbar. */
+  .sidebar-nav-expanded { scrollbar-gutter: stable; }
+  .sidebar-nav-expanded::-webkit-scrollbar { width: 3px; }
+  .sidebar-nav-expanded::-webkit-scrollbar-track { background: transparent; }
+  .sidebar-nav-expanded::-webkit-scrollbar-thumb { background: rgba(167,139,250,0.16); border-radius: 99px; }
+  .sidebar-nav-expanded::-webkit-scrollbar-thumb:hover { background: rgba(167,139,250,0.4); }
+
+  /* Collapsed icon rail (60px) — there's no room for a visible scrollbar
+     without it crowding or off-centering the icons, so hide it entirely.
+     Mouse wheel / trackpad / touch scrolling still works exactly the same;
+     only the visual scrollbar affordance goes away. */
+  .sidebar-nav-collapsed { scrollbar-width: none; -ms-overflow-style: none; }
+  .sidebar-nav-collapsed::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+  /* Soft top/bottom fade on the sidebar nav so a scrollable list tapers
+     out of view instead of cutting off mid-icon — a subtle hint that
+     there's more above/below without needing an explicit scroll arrow. */
+  .sidebar-nav-fade {
+    mask-image: linear-gradient(to bottom, transparent 0, black 14px, black calc(100% - 14px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 14px, black calc(100% - 14px), transparent 100%);
+  }
+
   /* Accessible, brand-consistent focus ring — replaces the browser default
      blue outline everywhere (buttons, links, inputs, cards) without
      removing focus visibility. Only shows for keyboard navigation

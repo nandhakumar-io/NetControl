@@ -564,7 +564,8 @@ export default function Layout() {
         </div>
 
         {/* Main Nav */}
-        <nav className="flex-1 py-4 px-2 flex flex-col gap-1.5 overflow-y-auto">
+        <nav className={`flex-1 py-4 px-2 flex flex-col gap-1.5 overflow-y-auto sidebar-nav-fade
+          ${collapsed ? 'sidebar-nav-collapsed items-center' : 'sidebar-nav-expanded'}`}>
           {NAV_SECTIONS.map((section, idx) => {
             // The ungrouped top section (label: null, Dashboard/Organizations)
             // is always fully visible — only labeled groups collapse.
