@@ -118,9 +118,18 @@ async function wakeSmart(device) {
   }
 
   if (relayAgent) {
+    // Use the limited broadcast address (255.255.255.255) rather than a
+    // guessed subnet broadcast here. The relay agent is physically on the
+    // target's L2 segment, so 255.255.255.255 is always valid there and is
+    // flooded to the local segment unconditionally by the OS - no ARP
+    // lookup, no dependency on guessing the right netmask. A guessed /24
+    // broadcast (e.g. "192.168.1.255") is WRONG on any network that isn't
+    // a clean /24 - the OS then treats it as a plain unicast destination,
+    // tries to ARP-resolve it, gets no reply, and silently drops the
+    // packet before it ever becomes a broadcast frame on the wire.
     await wolRelay.enqueueJob(relayAgent.id, {
       mac: device.mac_address,
-      broadcastAddr: broadcastFor(device.ip_address),
+      broadcastAddr: '255.255.255.255',
       targetDeviceId: device.id,
       targetName: device.name,
     });

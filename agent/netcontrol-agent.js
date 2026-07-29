@@ -893,19 +893,19 @@ async function runRelaySession(creds, sessionId) {
 // — built with plain `dgram` (no extra npm dependency needed).
 const dgram = require('dgram');
 
-function sendMagicPacket(mac, broadcastAddr, port = 9) {
+// Send one magic packet from a specific local IPv4 address. Binding to
+// 0.0.0.0 and letting the OS pick the outbound interface is NOT safe on
+// multi-homed Windows machines (Ethernet + Wi-Fi, VPN adapters, Docker
+// Desktop's Hyper-V vEthernet, etc.) — the OS routing table can send the
+// broadcast out an interface other than the one actually sitting on the
+// target's LAN segment, and dgram.send()'s callback still reports success
+// even though the packet never touches the intended wire. Binding
+// explicitly to the local interface removes that ambiguity.
+function sendFrom(localAddr, packet, broadcastAddr, port) {
   return new Promise((resolve, reject) => {
-    const macBytes = mac.split(/[:-]/).map((h) => parseInt(h, 16));
-    if (macBytes.length !== 6 || macBytes.some((b) => Number.isNaN(b))) {
-      return reject(new Error(`Invalid MAC address: ${mac}`));
-    }
-    const packet = Buffer.alloc(102);
-    packet.fill(0xff, 0, 6);
-    for (let i = 6; i < 102; i += 6) Buffer.from(macBytes).copy(packet, i);
-
     const sock = dgram.createSocket('udp4');
     sock.once('error', (err) => { try { sock.close(); } catch {} reject(err); });
-    sock.bind(() => {
+    sock.bind(0, localAddr, () => {
       sock.setBroadcast(true);
       sock.send(packet, 0, packet.length, port, broadcastAddr, (err) => {
         sock.close();
@@ -913,6 +913,45 @@ function sendMagicPacket(mac, broadcastAddr, port = 9) {
       });
     });
   });
+}
+
+function localIPv4Addresses() {
+  const out = [];
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal) out.push(iface.address);
+    }
+  }
+  return out;
+}
+
+// Fires the magic packet from EVERY active local IPv4 interface rather than
+// trusting OS routing to pick the right one for a link-local broadcast
+// address. Broadcasts sent from an interface that isn't on the target's
+// segment simply go nowhere useful — harmless — so this is safe to do
+// unconditionally, and it guarantees the packet actually reaches the wire
+// the target is on regardless of adapter count/order/VPN state.
+async function sendMagicPacket(mac, broadcastAddr, port = 9) {
+  const macBytes = mac.split(/[:-]/).map((h) => parseInt(h, 16));
+  if (macBytes.length !== 6 || macBytes.some((b) => Number.isNaN(b))) {
+    throw new Error(`Invalid MAC address: ${mac}`);
+  }
+  const packet = Buffer.alloc(102);
+  packet.fill(0xff, 0, 6);
+  for (let i = 6; i < 102; i += 6) Buffer.from(macBytes).copy(packet, i);
+
+  const addrs = localIPv4Addresses();
+  if (!addrs.length) throw new Error('No active IPv4 interface found on relay agent host');
+
+  const results = await Promise.allSettled(
+    addrs.map((a) => sendFrom(a, packet, broadcastAddr, port))
+  );
+  const anyOk = results.some((r) => r.status === 'fulfilled');
+  if (!anyOk) {
+    const firstErr = results.find((r) => r.status === 'rejected');
+    throw new Error(firstErr?.reason?.message || 'Failed to send from any local interface');
+  }
 }
 
 async function wolRelayLoop(getCredsFn) {
