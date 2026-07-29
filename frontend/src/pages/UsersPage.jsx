@@ -7,6 +7,8 @@ import {
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
+import { RowsSkeleton } from '../components/ui/Skeleton'
+import EmptyState from '../components/ui/EmptyState'
 import UserModal from '../components/modals/UserModal'
 import UserActivityModal from '../components/modals/UserActivityModal'
 import { usePermissions } from '../hooks/usePermissions'
@@ -394,14 +396,16 @@ export default function UsersPage() {
           {['User', 'Role', 'Status', 'Last Login', 'Access', 'Actions'].map(h => <span key={h}>{h}</span>)}
         </div>
         {loading ? (
-          <div className="py-16 flex items-center justify-center">
-            <RefreshCw size={18} className="animate-spin" style={{ color: 'var(--text-muted)' }} />
-          </div>
+          <div className="p-4"><RowsSkeleton rows={5} /></div>
         ) : filtered.length === 0 ? (
-          <div className="py-16 flex flex-col items-center gap-2 opacity-50">
-            <Users size={26} style={{ color: 'var(--text-muted)' }} />
-            <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No users found</p>
-          </div>
+          <EmptyState
+            icon={Users}
+            title={search ? 'No users match your search' : 'No users yet'}
+            description={search ? 'Try a different name or email.' : 'Add your first user to give someone else access to NetControl.'}
+            action={search
+              ? <button onClick={() => setSearch('')} className="btn-ghost text-sm">Clear search</button>
+              : <button onClick={() => setEditTarget('new')} className="btn-primary"><Plus size={14} /> New User</button>}
+          />
         ) : filtered.map(u => (
           <UserRow key={u.id} user={u} currentUserId={currentUser?.id} groups={groups}
             onEdit={setEditTarget} onDelete={setDeleteTarget}

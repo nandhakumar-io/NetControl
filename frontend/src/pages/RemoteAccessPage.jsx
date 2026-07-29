@@ -205,13 +205,11 @@ function EmbeddedTerminal({ device, onClose }) {
     setStatusMsg('')
 
     const wsUrl = buildWsUrl(device.id)
-    console.log('[Terminal] Connecting to:', wsUrl)
-    
+
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
     ws.onopen = () => {
-      console.log('[Terminal] WebSocket opened')
       const term = xtermRef.current
       // FIXED: Send proper connect message with terminal dimensions
       const connectMsg = {
@@ -219,7 +217,6 @@ function EmbeddedTerminal({ device, onClose }) {
         cols: term?.cols || 80,
         rows: term?.rows || 24
       }
-      console.log('[Terminal] Sending connect message:', connectMsg)
       ws.send(JSON.stringify(connectMsg))
       setReconnectCount(0)  // Reset on successful connection
     }
@@ -241,7 +238,6 @@ function EmbeddedTerminal({ device, onClose }) {
           xtermRef.current.write(new Uint8Array(msg.data))
         }
       } else if (msg.type === 'status') {
-        console.log('[Terminal] Status:', msg.data)
         setStatusMsg(msg.data)
         if (msg.data && msg.data.startsWith('Connected')) {
           setStatus('connected')
@@ -257,8 +253,7 @@ function EmbeddedTerminal({ device, onClose }) {
       }
     }
 
-    ws.onclose = (evt) => {
-      console.log('[Terminal] WebSocket closed:', evt.code, evt.reason)
+    ws.onclose = () => {
       setStatus('closed')
       if (xtermRef.current) {
         xtermRef.current.writeln('\r\n\x1b[90m[Connection closed]\x1b[0m\r\n')

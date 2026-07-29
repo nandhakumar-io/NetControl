@@ -14,6 +14,8 @@ import {
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
+import { RowsSkeleton } from '../components/ui/Skeleton'
+import EmptyState from '../components/ui/EmptyState'
 import { usePermissions } from '../hooks/usePermissions'
 import { useHighlightParam } from '../hooks/useHighlightParam'
 
@@ -135,12 +137,18 @@ export default function RunbooksPage() {
 
       <div className="card">
         {loading ? (
-          <div className="flex justify-center py-10"><Loader2 className="animate-spin text-brand-400" size={24} /></div>
+          <RowsSkeleton rows={4} />
         ) : runbooks.length === 0 ? (
-          <p className="text-sm text-slate-500 text-center py-8">
-            No runbooks yet. Create one to let alert rules automatically fix common problems —
-            e.g. "restart nginx", "clear ARP cache", "flush DNS".
-          </p>
+          <EmptyState
+            icon={Wrench}
+            title="No runbooks yet"
+            description={'Create one to let alert rules automatically fix common problems — e.g. "restart nginx", "clear ARP cache", "flush DNS".'}
+            action={
+              <button onClick={() => { setEditing(null); setShowForm(true) }} className="btn-primary">
+                <Plus size={14} /> New Runbook
+              </button>
+            }
+          />
         ) : (
           <div className="flex flex-col gap-2">
             {runbooks.map(rb => (

@@ -12,6 +12,8 @@ import {
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from 'recharts'
 import api from '../lib/api'
+import { RowsSkeleton } from '../components/ui/Skeleton'
+import EmptyState from '../components/ui/EmptyState'
 import { useThemeStore } from '../store/themeStore'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -906,11 +908,20 @@ export default function MonitoringPage() {
   },[devices,search,filterGroup,filterStatus,sortBy,metrics])
 
   if(loading) return (
-    <div className="flex items-center justify-center min-h-screen">
-      <div className="flex flex-col items-center gap-3">
-        <Activity size={24} className="animate-pulse" style={{color:'#a78bfa'}}/>
-        <p className="text-xs font-mono" style={{color:'var(--text-muted)'}}>Loading monitoring data…</p>
+    <div className="page-shell page-stack">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="skeleton-shimmer rounded-md h-5 w-40 mb-2" style={{background:'var(--bg-surface-3)'}}/>
+          <div className="skeleton-shimmer rounded-md h-3 w-56" style={{background:'var(--bg-surface-3)'}}/>
+        </div>
+        <div className="skeleton-shimmer rounded-lg w-8 h-8" style={{background:'var(--bg-surface-3)'}}/>
       </div>
+      <div className="flex flex-wrap gap-2">
+        <div className="skeleton-shimmer rounded-lg h-8 w-48" style={{background:'var(--bg-surface-3)'}}/>
+        <div className="skeleton-shimmer rounded-lg h-8 w-28" style={{background:'var(--bg-surface-3)'}}/>
+        <div className="skeleton-shimmer rounded-lg h-8 w-64" style={{background:'var(--bg-surface-3)'}}/>
+      </div>
+      <RowsSkeleton rows={6}/>
     </div>
   )
 
@@ -996,10 +1007,16 @@ export default function MonitoringPage() {
 
       {/* Device list */}
       {filtered.length===0 ? (
-        <div className="glass rounded-2xl p-12 flex flex-col items-center gap-2 opacity-50">
-          <Monitor size={22} style={{color:'var(--text-muted)'}}/>
-          <p className="text-sm font-body" style={{color:'var(--text-muted)'}}>No devices match your filters</p>
-        </div>
+        <EmptyState
+          icon={Monitor}
+          title="No devices match your filters"
+          description="Try a different search term, group, or status filter."
+          action={
+            <button onClick={()=>{setSearch('');setFilterGroup('all');setFilterStatus('all')}} className="btn-ghost text-sm">
+              Clear filters
+            </button>
+          }
+        />
       ) : (
         <>
           <VirtualList items={filtered} metrics={metrics} expanded={expanded} onToggle={toggle}/>

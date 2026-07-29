@@ -462,12 +462,36 @@ export default function DashboardPage() {
   }
 
   if (loading) return (
-    <div className="flex items-center justify-center min-h-screen" style={{background:'var(--bg-page)'}}>
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-10 h-10 rounded-2xl glass flex items-center justify-center">
-          <Activity size={18} className="animate-pulse" style={{color:'#a78bfa'}}/>
+    <div className="page-shell page-stack">
+      {/* Header placeholder */}
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="skeleton-shimmer rounded-md h-5 w-48 mb-2" style={{background:'var(--bg-surface-3)'}}/>
+          <div className="skeleton-shimmer rounded-md h-3 w-64" style={{background:'var(--bg-surface-3)'}}/>
         </div>
-        <p className="text-xs font-mono" style={{color:'var(--text-muted)'}}>Loading fleet data…</p>
+        <div className="skeleton-shimmer rounded-lg w-8 h-8" style={{background:'var(--bg-surface-3)'}}/>
+      </div>
+
+      {/* KPI stat cards — same grid the real content fills in, so nothing
+          reflows once data lands. */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {Array.from({length:6}).map((_,i)=>(
+          <div key={i} className="glass rounded-2xl p-4">
+            <div className="skeleton-shimmer rounded-md w-8 h-8 mb-3" style={{background:'var(--bg-surface-3)'}}/>
+            <div className="skeleton-shimmer rounded-md h-3 w-14 mb-2" style={{background:'var(--bg-surface-3)'}}/>
+            <div className="skeleton-shimmer rounded-md h-6 w-10" style={{background:'var(--bg-surface-3)'}}/>
+          </div>
+        ))}
+      </div>
+
+      {/* Fleet health + chart panels */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {Array.from({length:3}).map((_,i)=>(
+          <div key={i} className="glass rounded-2xl p-5 h-64">
+            <div className="skeleton-shimmer rounded-md h-3 w-24 mb-4" style={{background:'var(--bg-surface-3)'}}/>
+            <div className="skeleton-shimmer rounded-xl w-full" style={{background:'var(--bg-surface-3)', height:'calc(100% - 28px)'}}/>
+          </div>
+        ))}
       </div>
     </div>
   )

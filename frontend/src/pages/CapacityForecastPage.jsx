@@ -500,7 +500,10 @@ export default function CapacityForecastPage() {
       ) : filtered.length === 0 ? (
         <div className="card text-center py-12">
           <Search size={28} className="mx-auto mb-3" style={{ color: 'var(--text-faint)' }} />
-          <p className="font-body text-sm" style={{ color: 'var(--text-muted)' }}>No devices match your filters.</p>
+          <p className="font-body text-sm mb-3" style={{ color: 'var(--text-muted)' }}>No devices match your filters.</p>
+          <button onClick={() => { setSearch(''); setGroupFilter('all'); setStatusFilter('all') }} className="btn-ghost text-sm">
+            Clear filters
+          </button>
         </div>
       ) : (
         <div className="space-y-2">
