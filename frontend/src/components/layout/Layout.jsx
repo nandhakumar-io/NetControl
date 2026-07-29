@@ -7,7 +7,7 @@ import {
   ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
   PackageCheck, CalendarClock, CalendarDays, BellRing, ChevronDown,
-  HardDrive, Gauge, Workflow, ClipboardCheck, Settings2, Network,
+  HardDrive, Gauge, Workflow, ClipboardCheck, Settings2, Network, ListChecks,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
@@ -455,6 +455,7 @@ export default function Layout() {
         { to: '/compliance', icon: ShieldCheck, label: 'Compliance', show: can(2048) },
         { to: '/sla-reports', icon: FileBarChart2, label: 'SLA Reports', show: can(16384) },
         { to: '/audit',      icon: ScrollText,  label: 'Audit Log',  show: can(128) },
+        { to: '/jobs',       icon: ListChecks,  label: 'Jobs',       show: can(128) },
       ],
     },
   ]

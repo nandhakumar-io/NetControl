@@ -14,6 +14,7 @@ import DevicesPage     from './pages/DevicesPage'
 import GroupsPage      from './pages/GroupsPage'
 import SchedulesPage   from './pages/SchedulesPage'
 import AuditPage       from './pages/AuditPage'
+import JobsPage        from './pages/JobsPage'
 import TerminalPage    from './pages/TerminalPage'
 import RemoteAccessPage from './pages/RemoteAccessPage'
 import FilePushPage    from './pages/FilePushPage'
@@ -121,6 +122,7 @@ export default function App() {
           <Route path="file-push"     element={<RequirePermission bit={1}><FilePushPage /></RequirePermission>} />
           <Route path="schedules"     element={<RequirePermission bit={32}><SchedulesPage /></RequirePermission>} />
           <Route path="audit"         element={<RequirePermission bit={128}><AuditPage /></RequirePermission>} />
+          <Route path="jobs"          element={<RequirePermission bit={128}><JobsPage /></RequirePermission>} />
           <Route path="monitoring"     element={<RequirePermission bit={1}><MonitoringPage /></RequirePermission>} />
           <Route path="monitoring/history" element={<RequirePermission bit={1}><MonitoringHistoryPage /></RequirePermission>} />
           <Route path="alerts"          element={<RequirePermission bit={1}><AlertsPage /></RequirePermission>} />

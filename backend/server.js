@@ -269,6 +269,7 @@ app.use('/api/groups',    require('./routes/groups'));
 app.use('/api/actions',   require('./routes/actions'));
 app.use('/api/schedules', require('./routes/schedules'));
 app.use('/api/audit',     require('./routes/audit'));
+app.use('/api/jobs',      require('./routes/jobs'));
 app.use('/api/file-push', require('./routes/filePush'));
 app.use('/api/users',     require('./routes/users'));
 app.use('/api/sessions',  require('./routes/sessions'));

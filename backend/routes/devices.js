@@ -188,6 +188,47 @@ router.get('/health-scores', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── GET /api/devices/wake-eligibility ────────────────────────────────────────
+// Per-device WoL relay routing decision (services/wol.js#checkEligibility),
+// computed WITHOUT sending any packet — powers a "Wake-capable via: <agent>"
+// indicator on the Devices page so an operator can see before clicking Wake
+// whether a relay path exists at all, instead of only finding out after a
+// click produces a silent "direct" fallback that never reaches a
+// cross-subnet device. Fetched as its own endpoint (same reasoning as
+// /health-scores above) since it touches every other online device's IP to
+// find relay candidates and shouldn't block the page's first paint.
+// Must stay registered before GET /:id below, same reasoning as /tags.
+router.get('/wake-eligibility', async (req, res) => {
+  try {
+    const { checkEligibility } = require('../services/wol');
+    let devices = await query(
+      'SELECT id, ip_address, group_id FROM devices WHERE org_id = ?',
+      [req.orgId]
+    );
+    if (req.user.role !== 'admin') {
+      const allowed = await query(
+        'SELECT d.id FROM devices d INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? WHERE d.org_id = ?',
+        [req.user.id, req.orgId]
+      );
+      const allowedIds = new Set(allowed.map(r => r.id));
+      devices = devices.filter(d => allowedIds.has(d.id));
+    }
+
+    const results = {};
+    for (const d of devices) {
+      try {
+        const r = await checkEligibility(d);
+        results[d.id] = r.method === 'relay'
+          ? { method: 'relay', relayAgent: r.relayAgent.name }
+          : { method: r.method };
+      } catch {
+        results[d.id] = { method: 'none' };
+      }
+    }
+    res.json(results);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── GET /api/devices/:id ─────────────────────────────────────────────────────
 // SECURITY FIX: Non-admins could previously fetch ANY device by ID (IDOR).
 // Now every non-admin role (operator, viewer, custom) is restricted to

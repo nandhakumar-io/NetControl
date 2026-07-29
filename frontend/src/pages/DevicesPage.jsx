@@ -170,6 +170,35 @@ function OsBadge({ osType }) {
   )
 }
 
+// ── WoL relay eligibility badge ────────────────────────────────────────────────
+// Surfaces services/wol.js#checkEligibility's routing decision so an operator
+// can see, before clicking Wake, whether a path even exists: a direct
+// same-subnet broadcast, a relay through a named agent, or no path at all
+// (the click would still fall back to a direct broadcast as a last resort,
+// but that only actually lands if some intermediate hop happens to allow it —
+// worth flagging as unreliable rather than staying silent about it).
+function WakeEligibilityBadge({ eligibility }) {
+  if (!eligibility) return null
+  const { method, relayAgent } = eligibility
+  if (method === 'direct') return null // same subnet as server — nothing extra to say
+  if (method === 'relay') {
+    return (
+      <span title={`Wake requests for this device are relayed through ${relayAgent}, which is online and on the same subnet.`}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono"
+        style={{ background: 'rgba(34,197,94,0.1)', color: '#22c55e' }}>
+        <Zap size={9} /> via {relayAgent}
+      </span>
+    )
+  }
+  return (
+    <span title="No online relay agent found on this device's subnet, and the server can't broadcast to it directly. Wake will likely fail unless a relay agent comes online."
+      className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono"
+      style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>
+      <AlertOctagon size={9} /> no wake path
+    </span>
+  )
+}
+
 // ── Action button ─────────────────────────────────────────────────────────────
 function ActionBtn({ onClick, title, color, children }) {
   const colors = {
@@ -231,7 +260,7 @@ function Skeleton({ count = 8, view = 'grid' }) {
 }
 
 // ── Device Card (grid) ────────────────────────────────────────────────────────
-function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion }) {
+function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility }) {
   const isLight = useThemeStore(s => s.theme === 'light')
   const status  = device.status || 'unknown'
   const isOnline = status === 'online'
@@ -294,6 +323,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
         <div className="flex items-center gap-1.5 flex-wrap">
           <StatusBadge status={status} />
           {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
+          <WakeEligibilityBadge eligibility={wakeEligibility} />
         </div>
         <div className="flex items-center gap-1.5">
           <AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} />
@@ -372,7 +402,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 }
 
 // ── Group section header ──────────────────────────────────────────────────────
-function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion }) {
+function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility }) {
   const [open, setOpen] = useState(true)
   const online  = devices.filter(d => d.status === 'online').length
   const total   = devices.length
@@ -414,7 +444,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
               onSelect={id => onSelect(id, !selectedIds.has(id))}
               onWake={onWake} onShutdown={onShutdown} onRestart={onRestart}
               onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance}
-              latestAgentVersion={latestAgentVersion} />
+              latestAgentVersion={latestAgentVersion} wakeEligibility={wakeEligibility?.[d.id]} />
           ))}
         </div>
       )}
@@ -478,7 +508,7 @@ function ColumnsMenu({ visibleCols, onToggle, isLight }) {
   )
 }
 
-function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading, visibleCols }) {
+function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -557,6 +587,7 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
       <div className="flex items-center gap-1.5 flex-wrap">
         <StatusBadge status={status} />
         {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
+        <WakeEligibilityBadge eligibility={wakeEligibility} />
       </div>
 
       {/* Actions */}
@@ -676,6 +707,7 @@ export default function DevicesPage() {
   const [latestAgentVersion, setLatestAgentVersion] = useState(null)
   const [healthScores, setHealthScores] = useState({}) // { [deviceId]: { score, breakdown, ... } }
   const [healthLoading, setHealthLoading] = useState(true)
+  const [wakeEligibility, setWakeEligibility] = useState({}) // { [deviceId]: { method: 'direct'|'relay'|'none', relayAgent? } }
   const [sortKey, setSortKey] = useState(null) // null | 'health'
   const [sortDir, setSortDir] = useState('asc') // 'asc' surfaces worst-health-first, which is the point of sorting by it
   // List view column visibility — MAC/OS/Agent are the columns worth
@@ -712,6 +744,18 @@ export default function DevicesPage() {
       .catch(() => setHealthScores({}))
       .finally(() => setHealthLoading(false))
   }, [])
+
+  // Wake-on-LAN relay eligibility — which agent (if any) would actually
+  // carry a wake request to each device (services/wol.js#checkEligibility).
+  // Computed server-side without sending any packet; surfaced as a
+  // "Wake-capable via: <agent>" indicator so a dead-end relay path is
+  // visible before clicking Wake, not discovered after it silently falls
+  // back to a direct broadcast that never reaches the device.
+  useEffect(() => {
+    api.get('/devices/wake-eligibility')
+      .then(({ data }) => setWakeEligibility(data))
+      .catch(() => setWakeEligibility({}))
+  }, [devices])
 
   // Published agent release version (services/agentRelease.js), used to flag
   // devices running an older agent build. 404 just means no release has been
@@ -1221,7 +1265,8 @@ export default function DevicesPage() {
               onEdit={d => setDeviceModal(d)}
               onDelete={d => setDeleteTarget(d)}
               onToggleMaintenance={handleToggleMaintenance}
-              latestAgentVersion={latestAgentVersion} />
+              latestAgentVersion={latestAgentVersion}
+              wakeEligibility={wakeEligibility} />
           ))}
         </div>
 
@@ -1278,7 +1323,8 @@ export default function DevicesPage() {
                 latestAgentVersion={latestAgentVersion}
                 health={healthScores[d.id]}
                 healthLoading={healthLoading}
-                visibleCols={visibleCols} />
+                visibleCols={visibleCols}
+                wakeEligibility={wakeEligibility[d.id]} />
             ))}
           </div>
         </div>

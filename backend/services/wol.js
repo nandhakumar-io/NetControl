@@ -143,4 +143,46 @@ async function wakeSmart(device) {
   return { ok: true, method: 'direct' };
 }
 
-module.exports = { wake, wakeSmart };
+/**
+ * Read-only version of wakeSmart()'s routing decision — same subnet/relay
+ * lookup, but never sends a packet or queues a relay job. Lets the UI show
+ * "Wake-capable via: <agent>" (or "direct" / "no path") per device up front,
+ * instead of the operator only finding out a relay path doesn't exist after
+ * clicking Wake and getting a fallback "direct" result that silently never
+ * reaches the device.
+ * @param {{id:string, ip_address:string, group_id:?string}} device
+ * @returns {Promise<{method:'direct'|'relay'|'none', relayAgent?:{id:string,name:string}}>}
+ */
+async function checkEligibility(device) {
+  const targetSubnet = subnet24(device.ip_address);
+
+  if (targetSubnet && localSubnets().has(targetSubnet)) {
+    return { method: 'direct' };
+  }
+
+  if (!targetSubnet) return { method: 'none' };
+
+  const sameGroupCandidates = device.group_id
+    ? await query(
+        `SELECT id, name FROM devices
+         WHERE id != ? AND agent_key_hash IS NOT NULL AND status = 'online'
+           AND ip_address LIKE ? AND group_id = ?`,
+        [device.id, `${targetSubnet}.%`, device.group_id]
+      )
+    : [];
+
+  let relayAgent = sameGroupCandidates[0] || null;
+  if (!relayAgent) {
+    const anyCandidates = await query(
+      `SELECT id, name FROM devices
+       WHERE id != ? AND agent_key_hash IS NOT NULL AND status = 'online'
+         AND ip_address LIKE ?`,
+      [device.id, `${targetSubnet}.%`]
+    );
+    relayAgent = anyCandidates[0] || null;
+  }
+
+  return relayAgent ? { method: 'relay', relayAgent } : { method: 'none' };
+}
+
+module.exports = { wake, wakeSmart, checkEligibility };
