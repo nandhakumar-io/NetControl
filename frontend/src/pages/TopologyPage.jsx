@@ -999,12 +999,31 @@ export default function TopologyPage() {
   // being dragged arbitrarily far off into empty space with nothing but the
   // recenter button to find your way back.
   const bounds = useMemo(() => {
-    const xs = nodesWithCounts.map(n => n.x), ys = nodesWithCounts.map(n => n.y)
     const pad = 70
-    return {
-      minX: Math.min(...xs) - pad, maxX: Math.max(...xs) + pad,
-      minY: Math.min(...ys) - pad, maxY: Math.max(...ys) + pad,
+    // NOTE: this used to be Math.min(...xs)/Math.max(...xs) on arrays built
+    // from every node on the map. Spreading a large array into Math.min/max
+    // passes each element as its own function argument, and every JS engine
+    // has a hard limit on how many arguments a call can take (tens of
+    // thousands, engine-dependent). Once the topology had enough nodes
+    // (subnets/devices fanned out across sites), that limit was blown and
+    // the call threw "RangeError: Maximum call stack size exceeded" — right
+    // inside a useMemo that recomputes on every pan/zoom/select-driven
+    // re-render, which is exactly why scrolling, zooming, or selecting a
+    // node could crash the page into the ErrorBoundary's "reload" screen.
+    // A plain reduce loop has no argument-count limit and handles an empty
+    // node list (falls back to a small default box around the origin)
+    // instead of returning +/-Infinity.
+    if (nodesWithCounts.length === 0) {
+      return { minX: -pad, maxX: pad, minY: -pad, maxY: pad }
     }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const n of nodesWithCounts) {
+      if (n.x < minX) minX = n.x
+      if (n.x > maxX) maxX = n.x
+      if (n.y < minY) minY = n.y
+      if (n.y > maxY) maxY = n.y
+    }
+    return { minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad }
   }, [nodesWithCounts])
 
   // Keeps a soft margin of real content on-screen at all times. Panning

@@ -1,4 +1,5 @@
 // services/wol.js — Wake-on-LAN magic packet sender
+const os = require('os');
 const wol = require('wol');
 const { query } = require('../db');
 const wolRelay = require('./wolRelay');
@@ -37,18 +38,53 @@ function broadcastFor(ip) {
   return s ? `${s}.255` : '255.255.255.255';
 }
 
+// /24s of every IPv4 interface on THIS machine (the NetControl server
+// process itself) — used to answer "is the target already on a subnet the
+// server can broadcast into directly?" before we bother looking for a
+// relay agent. Computed fresh on every call (interfaces can change, and
+// this is cheap) rather than cached at module load.
+function localSubnets() {
+  const out = new Set();
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        const s = subnet24(iface.address);
+        if (s) out.add(s);
+      }
+    }
+  }
+  return out;
+}
+
 /**
- * Wake a device, relaying through an online agent on the target's own
- * subnet when one is available (so the broadcast actually reaches the
- * target instead of dying at the server's own router). Falls back to the
- * legacy direct-broadcast path if no suitable relay agent is found — which
- * only actually works if the server itself shares that subnet.
+ * Wake a device. Order of operations, matching how a real WoL relay setup
+ * has to behave since broadcast frames never cross a router:
+ *   1. Same subnet as the server itself? The server's own broadcast reaches
+ *      it directly — send it straight away, no relay needed.
+ *   2. Otherwise, is there an online agent (any device with a checked-in
+ *      agent) sitting on the TARGET's subnet? Relay the job to it so the
+ *      magic packet is broadcast from inside that device's own L2 segment,
+ *      exactly as if that agent's machine had initiated the wake itself.
+ *   3. No agent there either — fall back to the server's own broadcast as
+ *      a last resort (kept for parity with the old behavior; it will only
+ *      actually land if some intermediate hop still permits it).
  * @param {{id:string, mac_address:string, ip_address:string, group_id:?string}} device
- * @returns {Promise<{ok:boolean, method:'relay'|'direct', relayAgent?:string}>}
+ * @returns {Promise<{ok:boolean, method:'direct'|'relay', relayAgent?:string}>}
  */
 async function wakeSmart(device) {
   const targetSubnet = subnet24(device.ip_address);
 
+  // Step 1: server and target share a /24 — plain direct broadcast works,
+  // skip the relay lookup entirely.
+  if (targetSubnet && localSubnets().has(targetSubnet)) {
+    await wake(device.mac_address, broadcastFor(device.ip_address));
+    return { ok: true, method: 'direct' };
+  }
+
+  // Step 2: look for any other agent-equipped device already checked in
+  // (online) on the target's subnet, so it can broadcast locally on the
+  // target's behalf.
   let relayAgent = null;
   if (targetSubnet) {
     // Prefer another device in the same group that's on the same /24 and
@@ -91,8 +127,9 @@ async function wakeSmart(device) {
     return { ok: true, method: 'relay', relayAgent: relayAgent.name };
   }
 
-  // No agent on that subnet — fall back to the server's own broadcast,
-  // which only reaches the target if the server happens to share the LAN.
+  // Step 3: no agent on that subnet either — fall back to the server's own
+  // broadcast, which will only actually land if some intermediate network
+  // hop still lets it through (kept for parity with the legacy behavior).
   await wake(device.mac_address, broadcastFor(device.ip_address));
   return { ok: true, method: 'direct' };
 }

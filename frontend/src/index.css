@@ -284,6 +284,28 @@ html.light {
   .card { @apply glass rounded-2xl p-5 sm:p-6 animate-fade-in; }
   html.light .card { border-radius: 1rem; }
 
+  /* Loading placeholders — see components/ui/Skeleton.jsx. A slow
+     left-to-right sheen instead of a flat pulse; reads as "actively
+     working" without being distracting, and respects reduced-motion. */
+  .skeleton-shimmer {
+    position: relative;
+    overflow: hidden;
+  }
+  .skeleton-shimmer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, var(--bg-hover), transparent);
+    animation: skeleton-sheen 1.6s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton-shimmer::after { animation: none; opacity: 0.6; }
+  }
+  @keyframes skeleton-sheen {
+    100% { transform: translateX(100%); }
+  }
+
   /* ── Page shell ─────────────────────────────────────────────────────────
      Standardizes the outer wrapper every page currently rolls by hand
      (some used p-4 sm:p-5, others p-4 sm:p-6 or bare p-6, with

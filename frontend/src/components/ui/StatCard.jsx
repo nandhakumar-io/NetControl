@@ -22,7 +22,7 @@ export default function StatCard({ icon: Icon, label, value, sub, iconColor, ico
   const isLight = theme === 'light'
 
   return (
-    <div className="card flex items-center gap-4">
+    <div className="card flex items-center gap-4 transition-transform duration-200 hover:-translate-y-0.5">
       <div
         className={`w-11 h-11 rounded-xl border flex items-center justify-center shrink-0 ${iconBg}`}
         style={isLight ? { borderColor: 'var(--border-subtle)' } : {}}
