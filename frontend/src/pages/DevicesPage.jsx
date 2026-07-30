@@ -89,13 +89,14 @@ function HealthBadge({ health, loading }) {
   }
   if (!health) return <span className="text-sm" style={{ color: 'var(--text-faint)' }}>—</span>
 
-  const { score, breakdown, uptime_pct, drift_status, days_to_full } = health
+  const { score, breakdown, uptime_pct, drift_status, days_to_full, trend } = health
   const color = healthColor(score)
   const lines = [`Health score: ${score}/100`]
   lines.push(breakdown.alerts < 0 ? `Open alerts: ${breakdown.alerts} pts` : 'Open alerts: none')
   lines.push(drift_status === 'drift' ? `Config drift detected: ${breakdown.drift} pts` : drift_status === 'clean' ? 'Config drift: clean' : 'Config drift: no data yet')
   lines.push(typeof days_to_full === 'number' ? `Disk projected full in ${Math.round(days_to_full)}d: ${breakdown.capacity} pts` : 'Capacity: stable')
   lines.push(uptime_pct != null ? `7-day uptime ${uptime_pct.toFixed(1)}%: ${breakdown.uptime} pts` : '7-day uptime: no data yet')
+  lines.push(trend ? `7-day trend: ${trend}` : '7-day trend: not enough history yet')
 
   return (
     <span title={lines.join('\n')}
@@ -103,6 +104,8 @@ function HealthBadge({ health, loading }) {
       style={{ background: `${color}1f`, border: `1px solid ${color}40`, color }}>
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
       {score}
+      {trend === 'worsening' && <ArrowDown size={9} style={{ color: '#f87171' }} />}
+      {trend === 'improving' && <ArrowUp size={9} style={{ color: '#22c55e' }} />}
     </span>
   )
 }
@@ -178,9 +181,19 @@ function OsBadge({ osType }) {
 // (the click would still fall back to a direct broadcast as a last resort,
 // but that only actually lands if some intermediate hop happens to allow it —
 // worth flagging as unreliable rather than staying silent about it).
+// Human-readable reasons for wakeEligibility.reason (services/wol.js#checkEligibility),
+// shared between the per-row badge and the bulk-wake skip explainer so both
+// say the same thing.
+const WAKE_SKIP_REASONS = {
+  no_mac:   { label: 'no MAC address',   detail: 'This device has no MAC address configured, so a Wake-on-LAN packet can never be sent to it.' },
+  no_ip:    { label: 'no IP address',    detail: "This device has no IP address on file, so its subnet — and therefore any relay path — can't be determined." },
+  no_relay: { label: 'no relay path',    detail: "No online relay agent was found on this device's subnet, and the server can't broadcast to it directly. Wake will likely fail unless a relay agent comes online." },
+  error:    { label: 'check failed',     detail: 'Could not determine a wake path for this device (eligibility check failed).' },
+}
+
 function WakeEligibilityBadge({ eligibility }) {
   if (!eligibility) return null
-  const { method, relayAgent } = eligibility
+  const { method, relayAgent, reason } = eligibility
   if (method === 'direct') return null // same subnet as server — nothing extra to say
   if (method === 'relay') {
     return (
@@ -191,11 +204,12 @@ function WakeEligibilityBadge({ eligibility }) {
       </span>
     )
   }
+  const r = WAKE_SKIP_REASONS[reason] || WAKE_SKIP_REASONS.no_relay
   return (
-    <span title="No online relay agent found on this device's subnet, and the server can't broadcast to it directly. Wake will likely fail unless a relay agent comes online."
+    <span title={r.detail}
       className="inline-flex items-center gap-1 px-2 py-1 rounded text-sm font-mono"
       style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>
-      <AlertOctagon size={9} /> no wake path
+      <AlertOctagon size={9} /> {r.label}
     </span>
   )
 }
@@ -261,7 +275,7 @@ function Skeleton({ count = 8, view = 'grid' }) {
 }
 
 // ── Device Card (grid) ────────────────────────────────────────────────────────
-function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility }) {
+function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag }) {
   const isLight = useThemeStore(s => s.theme === 'light')
   const status  = device.status || 'unknown'
   const isOnline = status === 'online'
@@ -379,14 +393,11 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
       )}
 
       {/* Tags — freeform ad-hoc labels, independent of the group hierarchy */}
-      {device.tags?.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-2.5" onClick={e => e.stopPropagation()}>
-          {device.tags.map(tag => (
-            <span key={tag} className="text-[11px] font-mono px-1.5 py-0.5 rounded-md"
-              style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
-              {tag}
-            </span>
-          ))}
+      {(device.tags?.length > 0 || onAddTag) && (
+        <div className="mt-2.5">
+          <TagQuickEditor tags={device.tags} size="md"
+            onAdd={onAddTag && (tag => onAddTag(device, tag))}
+            onRemove={onRemoveTag && (tag => onRemoveTag(device, tag))} />
         </div>
       )}
 
@@ -403,11 +414,25 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 }
 
 // ── Group section header ──────────────────────────────────────────────────────
-function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility }) {
+function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag, onBulkAddTag }) {
   const [open, setOpen] = useState(true)
   const online  = devices.filter(d => d.status === 'online').length
   const total   = devices.length
   const allSel  = devices.every(d => selectedIds.has(d.id))
+  const selectedInGroup = devices.filter(d => selectedIds.has(d.id))
+
+  const handleBulkTag = (e) => {
+    e.stopPropagation()
+    const targets = selectedInGroup.length ? selectedInGroup : devices
+    const tag = window.prompt(
+      selectedInGroup.length
+        ? `Add tag to ${targets.length} selected device(s) in "${groupName}":`
+        : `Add tag to all ${targets.length} device(s) in "${groupName}":`, ''
+    )
+    if (tag === null) return
+    const t = tag.trim()
+    if (t) onBulkAddTag?.(targets, t)
+  }
 
   return (
     <div className="mb-8">
@@ -428,9 +453,22 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
           <div className="h-full rounded-full bg-accent-green transition-all duration-700"
             style={{ width: total ? `${(online / total) * 100}%` : '0%', opacity: 0.7 }} />
         </div>
+        {/* Bulk tag — tags the current selection within this group, or the
+            whole group if nothing's selected yet. Same tag quick-editor
+            behavior as list rows/cards, just applied to many devices at once. */}
+        {onBulkAddTag && (
+          <span onClick={handleBulkTag}
+            title={selectedInGroup.length
+              ? `Add tag to ${selectedInGroup.length} selected device(s) in this group`
+              : `Add tag to all ${total} device(s) in this group`}
+            className="ml-auto sm:ml-0 flex items-center gap-1 text-sm font-mono px-2 py-1 rounded-lg cursor-pointer transition-colors"
+            style={{ color: 'var(--text-faint)' }}>
+            + tag
+          </span>
+        )}
         {/* Select all */}
         <button onClick={e => { e.stopPropagation(); devices.forEach(d => onSelect(d.id, !allSel)) }}
-          className="ml-auto flex items-center gap-1.5 text-sm font-semibold transition-colors px-2 py-1 rounded-lg"
+          className={`${onBulkAddTag ? '' : 'ml-auto'} flex items-center gap-1.5 text-sm font-semibold transition-colors px-2 py-1 rounded-lg`}
           style={{ color: allSel ? '#a78bfa' : 'var(--text-faint)', background: allSel ? 'rgba(167,139,250,0.1)' : 'transparent' }}>
           {allSel ? <CheckSquare size={11} /> : <Square size={11} />}
           <span className="hidden sm:inline">Select all</span>
@@ -445,7 +483,8 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
               onSelect={id => onSelect(id, !selectedIds.has(id))}
               onWake={onWake} onShutdown={onShutdown} onRestart={onRestart}
               onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance}
-              latestAgentVersion={latestAgentVersion} wakeEligibility={wakeEligibility?.[d.id]} />
+              latestAgentVersion={latestAgentVersion} wakeEligibility={wakeEligibility?.[d.id]}
+              onAddTag={onAddTag} onRemoveTag={onRemoveTag} />
           ))}
         </div>
       )}
@@ -509,19 +548,68 @@ function ColumnsMenu({ visibleCols, onToggle, isLight }) {
   )
 }
 
+// ── Tag quick-editor ──────────────────────────────────────────────────────────
+// Shared chip list + inline "+" add control for a single device's freeform
+// tags. Used in list rows and grid cards alike so tagging behaves the same
+// no matter which view you're in.
+function TagQuickEditor({ tags, onAdd, onRemove, size = 'sm' }) {
+  const [adding, setAdding] = useState(false)
+  const [draft, setDraft] = useState('')
+  const chipCls = size === 'sm' ? 'text-[10px] px-1.5 py-0.5' : 'text-[11px] px-1.5 py-0.5'
+
+  const submit = () => {
+    const t = draft.trim()
+    if (t) onAdd?.(t)
+    setDraft('')
+    setAdding(false)
+  }
+
+  if (!tags?.length && !onAdd) return null
+
+  return (
+    <div className="flex flex-wrap items-center gap-1" onClick={e => e.stopPropagation()}>
+      {tags?.map(tag => (
+        <span key={tag}
+          className={`inline-flex items-center gap-1 font-mono rounded group/tag ${chipCls}`}
+          style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
+          {tag}
+          {onRemove && (
+            <button onClick={() => onRemove(tag)}
+              className="opacity-0 group-hover/tag:opacity-100 transition-opacity hover:text-red-400"
+              title={`Remove tag "${tag}"`}>
+              <X size={9} />
+            </button>
+          )}
+        </span>
+      ))}
+      {onAdd && (adding ? (
+        <input autoFocus
+          className={`font-mono rounded w-16 outline-none ${chipCls}`}
+          style={{ background: 'var(--bg-surface-2)', border: '1px solid rgba(167,139,250,0.3)', color: 'var(--text-primary)' }}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') submit()
+            if (e.key === 'Escape') { setDraft(''); setAdding(false) }
+          }}
+          onBlur={submit}
+          placeholder="tag" />
+      ) : (
+        <button onClick={() => setAdding(true)}
+          className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-mono px-1 rounded"
+          style={{ color: 'var(--text-faint)' }}
+          title="Add tag">
+          +
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, onAddTag, onRemoveTag, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
-  const [addingTag, setAddingTag] = useState(false)
-  const [tagDraft, setTagDraft] = useState('')
-
-  const submitTagDraft = () => {
-    const t = tagDraft.trim()
-    if (t) onAddTag?.(device, t)
-    setTagDraft('')
-    setAddingTag(false)
-  }
 
   const openTerminal = (e) => {
     e.stopPropagation()
@@ -567,41 +655,10 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
         <p className="text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
         {group && <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
         {(device.tags?.length > 0 || onAddTag) && (
-          <div className="flex flex-wrap items-center gap-1 mt-1" onClick={e => e.stopPropagation()}>
-            {device.tags?.map(tag => (
-              <span key={tag}
-                className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded group/tag"
-                style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
-                {tag}
-                {onRemoveTag && (
-                  <button onClick={() => onRemoveTag(device, tag)}
-                    className="opacity-0 group-hover/tag:opacity-100 transition-opacity hover:text-red-400"
-                    title={`Remove tag "${tag}"`}>
-                    <X size={9} />
-                  </button>
-                )}
-              </span>
-            ))}
-            {onAddTag && (addingTag ? (
-              <input autoFocus
-                className="text-[10px] font-mono px-1.5 py-0.5 rounded w-16 outline-none"
-                style={{ background: 'var(--bg-surface-2)', border: '1px solid rgba(167,139,250,0.3)', color: 'var(--text-primary)' }}
-                value={tagDraft}
-                onChange={e => setTagDraft(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') submitTagDraft()
-                  if (e.key === 'Escape') { setTagDraft(''); setAddingTag(false) }
-                }}
-                onBlur={submitTagDraft}
-                placeholder="tag" />
-            ) : (
-              <button onClick={() => setAddingTag(true)}
-                className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-mono px-1 rounded"
-                style={{ color: 'var(--text-faint)' }}
-                title="Add tag">
-                +
-              </button>
-            ))}
+          <div className="mt-1">
+            <TagQuickEditor tags={device.tags}
+              onAdd={onAddTag && (tag => onAddTag(device, tag))}
+              onRemove={onRemoveTag && (tag => onRemoveTag(device, tag))} />
           </div>
         )}
       </div>
@@ -833,6 +890,28 @@ export default function DevicesPage() {
   const bulkAction = (type) => {
     const targets = devices.filter(d => selectedIds.has(d.id))
     if (!targets.length) return
+
+    // Wake specifically has known dead-ends up front (no MAC, no relay path
+    // — services/wol.js#checkEligibility, surfaced via wakeEligibility).
+    // Warn which devices will likely fail and why *before* firing the
+    // batch, rather than only reporting a bare failure count afterward.
+    if (type === 'wake') {
+      const skips = targets
+        .map(d => ({ device: d, elig: wakeEligibility[d.id] }))
+        .filter(({ elig }) => elig && elig.method === 'none')
+      if (skips.length) {
+        const byReason = {}
+        for (const { device, elig } of skips) {
+          const key = elig.reason || 'no_relay'
+          ;(byReason[key] ||= []).push(device.name)
+        }
+        const summary = Object.entries(byReason)
+          .map(([reason, names]) => `${names.length} ${WAKE_SKIP_REASONS[reason]?.label || 'no wake path'} (${names.slice(0, 3).join(', ')}${names.length > 3 ? `, +${names.length - 3} more` : ''})`)
+          .join(' · ')
+        toast(`${skips.length} of ${targets.length} selected will likely fail to wake: ${summary}`, { icon: '⚠️', duration: 6000 })
+      }
+    }
+
     setActionModal({ type, device: { name: `${targets.length} devices`, id: '__bulk__' }, bulk: targets })
   }
 
@@ -930,6 +1009,22 @@ export default function DevicesPage() {
       setAllTags(previousAllTags)
       toast.error(getErrorMessage(err, 'Failed to remove tag'))
     }
+  }
+
+  // Bulk tag — group-header "+ tag" control applies the same handleAddTag
+  // (with its per-device optimistic update/rollback) across every target
+  // device, then reports how many actually got the tag (a device that
+  // already has it is silently skipped by handleAddTag, not a failure).
+  const handleBulkAddTag = async (targetDevices, rawTag) => {
+    const tag = rawTag.trim().toLowerCase()
+    if (!tag) return
+    const applicable = targetDevices.filter(d => !d.tags?.includes(tag))
+    if (!applicable.length) {
+      toast(`All selected device(s) already have tag "${tag}"`, { icon: 'ℹ️' })
+      return
+    }
+    await Promise.all(applicable.map(d => handleAddTag(d, tag)))
+    toast.success(`Tagged ${applicable.length} device(s) with "${tag}"`)
   }
 
   const handleToggleMaintenance = async (device) => {
@@ -1060,6 +1155,25 @@ export default function DevicesPage() {
         return sortDir === 'asc' ? sa - sb : sb - sa
       })
       return withScore
+    }
+    if (sortKey === 'health-trend') {
+      // worsening -> stable -> improving -> no-trend-yet, so the devices
+      // that need attention float to the top regardless of sortDir;
+      // sortDir just flips which end ("worsening first" vs "improving
+      // first") starts the list.
+      const rank = { worsening: 0, stable: 1, improving: 2 }
+      const withTrend = [...base].sort((a, b) => {
+        const ta = healthScores[a.id]?.trend
+        const tb = healthScores[b.id]?.trend
+        const ra = ta == null ? 3 : rank[ta]
+        const rb = tb == null ? 3 : rank[tb]
+        if (ra !== rb) return sortDir === 'asc' ? ra - rb : rb - ra
+        // Tie-break within the same trend bucket by score, worst first.
+        const sa = healthScores[a.id]?.score ?? 100
+        const sb = healthScores[b.id]?.score ?? 100
+        return sa - sb
+      })
+      return withTrend
     }
     return base
   }, [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter, sortKey, sortDir, healthScores])
@@ -1365,7 +1479,10 @@ export default function DevicesPage() {
               onDelete={d => setDeleteTarget(d)}
               onToggleMaintenance={handleToggleMaintenance}
               latestAgentVersion={latestAgentVersion}
-              wakeEligibility={wakeEligibility} />
+              wakeEligibility={wakeEligibility}
+              onAddTag={handleAddTag}
+              onRemoveTag={handleRemoveTag}
+              onBulkAddTag={handleBulkAddTag} />
           ))}
         </div>
 
@@ -1391,17 +1508,30 @@ export default function DevicesPage() {
             {visibleCols.mac && <span>MAC Address</span>}
             {visibleCols.os && <span>OS</span>}
             {visibleCols.agent && <span>Agent</span>}
-            <button
-              className="flex items-center gap-1 uppercase tracking-wider text-sm font-bold text-left"
-              style={{ color: sortKey === 'health' ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-muted)' }}
-              title="Sort by composite health score (open alerts, drift, capacity runway, uptime)"
-              onClick={() => {
-                if (sortKey !== 'health') { setSortKey('health'); setSortDir('asc') }
-                else setSortDir(dir => dir === 'asc' ? 'desc' : 'asc')
-              }}>
-              Health
-              {sortKey === 'health' && (sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className="flex items-center gap-1 uppercase tracking-wider text-sm font-bold text-left"
+                style={{ color: sortKey === 'health' ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-muted)' }}
+                title="Sort by composite health score (open alerts, drift, capacity runway, uptime)"
+                onClick={() => {
+                  if (sortKey !== 'health') { setSortKey('health'); setSortDir('asc') }
+                  else setSortDir(dir => dir === 'asc' ? 'desc' : 'asc')
+                }}>
+                Health
+                {sortKey === 'health' && (sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+              </button>
+              <button
+                className="flex items-center gap-0.5 uppercase tracking-wider text-sm font-bold text-left"
+                style={{ color: sortKey === 'health-trend' ? (isLight ? '#6c5ce7' : '#a78bfa') : 'var(--text-faint)' }}
+                title="Sort by health trend over the last 7 days (worsening / stable / improving), instead of the point-in-time score"
+                onClick={() => {
+                  if (sortKey !== 'health-trend') { setSortKey('health-trend'); setSortDir('asc') }
+                  else setSortDir(dir => dir === 'asc' ? 'desc' : 'asc')
+                }}>
+                Trend
+                {sortKey === 'health-trend' && (sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+              </button>
+            </div>
             <span>Status</span>
             <span>Actions</span>
           </div>

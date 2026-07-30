@@ -73,6 +73,9 @@ function localSubnets() {
  * @returns {Promise<{ok:boolean, method:'direct'|'relay', relayAgent?:string}>}
  */
 async function wakeSmart(device) {
+  if (!device.mac_address) {
+    throw new Error('No MAC address configured for this device — cannot send Wake-on-LAN');
+  }
   const targetSubnet = subnet24(device.ip_address);
 
   // Step 1: server and target share a /24 — plain direct broadcast works,
@@ -154,13 +157,17 @@ async function wakeSmart(device) {
  * @returns {Promise<{method:'direct'|'relay'|'none', relayAgent?:{id:string,name:string}}>}
  */
 async function checkEligibility(device) {
+  // No MAC at all means wake can never be attempted, regardless of subnet —
+  // surface that up front rather than only after a bulk wake fails.
+  if (!device.mac_address) return { method: 'none', reason: 'no_mac' };
+
   const targetSubnet = subnet24(device.ip_address);
 
   if (targetSubnet && localSubnets().has(targetSubnet)) {
     return { method: 'direct' };
   }
 
-  if (!targetSubnet) return { method: 'none' };
+  if (!targetSubnet) return { method: 'none', reason: 'no_ip' };
 
   const sameGroupCandidates = device.group_id
     ? await query(
@@ -182,7 +189,7 @@ async function checkEligibility(device) {
     relayAgent = anyCandidates[0] || null;
   }
 
-  return relayAgent ? { method: 'relay', relayAgent } : { method: 'none' };
+  return relayAgent ? { method: 'relay', relayAgent } : { method: 'none', reason: 'no_relay' };
 }
 
 module.exports = { wake, wakeSmart, checkEligibility };

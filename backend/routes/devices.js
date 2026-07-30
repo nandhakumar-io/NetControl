@@ -202,7 +202,7 @@ router.get('/wake-eligibility', async (req, res) => {
   try {
     const { checkEligibility } = require('../services/wol');
     let devices = await query(
-      'SELECT id, ip_address, group_id FROM devices WHERE org_id = ?',
+      'SELECT id, ip_address, group_id, mac_address FROM devices WHERE org_id = ?',
       [req.orgId]
     );
     if (req.user.role !== 'admin') {
@@ -220,9 +220,9 @@ router.get('/wake-eligibility', async (req, res) => {
         const r = await checkEligibility(d);
         results[d.id] = r.method === 'relay'
           ? { method: 'relay', relayAgent: r.relayAgent.name }
-          : { method: r.method };
+          : { method: r.method, reason: r.reason };
       } catch {
-        results[d.id] = { method: 'none' };
+        results[d.id] = { method: 'none', reason: 'error' };
       }
     }
     res.json(results);

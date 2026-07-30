@@ -717,6 +717,13 @@ run()
       console.warn('  ⚠  compliance_tables:', e.message);
     }
     try {
+      const { migrateHealthScoreHistoryTables } = require('./migrate-health-score-history');
+      await migrateHealthScoreHistoryTables();
+      console.log('  ✓ health_score_history (device_health_score_history)');
+    } catch (e) {
+      console.warn('  ⚠  health_score_history:', e.message);
+    }
+    try {
       const { migrateMetricsHistoryTables } = require('./migrate-metrics-history');
       await migrateMetricsHistoryTables();
       console.log('  ✓ metrics_history (long-term metrics for the Monitoring History page)');

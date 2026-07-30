@@ -62,8 +62,34 @@ const AGENT_PATH   = path.resolve(process.argv[1]);
 // thing an operator should consciously opt into per-fleet, not something
 // that silently turns on.
 const AUTO_UPDATE  = /^(1|true|yes)$/i.test(process.env.NC_AUTO_UPDATE || '');
-let AGENT_VERSION = '0.0.0';
-try { AGENT_VERSION = require('./package.json').version || '0.0.0'; } catch { /* package.json not alongside the script — version reporting just says 0.0.0 */ }
+// AGENT_VERSION — the version this build reports to the server (see the
+// agent_version field sent on every registration/metrics POST below), which
+// drives the Devices page's agent-version badge and the update-available
+// check in services/agentRelease.js.
+//
+// BUG FIX: this used to come exclusively from `require('./package.json').version`,
+// silently falling back to '0.0.0' whenever package.json wasn't sitting
+// right next to the script. That's not an edge case — it's the NORMAL
+// deployment path documented at the top of this file ("download
+// netcontrol-agent.js and run it standalone", no npm install). Every such
+// install therefore reported v0.0.0 forever regardless of which build was
+// actually running, which is why the version looked permanently "stuck"
+// and permanently flagged as outdated against whatever the admin published.
+//
+// Fixed by making this literal constant — bumped alongside agent/package.json's
+// "version" field whenever a new build is cut — the primary source of truth.
+// It's baked into the script text itself, so it travels correctly with the
+// file no matter how it's copied around (curl download, self-update's
+// versioned install directories, etc.) without depending on any sidecar
+// file being present. package.json is still consulted as a secondary check
+// for npm-installed setups, but never allowed to silently downgrade this to
+// 0.0.0 the way the old try/catch did.
+const AGENT_VERSION_BUILD = '1.1.2';
+let AGENT_VERSION = AGENT_VERSION_BUILD;
+try {
+  const pkgVersion = require('./package.json').version;
+  if (pkgVersion) AGENT_VERSION = pkgVersion;
+} catch { /* no package.json alongside the script (standalone deploy) — use AGENT_VERSION_BUILD above */ }
 
 const CRED_FILE = process.env.NC_CRED_FILE || (
   IS_WINDOWS

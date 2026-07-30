@@ -16,13 +16,95 @@
 // Devices.jsx surfaces `breakdown` in a tooltip precisely so the number is
 // never a mystery — it's exactly these four subtractions, shown.
 'use strict';
+const crypto = require('crypto');
 const { query } = require('../db');
 const capacityForecast = require('./capacityForecast');
 const { computeDeviceUptime } = require('./slaReportService');
 
 const UPTIME_WINDOW_DAYS = 7;
+// How far back to look for the "previous" score when deciding trend, and
+// how often a new history row is allowed to be written per device — a
+// history row per page load would be far more granular than the signal
+// actually needs, so writes are throttled to once per this interval.
+const TREND_WINDOW_DAYS = 7;
+const HISTORY_WRITE_THROTTLE_SECONDS = 3600;
+// Score has to move by more than this to count as a real trend rather than
+// noise from e.g. one alert clearing and another firing the same day.
+const TREND_NOISE_THRESHOLD = 5;
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
+// Persists one row per device into device_health_score_history, throttled
+// to at most once every HISTORY_WRITE_THROTTLE_SECONDS so repeated page
+// loads (or the 5s status poll) don't spam the table — this is a trend
+// signal, not a fine-grained metrics series. Best-effort: a failure here
+// should never break the score computation itself.
+async function recordHealthScoreHistory(scores) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ids = Object.keys(scores);
+  if (!ids.length) return;
+
+  let recent = [];
+  try {
+    recent = await query(
+      `SELECT device_id, MAX(recorded_at) AS last_ts FROM device_health_score_history
+        WHERE device_id IN (${ids.map(() => '?').join(',')})
+        GROUP BY device_id`,
+      ids
+    );
+  } catch { return; }
+  const lastByDevice = {};
+  for (const r of recent) lastByDevice[r.device_id] = r.last_ts;
+
+  for (const id of ids) {
+    const last = lastByDevice[id];
+    if (last && nowSec - last < HISTORY_WRITE_THROTTLE_SECONDS) continue;
+    try {
+      await query(
+        `INSERT INTO device_health_score_history (id, device_id, score, recorded_at) VALUES (?, ?, ?, ?)`,
+        [crypto.randomUUID(), id, scores[id].score, nowSec]
+      );
+    } catch { /* best-effort — a missed history write just delays the next trend point */ }
+  }
+}
+
+// Compares each device's current score against its oldest score within the
+// trailing TREND_WINDOW_DAYS (i.e. "where did you start the window"), which
+// answers "worsening vs. stable vs. improving over about a week" rather
+// than reacting to the very last data point. Devices with no history yet
+// simply have no trend to show — not the same as "stable".
+async function computeTrends(scores) {
+  const ids = Object.keys(scores);
+  if (!ids.length) return {};
+  const fromSec = Math.floor(Date.now() / 1000) - TREND_WINDOW_DAYS * 86400;
+
+  let rows = [];
+  try {
+    rows = await query(
+      `SELECT h.device_id, h.score FROM device_health_score_history h
+        INNER JOIN (
+          SELECT device_id, MIN(recorded_at) AS min_ts FROM device_health_score_history
+           WHERE device_id IN (${ids.map(() => '?').join(',')}) AND recorded_at >= ?
+           GROUP BY device_id
+        ) oldest ON oldest.device_id = h.device_id AND oldest.min_ts = h.recorded_at`,
+      [...ids, fromSec]
+    );
+  } catch { return {}; }
+
+  const baselineByDevice = {};
+  for (const r of rows) baselineByDevice[r.device_id] = r.score;
+
+  const trends = {};
+  for (const id of ids) {
+    const baseline = baselineByDevice[id];
+    if (baseline == null) { trends[id] = null; continue; }
+    const delta = scores[id].score - baseline;
+    trends[id] = delta > TREND_NOISE_THRESHOLD ? 'improving'
+      : delta < -TREND_NOISE_THRESHOLD ? 'worsening'
+      : 'stable';
+  }
+  return trends;
+}
 
 async function computeHealthScores(orgId) {
   const devices = await query(
@@ -106,6 +188,18 @@ async function computeHealthScores(orgId) {
 
     const score = clamp(100 + breakdown.alerts + breakdown.drift + breakdown.capacity + breakdown.uptime, 0, 100);
     scores[device.id] = { score: Math.round(score), breakdown, uptime_pct: uptimePct, drift_status: drift || null, days_to_full: forecast?.days_to_full ?? null };
+  }
+
+  // Best-effort: persist a throttled history point per device, then fold in
+  // the resulting trend (worsening/stable/improving) — see
+  // recordHealthScoreHistory/computeTrends above. Neither step should ever
+  // cause the whole scores response to fail.
+  try {
+    await recordHealthScoreHistory(scores);
+    const trends = await computeTrends(scores);
+    for (const id of Object.keys(scores)) scores[id].trend = trends[id] ?? null;
+  } catch {
+    for (const id of Object.keys(scores)) scores[id].trend = null;
   }
 
   return scores;
