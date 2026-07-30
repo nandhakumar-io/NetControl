@@ -1016,6 +1016,13 @@ run()
     } catch (e) {
       console.warn('  ⚠  group-device-type:', e.message);
     }
+    try {
+      const { migrateDeviceParent } = require('./migrate-device-parent');
+      await migrateDeviceParent();
+      console.log('  ✓ devices.parent_device_id (dependency-aware alert suppression — an upstream outage suppresses its downstream devices\' offline alerts)');
+    } catch (e) {
+      console.warn('  ⚠  devices.parent_device_id:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

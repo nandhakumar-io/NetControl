@@ -31,6 +31,11 @@ const deviceValidation = [
   body('mac_address').matches(/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/),
   body('os_type').isIn(['windows', 'linux']),
   body('group_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)).withMessage('Invalid group_id'),
+  // Dependency-aware alerting: which device this one sits behind (its
+  // switch/AP/router). See migrate-device-parent.js + evaluateAlerts() in
+  // routes/alerts.js, which suppresses a device's own offline-alert noise
+  // when its parent is the one that's actually down.
+  body('parent_device_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)).withMessage('Invalid parent_device_id'),
   body('ssh_username').optional({ nullable: true }).trim().isLength({ max: 100 }),
   body('ssh_password').optional({ nullable: true }).isLength({ max: 500 }),
   body('ssh_key').optional({ nullable: true }).isLength({ max: 10000 }),
@@ -343,7 +348,7 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
   try {
     const id = uuidv4();
     const {
-      name, ip_address, mac_address, os_type, group_id,
+      name, ip_address, mac_address, os_type, group_id, parent_device_id,
       ssh_username, ssh_password, ssh_key,
       rpc_username, rpc_password,
     } = req.body;
@@ -360,14 +365,22 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
       });
     }
 
+    // SECURITY: parent_device_id must belong to this same org, otherwise a
+    // device could be linked to (and effectively suppress its alerts based
+    // on the status of) another tenant's device.
+    if (parent_device_id) {
+      const parent = await queryOne('SELECT id FROM devices WHERE id = ? AND org_id = ?', [parent_device_id, req.orgId]);
+      if (!parent) return res.status(400).json({ error: 'Parent device not found' });
+    }
+
     await execute(
       `INSERT INTO devices
-         (id, name, ip_address, mac_address, os_type, group_id,
+         (id, name, ip_address, mac_address, os_type, group_id, parent_device_id,
           ssh_username, ssh_password, ssh_key,
           rpc_username, rpc_password, org_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        id, name, ip_address, normalizedMac, os_type, group_id || null,
+        id, name, ip_address, normalizedMac, os_type, group_id || null, parent_device_id || null,
         ssh_username  || null,
         ssh_password  ? encrypt(ssh_password)  : null,
         ssh_key       ? encrypt(ssh_key)        : null,
@@ -1082,7 +1095,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
   try {
     const deviceId = req.params.id;
     const {
-      name, ip_address, mac_address, os_type, group_id,
+      name, ip_address, mac_address, os_type, group_id, parent_device_id,
       ssh_username, ssh_password, ssh_key,
       rpc_username, rpc_password,
     } = req.body;
@@ -1098,13 +1111,32 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       if (!group) return res.status(400).json({ error: 'Group not found' });
     }
 
+    // Dependency-aware alerting: parent_device_id must belong to the same
+    // org (same reasoning as group_id above), can't be the device itself,
+    // and can't create a cycle. Only a single-level parent relationship is
+    // supported (no chains) — checking one level deep back is enough to
+    // catch both direct self-reference and the immediate A<->B cycle;
+    // deeper cycles are prevented for free since a device can only ever
+    // pick an *existing* device as its parent, and existing devices were
+    // themselves validated the same way when they were assigned.
+    if (parent_device_id) {
+      if (parent_device_id === deviceId) {
+        return res.status(400).json({ error: 'A device cannot be its own parent' });
+      }
+      const parent = await queryOne('SELECT id, parent_device_id FROM devices WHERE id = ? AND org_id = ?', [parent_device_id, req.orgId]);
+      if (!parent) return res.status(400).json({ error: 'Parent device not found' });
+      if (parent.parent_device_id === deviceId) {
+        return res.status(400).json({ error: 'That would create a parent/child loop between these two devices' });
+      }
+    }
+
     const normalizedMac = normaliseMac(mac_address || device.mac_address);
     const now = Math.floor(Date.now() / 1000);
 
     // Update device
     await execute(
       `UPDATE devices
-       SET name=?, ip_address=?, mac_address=?, os_type=?, group_id=?,
+       SET name=?, ip_address=?, mac_address=?, os_type=?, group_id=?, parent_device_id=?,
            ssh_username=?, ssh_password=?, ssh_key=?,
            rpc_username=?, rpc_password=?, updated_at=?
        WHERE id=? AND org_id=?`,
@@ -1114,6 +1146,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
         normalizedMac,
         os_type,
         group_id || null,
+        parent_device_id || null,
         ssh_username || null,
         ssh_password ? encrypt(ssh_password) : (req.body.ssh_password === null ? null : device.ssh_password),
         ssh_key ? encrypt(ssh_key) : (req.body.ssh_key === null ? null : device.ssh_key),
@@ -1130,8 +1163,8 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
     // included, and credential fields (ssh_password, ssh_key, rpc_password)
     // are reported as changed/unchanged only — their values are secrets
     // and never belong in the audit trail, even encrypted.
-    const DIFF_FIELDS = ['name', 'ip_address', 'mac_address', 'os_type', 'group_id'];
-    const newValues = { name, ip_address: ip_address, mac_address: normalizedMac, os_type, group_id: group_id || null };
+    const DIFF_FIELDS = ['name', 'ip_address', 'mac_address', 'os_type', 'group_id', 'parent_device_id'];
+    const newValues = { name, ip_address: ip_address, mac_address: normalizedMac, os_type, group_id: group_id || null, parent_device_id: parent_device_id || null };
     const changed = {};
     for (const field of DIFF_FIELDS) {
       const before = device[field] ?? null;

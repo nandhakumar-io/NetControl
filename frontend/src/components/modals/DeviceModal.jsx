@@ -7,7 +7,7 @@ import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = {
   name: '', ip_address: '', mac_address: '',
-  os_type: 'linux', group_id: '',
+  os_type: 'linux', group_id: '', parent_device_id: '',
   ssh_username: '', ssh_password: '', ssh_key: '',
   winrm_username: '', winrm_password: '',
   tags: [],
@@ -426,7 +426,7 @@ function TagInput({ tags, onChange }) {
 }
 
 // ── Main Modal ────────────────────────────────────────────────────────────────
-export default function DeviceModal({ open, onClose, onSaved, device, groups }) {
+export default function DeviceModal({ open, onClose, onSaved, device, groups, allDevices }) {
   const [tab, setTab]         = useState('manual')
   const [form, setForm]       = useState(EMPTY)
   const [loading, setLoading] = useState(false)
@@ -441,6 +441,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
         mac_address:    device.mac_address    || '',
         os_type:        device.os_type        || 'linux',
         group_id:       device.group_id       || '',
+        parent_device_id: device.parent_device_id || '',
         ssh_username:   device.ssh_username   || '',
         ssh_password:   '',
         ssh_key:        '',
@@ -483,6 +484,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
       const payload = { ...form }
       delete payload.tags // saved separately via PUT /devices/:id/tags below
       if (!payload.group_id) payload.group_id = null
+      if (!payload.parent_device_id) payload.parent_device_id = null
       if (!payload.ssh_password)   delete payload.ssh_password
       if (!payload.ssh_key)        delete payload.ssh_key
       if (!payload.winrm_password) delete payload.winrm_password
@@ -610,6 +612,25 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
                     <option value="">No Group</option>
                     {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
+                </F>
+
+                <F label="Parent device" id="parent_device_id" errors={errors}>
+                  <select id="parent_device_id" className="input-field" value={form.parent_device_id}
+                    onChange={e => set('parent_device_id', e.target.value)}>
+                    <option value="">No parent (top-level / not dependent)</option>
+                    {allDevices
+                      // Exclude itself and anything that already lists this
+                      // device as ITS parent — picking either would create a
+                      // loop, which the backend also rejects, but filtering
+                      // here means the option never even shows up as pickable.
+                      ?.filter(d => d.id !== device?.id && d.parent_device_id !== device?.id)
+                      .map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
+                  <p className="text-xs mt-1 font-body" style={{ color: 'var(--text-faint)' }}>
+                    The switch/AP/router this device sits behind. If the parent goes offline,
+                    this device's own offline alert is suppressed as likely fallout — you'll
+                    just get the parent's alert instead of one for every device behind it.
+                  </p>
                 </F>
 
                 <div className="col-span-2">

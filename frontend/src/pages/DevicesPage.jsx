@@ -1576,7 +1576,8 @@ export default function DevicesPage() {
       <DeviceModal open={!!deviceModal} onClose={() => setDeviceModal(null)}
         onSaved={() => fetchAll(true)}
         device={deviceModal !== 'add' ? deviceModal : null}
-        groups={groups} />
+        groups={groups}
+        allDevices={devices} />
 
       <ActionConfirmModal
         open={!!actionModal} onClose={() => setActionModal(null)}

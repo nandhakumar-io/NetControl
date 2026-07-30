@@ -84,15 +84,24 @@ function NotificationBell({ collapsed, isLight, variant = 'sidebar' }) {
         const n = JSON.parse(e.data)
         if (!n.type) return
         setNotifs(prev => [n, ...prev].slice(0, 50))
-        // BUG FIX: the backend's notification payload (both the live SSE
-        // push and GET /alerts/notifications) uses the field `message`,
-        // never `details` — this was reading a field that never existed,
-        // so every toast read "...: undefined on <device>" instead of the
-        // actual alert text.
+        // BUG FIX: this used to re-derive the toast text from
+        // `${n.rule_name}: ${n.message} on ${n.device_name}`, assuming every
+        // notification carries all three fields. Only metric/offline alerts
+        // (notifyAdmins in routes/alerts.js) do — that function's `message`
+        // argument is already the complete "RuleName: details on Device"
+        // string. Other notification types on the same SSE channel don't
+        // set rule_name and/or device_name at all: new-sign-in notices
+        // (type: 'session') have neither, and compliance drift
+        // (type: 'compliance_drift') sends `details` instead of `message`.
+        // Those rendered literally as "⚠ undefined on undefined" (or
+        // "🚨 undefined: undefined on undefined" for critical severity).
+        // Fix: just use the human-readable text the backend already built,
+        // without re-appending fields that may not exist.
+        const text = n.message || n.details || `${n.rule_name || 'Alert'}${n.device_name ? ` on ${n.device_name}` : ''}`
         if (n.severity === 'critical') {
-          toast.error(`🚨 ${n.rule_name}: ${n.message} on ${n.device_name}`, { duration: 8000 })
+          toast.error(`🚨 ${text}`, { duration: 8000 })
         } else {
-          toast(`⚠ ${n.rule_name} on ${n.device_name}`, { duration: 5000 })
+          toast(`⚠ ${text}`, { duration: 5000 })
         }
       } catch {}
     }

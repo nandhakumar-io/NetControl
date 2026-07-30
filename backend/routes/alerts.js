@@ -595,11 +595,30 @@ async function evaluateAlerts(deviceId, snapshot) {
   try {
     if (!await tableExists('alert_rules')) return;
 
-    const device = await queryOne('SELECT id, name, org_id, group_id, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
+    const device = await queryOne('SELECT id, name, org_id, group_id, parent_device_id, maintenance_mode FROM devices WHERE id = ?', [deviceId]);
     if (!device) return;
     // Device is under maintenance — suppress alerts (no log entry, no admin
     // notification, no webhook) until it's marked ok again.
     if (device.maintenance_mode) return;
+
+    // ── Dependency-aware alerting ─────────────────────────────────────────
+    // If this device has a parent (e.g. the switch/AP/router it's plugged
+    // into — set via PUT /api/devices/:id, see migrate-device-parent.js) and
+    // that parent is itself currently offline, this device's own "offline"
+    // is almost certainly just fallout from the parent outage, not an
+    // independent failure. Without this, one switch going down produces one
+    // "offline" notification per device behind it — pure noise once you're
+    // past the first (the switch's own alert already told the story).
+    // Scoped to the same org as a defense-in-depth check even though
+    // parent_device_id should only ever be set to a same-org device.
+    let parentOffline = false;
+    if (device.parent_device_id) {
+      const parent = await queryOne(
+        'SELECT status FROM devices WHERE id = ? AND org_id = ?',
+        [device.parent_device_id, device.org_id]
+      );
+      parentOffline = !!parent && parent.status === 'offline';
+    }
 
     // Scoped to the device's own org — a "global" rule (device_id IS NULL
     // AND group_id IS NULL AND tag IS NULL) still only fires for devices
@@ -642,6 +661,13 @@ async function evaluateAlerts(deviceId, snapshot) {
         details  = `Device went offline`;
       }
 
+      // This device's offline state is suppressed noise, not a fresh
+      // incident, if its parent is the one that's actually down. Only
+      // applies to the 'offline' metric — CPU/RAM/disk/process_count
+      // breaches reported by an agent that's still checking in are real
+      // regardless of parent status.
+      const suppressedByParent = rule.metric === 'offline' && breached && parentOffline;
+
       if (rule.metric === 'disk' && snapshot.disk?.length) {
         for (const d of snapshot.disk) {
           if (rule.operator === 'gt' ? d.use > rule.threshold : d.use < rule.threshold) {
@@ -674,14 +700,18 @@ async function evaluateAlerts(deviceId, snapshot) {
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [logId, rule.id, deviceId, now, rule.severity, details, JSON.stringify(actions)]
         );
-        if (rule.notify_admins) {
+        if (rule.notify_admins && !suppressedByParent) {
           await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now, logId);
         }
-        webhook.fire(rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered', {
-          device_id: deviceId, device_name: device.name, rule_name: rule.name,
-          metric: rule.metric, severity: rule.severity, details,
-          message: `${rule.name}: ${details} on ${device.name}`,
-        }).catch(() => {});
+        if (!suppressedByParent) {
+          webhook.fire(rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered', {
+            device_id: deviceId, device_name: device.name, rule_name: rule.name,
+            metric: rule.metric, severity: rule.severity, details,
+            message: `${rule.name}: ${details} on ${device.name}`,
+          }).catch(() => {});
+        } else {
+          console.log(`[Alert] SUPPRESSED (parent offline) — ${rule.name} on ${device.name}`);
+        }
         continue;
       }
 
@@ -793,7 +823,7 @@ async function evaluateAlerts(deviceId, snapshot) {
           continue;
         }
 
-        if (rule.notify_admins) {
+        if (rule.notify_admins && !suppressedByParent) {
           await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name}`, now, logId);
         }
         const autoActions = await performAlertActions(rule, deviceId, device.name, actions).catch(() => []);
@@ -801,13 +831,16 @@ async function evaluateAlerts(deviceId, snapshot) {
           ? ' — ' + autoActions.map(a => `${a.action}: ${a.result === 'success' ? (a.detail || 'ok') : `failed (${a.detail})`}`).join(', ')
           : '';
         const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
-        webhook.fire(webhookEvent, {
-          device_id: deviceId, device_name: device.name, rule_name: rule.name,
-          metric: rule.metric, severity: rule.severity, details: details + actionSummary,
-          message: `${rule.name}: ${details} on ${device.name}${actionSummary}`,
-        }).catch(() => {});
-
-        console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name}: ${details}`);
+        if (!suppressedByParent) {
+          webhook.fire(webhookEvent, {
+            device_id: deviceId, device_name: device.name, rule_name: rule.name,
+            metric: rule.metric, severity: rule.severity, details: details + actionSummary,
+            message: `${rule.name}: ${details} on ${device.name}${actionSummary}`,
+          }).catch(() => {});
+          console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name}: ${details}`);
+        } else {
+          console.log(`[Alert] SUPPRESSED (parent offline) — ${rule.name} on ${device.name}: ${details}`);
+        }
         continue;
       }
 
@@ -834,7 +867,7 @@ async function evaluateAlerts(deviceId, snapshot) {
           'UPDATE alert_state SET notify_count = 1, last_notified_at = ?, last_log_id = ? WHERE rule_id = ? AND device_id = ?',
           [now, logId, rule.id, deviceId]
         );
-        if (rule.notify_admins) {
+        if (rule.notify_admins && !suppressedByParent) {
           await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name} (sustained for ${formatDuration(openSec)})`, now, logId);
         }
         const autoActions = await performAlertActions(rule, deviceId, device.name, actions).catch(() => []);
@@ -842,12 +875,16 @@ async function evaluateAlerts(deviceId, snapshot) {
           ? ' — ' + autoActions.map(a => `${a.action}: ${a.result === 'success' ? (a.detail || 'ok') : `failed (${a.detail})`}`).join(', ')
           : '';
         const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
-        webhook.fire(webhookEvent, {
-          device_id: deviceId, device_name: device.name, rule_name: rule.name,
-          metric: rule.metric, severity: rule.severity, details: details + actionSummary,
-          message: `${rule.name}: ${details} on ${device.name} (sustained for ${formatDuration(openSec)})${actionSummary}`,
-        }).catch(() => {});
-        console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name} graduated after ${formatDuration(openSec)}: ${details}`);
+        if (!suppressedByParent) {
+          webhook.fire(webhookEvent, {
+            device_id: deviceId, device_name: device.name, rule_name: rule.name,
+            metric: rule.metric, severity: rule.severity, details: details + actionSummary,
+            message: `${rule.name}: ${details} on ${device.name} (sustained for ${formatDuration(openSec)})${actionSummary}`,
+          }).catch(() => {});
+          console.log(`[Alert] ${rule.severity.toUpperCase()} — ${rule.name} on ${device.name} graduated after ${formatDuration(openSec)}: ${details}`);
+        } else {
+          console.log(`[Alert] SUPPRESSED (parent offline) — ${rule.name} on ${device.name} graduated after ${formatDuration(openSec)}: ${details}`);
+        }
         continue;
       }
       // Still pending (hasn't reached min_duration_sec yet) — stay quiet,
@@ -874,11 +911,13 @@ async function evaluateAlerts(deviceId, snapshot) {
         const escSeverity = rule.escalate_severity || 'critical';
         const escMsg = `ESCALATION: ${rule.name} on ${device.name} has been unresolved for ${formatDuration(openSec)} — ${details}`;
 
-        if (rule.notify_admins) await notifyAdmins(rule, deviceId, device.name, escSeverity, escMsg, now, state.last_log_id);
-        webhook.fire('alert.escalated', {
-          device_id: deviceId, device_name: device.name, rule_name: rule.name,
-          metric: rule.metric, severity: escSeverity, details, message: escMsg,
-        }, { webhookIds: escalateWebhookIds || undefined }).catch(() => {});
+        if (rule.notify_admins && !suppressedByParent) await notifyAdmins(rule, deviceId, device.name, escSeverity, escMsg, now, state.last_log_id);
+        if (!suppressedByParent) {
+          webhook.fire('alert.escalated', {
+            device_id: deviceId, device_name: device.name, rule_name: rule.name,
+            metric: rule.metric, severity: escSeverity, details, message: escMsg,
+          }, { webhookIds: escalateWebhookIds || undefined }).catch(() => {});
+        }
 
         await execute(
           'UPDATE alert_state SET notify_count = 2, last_notified_at = ? WHERE rule_id = ? AND device_id = ?',
@@ -892,15 +931,17 @@ async function evaluateAlerts(deviceId, snapshot) {
       // cooldown_sec provided — just correctly shared across every worker
       // now instead of living in one process's memory.
       if ((now - (state.last_notified_at || 0)) >= (rule.cooldown_sec || 300)) {
-        if (rule.notify_admins) {
+        if (rule.notify_admins && !suppressedByParent) {
           await notifyAdmins(rule, deviceId, device.name, rule.severity, `${rule.name}: ${details} on ${device.name} (still ongoing, open ${formatDuration(openSec)})`, now, state.last_log_id);
         }
-        const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
-        webhook.fire(webhookEvent, {
-          device_id: deviceId, device_name: device.name, rule_name: rule.name,
-          metric: rule.metric, severity: rule.severity, details,
-          message: `${rule.name}: ${details} on ${device.name} (still ongoing, open ${formatDuration(openSec)})`,
-        }).catch(() => {});
+        if (!suppressedByParent) {
+          const webhookEvent = rule.severity === 'critical' ? 'alert.critical' : 'alert.triggered';
+          webhook.fire(webhookEvent, {
+            device_id: deviceId, device_name: device.name, rule_name: rule.name,
+            metric: rule.metric, severity: rule.severity, details,
+            message: `${rule.name}: ${details} on ${device.name} (still ongoing, open ${formatDuration(openSec)})`,
+          }).catch(() => {});
+        }
         await execute(
           'UPDATE alert_state SET last_notified_at = ?, notify_count = notify_count + 1 WHERE rule_id = ? AND device_id = ?',
           [now, rule.id, deviceId]
