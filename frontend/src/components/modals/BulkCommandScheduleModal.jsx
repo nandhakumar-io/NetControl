@@ -7,6 +7,7 @@ import React, { useState, useEffect, useMemo } from 'react'
 import { X, CalendarClock, Loader2, Search, Square, CheckSquare } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = { name: '', command: '', deviceIds: [], cronExpr: '', timeoutSec: 30, enabled: true }
 
@@ -100,7 +101,7 @@ export default function BulkCommandScheduleModal({ open, onClose, onSaved, sched
       onSaved()
       onClose()
     } catch (err) {
-      toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || 'Save failed')
+      toast.error(getErrorMessage(err, 'Save failed'))
     } finally {
       setLoading(false)
     }

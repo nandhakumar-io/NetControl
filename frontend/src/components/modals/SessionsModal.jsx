@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { X, Monitor, Smartphone, LogOut, ShieldAlert } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 // Self-service "Active sessions" panel, matching the style of the other
 // account-level modals (TwoFactorModal, NotificationPrefsModal). Mount
@@ -73,7 +74,7 @@ export default function SessionsModal({ open, onClose }) {
       setSessions(prev => prev.filter(s => s.id !== session.id))
       toast.success(session.current ? 'Signed out of this device' : 'Session revoked')
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Could not revoke session')
+      toast.error(getErrorMessage(e, 'Could not revoke session'))
     } finally { setRevokingId(null) }
   }
 
@@ -84,7 +85,7 @@ export default function SessionsModal({ open, onClose }) {
       setConfirmAll(false)
       load()
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Could not revoke sessions')
+      toast.error(getErrorMessage(e, 'Could not revoke sessions'))
     }
   }
 

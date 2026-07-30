@@ -5,6 +5,7 @@ import React, { useState, useEffect } from 'react'
 import { X, Cloud, CloudCog, FolderInput, Shield, Loader2 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 function Field({ label, children }) {
   return (
@@ -120,7 +121,7 @@ export default function BackupDestinationModal({ open, onClose, onCreated, devic
       onCreated?.(data)
       onClose()
     } catch (err) {
-      setError(err.response?.data?.error || `Failed to ${isEditing ? 'update' : 'add'} destination`)
+      setError(getErrorMessage(err, `Failed to ${isEditing ? 'update' : 'add'} destination`))
     } finally { setSaving(false) }
   }
 

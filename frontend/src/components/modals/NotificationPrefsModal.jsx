@@ -8,6 +8,7 @@ import React, { useState, useEffect } from 'react'
 import { X, BellRing, Loader2, VolumeX, Volume2 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 const SEVERITIES = [
   { value: 'info', label: 'All (info+)' },
@@ -79,7 +80,7 @@ export default function NotificationPrefsModal({ open, onClose }) {
       const { data } = await api.put('/notification-prefs', patch)
       setPrefs(data)
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to save')
+      toast.error(getErrorMessage(err, 'Failed to save'))
       // Revert by re-fetching rather than guessing the prior state.
       api.get('/notification-prefs').then(({ data }) => setPrefs(data)).catch(() => {})
     } finally {
@@ -94,7 +95,7 @@ export default function NotificationPrefsModal({ open, onClose }) {
       setPrefs(data)
       toast.success(`Notifications muted for ${minutes < 60 ? `${minutes}m` : `${minutes / 60}h`}`)
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to mute')
+      toast.error(getErrorMessage(err, 'Failed to mute'))
     } finally { setSaving(false) }
   }
 
@@ -105,7 +106,7 @@ export default function NotificationPrefsModal({ open, onClose }) {
       setPrefs(data)
       toast.success('Notifications unmuted')
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to unmute')
+      toast.error(getErrorMessage(err, 'Failed to unmute'))
     } finally { setSaving(false) }
   }
 

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 // ─── tiny sub-components ────────────────────────────────────────────────────
 
@@ -171,7 +172,7 @@ export default function FilePushModal({ open, onClose, devices, groups, selected
       setPushResult(data)
       setStep('results')
     } catch (err) {
-      toast.error(err.response?.data?.error || 'File push failed')
+      toast.error(getErrorMessage(err, 'File push failed'))
       setStep('form')
     }
   }

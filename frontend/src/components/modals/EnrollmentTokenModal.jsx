@@ -12,6 +12,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { X, KeyRound, Copy, Check, RefreshCw, Loader2, AlertTriangle } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 export default function EnrollmentTokenModal({ org, onClose }) {
   const [token, setToken] = useState(null)
@@ -24,7 +25,7 @@ export default function EnrollmentTokenModal({ org, onClose }) {
     setLoading(true)
     api.get(`/orgs/${org.id}/enrollment-token`)
       .then(({ data }) => setToken(data.enrollment_token))
-      .catch(e => toast.error(e.response?.data?.error || 'Failed to load enrollment token'))
+      .catch(e => toast.error(getErrorMessage(e, 'Failed to load enrollment token')))
       .finally(() => setLoading(false))
   }, [org.id])
 
@@ -46,7 +47,7 @@ export default function EnrollmentTokenModal({ org, onClose }) {
       setConfirmingRegen(false)
       toast.success('New enrollment token generated — update any install scripts still using the old one')
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Failed to regenerate token')
+      toast.error(getErrorMessage(e, 'Failed to regenerate token'))
     } finally {
       setRegenerating(false)
     }

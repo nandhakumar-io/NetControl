@@ -3,6 +3,7 @@ import { X, Monitor, Loader2, FileSpreadsheet, Download, AlertCircle, CheckCircl
 import * as XLSX from 'xlsx'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = {
   name: '', ip_address: '', mac_address: '',
@@ -172,7 +173,7 @@ function ImportPanel({ groups, onImported }) {
         toast(`All ${data.skipped} devices already exist — nothing to import`, { icon: 'ℹ' })
       }
     } catch (err) {
-      const msg = err.response?.data?.error || 'Import failed'
+      const msg = getErrorMessage(err, 'Import failed')
       const validationErrors = err.response?.data?.validationErrors
       if (validationErrors?.length) {
         setValErrors(validationErrors)
@@ -526,7 +527,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups }) 
       }
       onSaved(); onClose()
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Save failed')
+      toast.error(getErrorMessage(err, 'Save failed'))
     } finally {
       setLoading(false)
     }

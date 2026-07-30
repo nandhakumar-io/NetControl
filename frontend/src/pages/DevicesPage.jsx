@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../lib/errors'
 import PageHeader from '../components/ui/PageHeader'
 import DeviceModal from '../components/modals/DeviceModal'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
@@ -508,10 +509,19 @@ function ColumnsMenu({ visibleCols, onToggle, isLight }) {
   )
 }
 
-function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
+function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, onAddTag, onRemoveTag, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
+  const [addingTag, setAddingTag] = useState(false)
+  const [tagDraft, setTagDraft] = useState('')
+
+  const submitTagDraft = () => {
+    const t = tagDraft.trim()
+    if (t) onAddTag?.(device, t)
+    setTagDraft('')
+    setAddingTag(false)
+  }
 
   const openTerminal = (e) => {
     e.stopPropagation()
@@ -556,13 +566,41 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
       <div className="min-w-0">
         <p className="text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
         {group && <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
-        {device.tags?.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1">
-            {device.tags.map(tag => (
-              <span key={tag} className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+        {(device.tags?.length > 0 || onAddTag) && (
+          <div className="flex flex-wrap items-center gap-1 mt-1" onClick={e => e.stopPropagation()}>
+            {device.tags?.map(tag => (
+              <span key={tag}
+                className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded group/tag"
                 style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.2)', color: '#a78bfa' }}>
                 {tag}
+                {onRemoveTag && (
+                  <button onClick={() => onRemoveTag(device, tag)}
+                    className="opacity-0 group-hover/tag:opacity-100 transition-opacity hover:text-red-400"
+                    title={`Remove tag "${tag}"`}>
+                    <X size={9} />
+                  </button>
+                )}
               </span>
+            ))}
+            {onAddTag && (addingTag ? (
+              <input autoFocus
+                className="text-[10px] font-mono px-1.5 py-0.5 rounded w-16 outline-none"
+                style={{ background: 'var(--bg-surface-2)', border: '1px solid rgba(167,139,250,0.3)', color: 'var(--text-primary)' }}
+                value={tagDraft}
+                onChange={e => setTagDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') submitTagDraft()
+                  if (e.key === 'Escape') { setTagDraft(''); setAddingTag(false) }
+                }}
+                onBlur={submitTagDraft}
+                placeholder="tag" />
+            ) : (
+              <button onClick={() => setAddingTag(true)}
+                className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-mono px-1 rounded"
+                style={{ color: 'var(--text-faint)' }}
+                title="Add tag">
+                +
+              </button>
             ))}
           </div>
         )}
@@ -635,13 +673,19 @@ function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, on
           {count} selected
         </span>
         <div className="w-px h-4" style={{ background: 'var(--border-subtle)' }} />
-        {canEdit && (
-          <button onClick={onEditSelected}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
-            style={{ background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa' }}>
-            <Users size={12} />Edit Selected
-          </button>
-        )}
+        <button onClick={canEdit ? onEditSelected : undefined}
+          disabled={!canEdit}
+          title={canEdit ? undefined : 'Admin permission required to bulk-edit devices'}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
+          style={{
+            background: canEdit ? 'rgba(167,139,250,0.12)' : 'var(--bg-surface-2)',
+            border: `1px solid ${canEdit ? 'rgba(167,139,250,0.3)' : 'var(--border-subtle)'}`,
+            color: canEdit ? '#a78bfa' : 'var(--text-faint)',
+            cursor: canEdit ? 'pointer' : 'not-allowed',
+            opacity: canEdit ? 1 : 0.6,
+          }}>
+          <Users size={12} />Edit Selected
+        </button>
         {[
           { fn: onWakeAll,     label: 'Wake All',  icon: <Zap size={11} />,       c: '#22c55e', bg: 'rgba(34,197,94,0.1)',  bc: 'rgba(34,197,94,0.25)'  },
           { fn: onShutdownAll, label: 'Shutdown',  icon: <Power size={11} />,     c: '#f87171', bg: 'rgba(239,68,68,0.1)',  bc: 'rgba(239,68,68,0.25)'  },
@@ -823,7 +867,7 @@ export default function DevicesPage() {
       toast.success('Device removed')
       setDeleteTarget(null)
       fetchAll(true)
-    } catch (err) { toast.error(err.response?.data?.error || 'Delete failed') }
+    } catch (err) { toast.error(getErrorMessage(err, 'Delete failed'))  }
   }
 
   // Prompts for an optional note + optional auto-clear duration when
@@ -845,6 +889,49 @@ export default function DevicesPage() {
     return { note: note || undefined, duration_minutes: duration_minutes || undefined }
   }
 
+  // Quick tag add/remove — optimistic: the chip appears/disappears
+  // immediately on click instead of waiting for the round trip, then rolls
+  // back to the previous tag list if the request actually fails. Also
+  // patches `allTags` (used for the tag-filter chips) so a brand-new tag
+  // shows up there right away too.
+  const handleAddTag = async (device, rawTag) => {
+    const tag = rawTag.trim().toLowerCase()
+    if (!tag || device.tags?.includes(tag)) return
+    if (!/^[a-z0-9][a-z0-9_-]{0,49}$/.test(tag)) {
+      toast.error(`Invalid tag "${tag}" — letters, numbers, "-", "_" only, 1-50 chars`)
+      return
+    }
+    const previousDevices = devices
+    const previousAllTags = allTags
+    setDevices(prev => prev.map(d => d.id === device.id ? { ...d, tags: [...(d.tags || []), tag] } : d))
+    setAllTags(prev => prev.some(t => t.tag === tag)
+      ? prev.map(t => t.tag === tag ? { ...t, device_count: t.device_count + 1 } : t)
+      : [...prev, { tag, device_count: 1 }])
+    try {
+      await api.post(`/devices/${device.id}/tags`, { tag })
+    } catch (err) {
+      setDevices(previousDevices)
+      setAllTags(previousAllTags)
+      toast.error(getErrorMessage(err, 'Failed to add tag'))
+    }
+  }
+
+  const handleRemoveTag = async (device, tag) => {
+    const previousDevices = devices
+    const previousAllTags = allTags
+    setDevices(prev => prev.map(d => d.id === device.id ? { ...d, tags: (d.tags || []).filter(t => t !== tag) } : d))
+    setAllTags(prev => prev
+      .map(t => t.tag === tag ? { ...t, device_count: t.device_count - 1 } : t)
+      .filter(t => t.device_count > 0))
+    try {
+      await api.delete(`/devices/${device.id}/tags/${encodeURIComponent(tag)}`)
+    } catch (err) {
+      setDevices(previousDevices)
+      setAllTags(previousAllTags)
+      toast.error(getErrorMessage(err, 'Failed to remove tag'))
+    }
+  }
+
   const handleToggleMaintenance = async (device) => {
     const enabling = !device.maintenance_mode
     let details = { note: undefined, duration_minutes: undefined }
@@ -853,6 +940,15 @@ export default function DevicesPage() {
       if (!result) return
       details = result
     }
+
+    // Optimistic update — flip the badge/state locally right away instead
+    // of waiting on the round trip, so the click feels instant. Snapshot
+    // the prior list so we can roll back cleanly if the request fails.
+    const previousDevices = devices
+    setDevices(prev => prev.map(d => d.id === device.id
+      ? { ...d, maintenance_mode: enabling, maintenance_note: enabling ? (details.note ?? null) : null }
+      : d))
+
     try {
       await api.post(`/devices/${device.id}/maintenance`, { enabled: enabling, ...details })
       toast.success(
@@ -860,9 +956,12 @@ export default function DevicesPage() {
           ? `${device.name} marked under maintenance${details.duration_minutes ? ` for ${details.duration_minutes}m` : ''}`
           : `${device.name} marked OK`
       )
+      // Reconcile with the server in the background (picks up computed
+      // fields like maintenance expiry) without blocking the UI feedback above.
       fetchAll(true)
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
+      setDevices(previousDevices) // rollback — the optimistic flip didn't stick
+      toast.error(getErrorMessage(err, 'Failed to update maintenance mode'))
     }
   }
 
@@ -893,7 +992,7 @@ export default function DevicesPage() {
       clearSelection()
       fetchAll(true)
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to update maintenance mode')
+      toast.error(getErrorMessage(err, 'Failed to update maintenance mode'))
     }
   }
 
@@ -914,7 +1013,7 @@ export default function DevicesPage() {
       if (data.skipped) toast(`${data.skipped} device(s) skipped — not agent-managed`, { icon: 'ℹ️' })
       clearSelection()
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to queue agent update')
+      toast.error(getErrorMessage(err, 'Failed to queue agent update'))
     }
   }
 
@@ -926,7 +1025,7 @@ export default function DevicesPage() {
       clearSelection()
       fetchAll(true)
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Delete failed')
+      toast.error(getErrorMessage(err, 'Delete failed'))
       throw err
     }
   }
@@ -1320,6 +1419,8 @@ export default function DevicesPage() {
                 onEdit={dev => setDeviceModal(dev)}
                 onDelete={dev => setDeleteTarget(dev)}
                 onToggleMaintenance={handleToggleMaintenance}
+                onAddTag={handleAddTag}
+                onRemoveTag={handleRemoveTag}
                 latestAgentVersion={latestAgentVersion}
                 health={healthScores[d.id]}
                 healthLoading={healthLoading}

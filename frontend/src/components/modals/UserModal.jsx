@@ -3,6 +3,7 @@ import { X, UserPlus, Pencil, Eye, EyeOff, Mail, Link2, Unlink } from 'lucide-re
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import { PERM } from '../../hooks/usePermissions'
+import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = {
   username:    '',
@@ -129,7 +130,7 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
       onSaved()
       onClose()
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Save failed')
+      toast.error(getErrorMessage(e, 'Save failed'))
     } finally {
       setLoading(false)
     }
@@ -147,7 +148,7 @@ export default function UserModal({ open, onClose, onSaved, user, isLight }) {
       onSaved()
       onClose()
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Failed to unlink')
+      toast.error(getErrorMessage(e, 'Failed to unlink'))
     } finally {
       setLoading(false)
       setConfirmUnlink(false)

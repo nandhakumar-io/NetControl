@@ -32,7 +32,13 @@ const cpuColor   = v => !v&&v!==0?'#475569':v>=90?'#ef4444':v>=70?'#f97316':v>=5
 const ramColor   = p => p>=90?'#ef4444':p>=75?'#f97316':p>=60?'#eab308':'#a78bfa'
 const diskColor  = p => p>=90?'#ef4444':p>=80?'#f97316':p>=70?'#eab308':'#22c55e'
 const latColor   = ms => ms==null?'#475569':ms<50?'#22c55e':ms<150?'#eab308':'#ef4444'
-const statusColor= s => ({online:'#22c55e',offline:'#ef4444',unknown:'#475569'}[s]||'#475569')
+// Same semantic palette as StatusBadge on the Devices page: green = online,
+// gray = offline (expected/benign — device is just off), red = error
+// (something is actually wrong), amber = unknown/unclear state. Offline
+// used to map to red here, which read as "problem" even for devices that
+// were simply, correctly, powered down — inconsistent with how the rest
+// of the app treats that same status.
+const statusColor= s => ({online:'#22c55e',offline:'#64748b',error:'#ef4444',unknown:'#fbbf24'}[s]||'#fbbf24')
 
 const TT = { background:'rgba(6,6,18,0.98)', border:'1px solid rgba(255,255,255,0.09)', borderRadius:8, fontSize:11, fontFamily:'monospace', padding:'8px 12px' }
 
@@ -654,11 +660,11 @@ const DeviceRow = React.memo(function DeviceRow({ device, metrics, expanded, onT
         ) : (
           <span className="text-[11px] font-body px-2 py-0.5 rounded-full shrink-0"
             style={{
-              background: device.status==='online'?'rgba(234,179,8,0.10)':'rgba(239,68,68,0.10)',
-              color:       device.status==='online'?'#eab308':'#ef4444',
-              border:`1px solid ${device.status==='online'?'rgba(234,179,8,0.25)':'rgba(239,68,68,0.25)'}`,
+              background: `${statusColor(device.status==='online'?'unknown':device.status)}1A`,
+              color:       statusColor(device.status==='online'?'unknown':device.status),
+              border:`1px solid ${statusColor(device.status==='online'?'unknown':device.status)}40`,
             }}>
-            {device.status==='online'?'Agent silent':device.status||'Unknown'}
+            {device.status==='online'?'Agent silent':device.status==='offline'?'Offline':device.status||'Unknown'}
           </span>
         )}
 

@@ -10,6 +10,7 @@ import React, { useState, useEffect } from 'react'
 import { X, Shield, Loader2, Clock, FileSpreadsheet, Radio } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 function Field({ label, children, hint }) {
   return (
@@ -103,7 +104,7 @@ export default function ScheduleLogExportModal({ open, onClose, onSaved, destina
       onSaved?.(data)
       onClose()
     } catch (err) {
-      setError(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || `Failed to ${isEditing ? 'update' : 'create'} schedule`)
+      setError(getErrorMessage(err, `Failed to ${isEditing ? 'update' : 'create'} schedule`))
     } finally { setSaving(false) }
   }
 

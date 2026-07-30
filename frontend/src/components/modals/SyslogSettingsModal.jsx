@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { X, Radio, Loader2, Zap, CheckCircle2, XCircle } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = {
   enabled: false,
@@ -65,7 +66,7 @@ export default function SyslogSettingsModal({ open, onClose, onSaved }) {
       toast.success('Syslog settings saved')
       onSaved?.()
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Save failed')
+      toast.error(getErrorMessage(err, 'Save failed'))
     } finally {
       setSaving(false)
     }

@@ -7,6 +7,7 @@ import React, { useState } from 'react'
 import { X, Users, Loader2 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 const TAG_RE = /^[a-z0-9][a-z0-9_-]{0,49}$/i
 
@@ -94,7 +95,7 @@ export default function BulkEditModal({ open, onClose, deviceIds, devices, group
       reset()
       onSaved()
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Bulk update failed')
+      toast.error(getErrorMessage(err, 'Bulk update failed'))
     } finally {
       setLoading(false)
     }

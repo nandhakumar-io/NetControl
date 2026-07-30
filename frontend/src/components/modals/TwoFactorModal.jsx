@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { X, ShieldCheck, ShieldOff, Copy, Check } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 // Self-service two-factor authentication setup, matching the style of the
 // other modals (UserModal, BackupDestinationModal, etc). Mount this from
@@ -34,7 +35,7 @@ export default function TwoFactorModal({ open, onClose }) {
       setSetupData(data)
       setStep('setup')
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Could not start 2FA setup')
+      toast.error(getErrorMessage(e, 'Could not start 2FA setup'))
     } finally { setLoading(false) }
   }
 
@@ -47,7 +48,7 @@ export default function TwoFactorModal({ open, onClose }) {
       setStep('backup-codes')
       toast.success('Two-factor authentication enabled')
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Invalid code')
+      toast.error(getErrorMessage(e, 'Invalid code'))
     } finally { setLoading(false) }
   }
 
@@ -60,7 +61,7 @@ export default function TwoFactorModal({ open, onClose }) {
       setStatus({ enabled: false })
       setStep('status')
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Could not disable 2FA')
+      toast.error(getErrorMessage(e, 'Could not disable 2FA'))
     } finally { setLoading(false) }
   }
 
@@ -73,7 +74,7 @@ export default function TwoFactorModal({ open, onClose }) {
       setStep('backup-codes')
       toast.success('Backup codes regenerated — old codes no longer work')
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Invalid code')
+      toast.error(getErrorMessage(e, 'Invalid code'))
     } finally { setLoading(false) }
   }
 

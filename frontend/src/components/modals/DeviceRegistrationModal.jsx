@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 export default function DeviceRegistrationModal({ 
   device, 
@@ -79,7 +80,7 @@ export default function DeviceRegistrationModal({
       onClose()
     } catch (e) {
       console.error('Approval error:', e)
-      toast.error(e.response?.data?.error || 'Failed to approve device')
+      toast.error(getErrorMessage(e, 'Failed to approve device'))
     } finally {
       setApproving(false)
     }
@@ -100,7 +101,7 @@ export default function DeviceRegistrationModal({
       onClose()
     } catch (e) {
       console.error('Rejection error:', e)
-      toast.error(e.response?.data?.error || 'Failed to reject device')
+      toast.error(getErrorMessage(e, 'Failed to reject device'))
     } finally {
       setRejecting(false)
     }

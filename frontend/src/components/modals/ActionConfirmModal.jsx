@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { ShieldAlert, X, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react'
+import { getErrorMessage } from '../../lib/errors'
 
 export default function ActionConfirmModal({ open, onClose, onConfirm, title, description, danger = false }) {
   const [pin, setPin]         = useState('')
@@ -23,7 +24,7 @@ export default function ActionConfirmModal({ open, onClose, onConfirm, title, de
       if (res?.results && res.results.length > 0) { setResults(res); setPin('') }
       else { setPin(''); onClose() }
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Action failed')
+      setError(getErrorMessage(err, 'Action failed'))
     } finally { setLoading(false) }
   }
 

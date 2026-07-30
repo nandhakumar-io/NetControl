@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { X, Clock, Loader2 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
+import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = {
   name: '', action: 'wake', target_type: 'device',
@@ -58,7 +59,7 @@ export default function ScheduleModal({ open, onClose, onSaved, schedule, device
       onSaved()
       onClose()
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Save failed')
+      toast.error(getErrorMessage(err, 'Save failed'))
     } finally {
       setLoading(false)
     }
