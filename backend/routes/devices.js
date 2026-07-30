@@ -120,12 +120,26 @@ router.get('/', async (req, res) => {
     const tagFilter = (req.query.tags || '').split(',').map(t => t.trim()).filter(Boolean);
     let devices;
     if (req.user.role !== 'admin') {
+      // BUG FIX: this used to INNER JOIN `groups` + user_group_access, which
+      // silently drops any device with group_id IS NULL — and every
+      // newly self-registered agent device sits with group_id = NULL until
+      // an admin approves it and assigns a group. Non-admins therefore never
+      // saw pending devices in the list at all, so the "awaiting approval"
+      // banner (which is meant to render for every role, just with the
+      // Review button swapped for an "Admin approval required" notice —
+      // see DevicesPage.jsx) never had anything to show them.
+      // Fix: LEFT JOIN groups, and let a device through if either (a) it's
+      // still pending approval (org-wide visible, no group yet) or (b) it's
+      // assigned to a group this user has access to. Devices that are fully
+      // approved but NOT in one of the user's groups are still excluded.
       devices = await query(
         'SELECT d.*, g.name as group_name FROM devices d ' +
-        'INNER JOIN `groups` g ON g.id = d.group_id ' +
-        'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
-        'WHERE d.org_id = ? ORDER BY d.name',
-        [req.user.id, req.orgId]
+        'LEFT JOIN `groups` g ON g.id = d.group_id ' +
+        'WHERE d.org_id = ? AND (' +
+        '  d.status = \'needs_approval\' OR ' +
+        '  EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id = d.group_id AND uga.user_id = ?)' +
+        ') ORDER BY d.name',
+        [req.orgId, req.user.id]
       );
     } else {
       devices = await query(
