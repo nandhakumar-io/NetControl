@@ -561,10 +561,7 @@ export default function Layout() {
       >
         {/* Logo */}
         <div className={`flex items-center gap-3 px-4 py-5 border-b ${isLight ? 'border-black/[0.06]' : 'border-white/6'}`}>
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0
-            ${isLight ? 'bg-[#6c5ce7] text-white' : 'bg-brand-500/20 border border-brand-500/30 text-brand-400 animate-glow'}`}>
-            <Zap size={16} />
-          </div>
+          <img src="/logo.png" alt="NetControl Logo" className="w-8 h-8 rounded-lg shrink-0 object-cover" />
           {!collapsed && (
             <span className={`font-display text-sm tracking-wide whitespace-nowrap ${isLight ? 'text-[#1a1a2e]' : 'text-white'}`}>
               NetControl
