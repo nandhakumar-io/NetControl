@@ -27,7 +27,7 @@ const STATE_META = {
   skipped:          { label: 'Skipped',                    tone: 'yellow', spin: false },
   failed:           { label: 'Failed',                     tone: 'red',    spin: false },
   timeout:          { label: 'Timed out',                  tone: 'red',    spin: false },
-  cancelled:        { label: 'Cancelled',                  tone: 'muted',  spin: false },
+  cancelled:        { label: 'Cancelled (shutdown blocked)', tone: 'muted',  spin: false },
 }
 const TONE = {
   green:  { text: 'text-accent-green',  box: 'bg-accent-green/5 border-accent-green/15'   },
@@ -141,7 +141,22 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
 
   const handleCancel = async () => {
     setCancelling(true)
-    try { await api.post(`/seb/runs/${runId}/cancel`); toast.success('Run cancelled — pending shutdowns blocked') }
+    try {
+      const { data } = await api.post(`/seb/runs/${runId}/cancel`)
+      if (data?.run) {
+        setRun(data.run)
+      } else {
+        setRun(prev => prev ? {
+          ...prev,
+          status: 'cancelled',
+          items: (prev.items || []).map(it => ['queued', 'waiting_exit', 'shutdown_pending'].includes(it.state)
+            ? { ...it, state: 'cancelled', details: 'Run cancelled — PC shutdown blocked' }
+            : it
+          ),
+        } : null)
+      }
+      toast.success('Run cancelled — PC shutdown blocked')
+    }
     catch (err) { toast.error(getErrorMessage(err, 'Cancel failed')) }
     finally { setCancelling(false) }
   }
@@ -157,6 +172,7 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
   const notConfigured = config && config.configured === false
 
   const headerTone = !runId ? 'purple'
+    : run?.status === 'cancelled' ? 'yellow'
     : running ? 'purple'
     : run?.status === 'completed' ? 'green'
     : run?.status === 'failed' ? 'red' : 'yellow'
@@ -184,8 +200,10 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
                 <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
                   {!runId
                     ? 'Ends the Safe Exam Browser session via SEB Server.'
-                    : running ? `${okCount} done · ${inFlight} in progress${badCount ? ` · ${badCount} not completed` : ''}`
-                    : `${okCount} succeeded · ${badCount} not completed`}
+                    : run?.status === 'cancelled'
+                      ? `${items.length} device(s) · PC shutdown blocked`
+                      : running ? `${okCount} done · ${inFlight} in progress${badCount ? ` · ${badCount} not completed` : ''}`
+                      : `${okCount} succeeded · ${badCount} not completed`}
                 </p>
               </div>
             </div>
@@ -274,7 +292,9 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
                   </div>
                 )}
                 {items.map(it => {
-                  const meta = STATE_META[it.state] || { label: it.state, tone: 'muted', spin: false }
+                  const isRunCancelled = run?.status === 'cancelled'
+                  const effectiveState = (isRunCancelled && ['queued', 'waiting_exit', 'shutdown_pending'].includes(it.state)) ? 'cancelled' : it.state
+                  const meta = STATE_META[effectiveState] || { label: it.state, tone: 'muted', spin: false }
                   const tone = TONE[meta.tone]
                   return (
                     <div key={it.id} className={`flex items-start gap-2.5 px-3 py-2 rounded-lg border ${tone.box}`}>
@@ -285,7 +305,11 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
                           <span className={`text-[10px] font-semibold shrink-0 ${tone.text}`} style={meta.tone === 'muted' ? { color: 'var(--text-muted)' } : undefined}>{meta.label}</span>
                         </div>
                         {it.details && (
-                          <p className="text-[11px] font-body mt-0.5 break-words" style={{ color: 'var(--text-muted)' }}>{it.details}</p>
+                          <p className="text-[11px] font-body mt-0.5 break-words" style={{ color: 'var(--text-muted)' }}>
+                            {isRunCancelled && ['queued', 'waiting_exit', 'shutdown_pending'].includes(it.state)
+                              ? 'Run cancelled — PC shutdown blocked'
+                              : it.details}
+                          </p>
                         )}
                       </div>
                     </div>
@@ -294,9 +318,14 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
               </div>
 
               {run?.status === 'cancelled' && (
-                <p className="text-[11px] font-body mt-3" style={{ color: 'var(--text-muted)' }}>
-                  Run cancelled. SEB_QUIT instructions already registered can't be recalled.
-                </p>
+                <div className="mt-3 px-3 py-2 rounded-lg bg-accent-yellow/10 border border-accent-yellow/20">
+                  <p className="text-xs font-body font-medium text-accent-yellow">
+                    Run cancelled — PC shutdown is blocked.
+                  </p>
+                  <p className="text-[11px] font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    SEB_QUIT instruction was already dispatched to SEB Server and cannot be recalled, but automatic shutdown has been stopped.
+                  </p>
+                </div>
               )}
 
               <div className="flex gap-3 mt-5">

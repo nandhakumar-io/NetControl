@@ -275,9 +275,10 @@ router.post('/runs/:id/cancel', param('id').isUUID(), async (req, res) => {
     await audit.log({
       userId: req.user.id, username: req.user.username, orgId: req.orgId,
       action: 'seb_quit_cancel', targetType: 'seb_run', targetId: req.params.id,
-      ipSource: req.realIp, result: 'success', details: 'SEB quit run cancelled',
+      ipSource: req.realIp, result: 'success', details: 'SEB quit run cancelled — shutdowns blocked',
     }).catch(() => {});
-    res.json({ ok: true });
+    const run = await sebQuit.getRun(req.params.id, req.orgId);
+    res.json({ ok: true, run });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

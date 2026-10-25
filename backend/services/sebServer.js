@@ -153,7 +153,10 @@ function normalizeConnection(item) {
   if (!KNOWN_STATUSES.has(status)) {
     status = values.map(v => v.toUpperCase()).find(v => KNOWN_STATUSES.has(v)) || 'UNKNOWN';
   }
-  return { token: String(token), status, values, raw: item };
+  const id = Number(c.id ?? item.id ?? 0);
+  const userSession = String(c.examUserSessionId ?? c.userSession ?? '').trim();
+  const clientAddress = String(c.clientAddress ?? c.ip ?? '').trim();
+  return { id, token: String(token), status, userSession, clientAddress, values, raw: item };
 }
 
 function extractConnections(payload) {
@@ -163,6 +166,23 @@ function extractConnections(payload) {
       ?? payload?.cons
       ?? [];
   return (Array.isArray(cons) ? cons : []).map(normalizeConnection).filter(Boolean);
+}
+
+function deduplicateConnections(connections) {
+  const groups = new Map();
+  for (const c of connections) {
+    const user = (c.userSession || '').toLowerCase();
+    const ip = (c.clientAddress || '').toLowerCase();
+    // Unique identity key: candidate session username if present, else client IP, else token
+    const key = user ? `user:${user}` : (ip ? `ip:${ip}` : `tok:${c.token}`);
+    if (!groups.has(key)) groups.set(key, [c]);
+    else groups.get(key).push(c);
+  }
+  const result = [];
+  for (const list of groups.values()) {
+    result.push(bestByStatus(list));
+  }
+  return result;
 }
 
 async function resolveExamId(identifier) {
@@ -183,17 +203,20 @@ async function resolveExamId(identifier) {
   return str;
 }
 
-async function getMonitoring(rawExamId) {
+async function getMonitoring(rawExamId, { deduplicate = true } = {}) {
   const examId = await resolveExamId(rawExamId);
+  let list = [];
   try {
     const directData = await request('GET', `/monitoring/${encodeURIComponent(examId)}`);
-    const list = extractConnections(directData);
-    if (list.length > 0) return list;
+    list = extractConnections(directData);
   } catch (err) {
     // fall back if SEB Server returns an error on this path
   }
-  const data = await request('GET', `/monitoring/${encodeURIComponent(examId)}/fullpage`);
-  return extractConnections(data);
+  if (!list.length) {
+    const data = await request('GET', `/monitoring/${encodeURIComponent(examId)}/fullpage`);
+    list = extractConnections(data);
+  }
+  return deduplicate ? deduplicateConnections(list) : list;
 }
 
 async function getConnection(rawExamId, connectionToken) {
@@ -227,7 +250,13 @@ async function registerQuit(rawExamId, connectionToken) {
 const STATUS_RANK = { ACTIVE: 0, READY: 0, AUTHENTICATED: 1, CONNECTION_REQUESTED: 2, UNDEFINED: 3, UNKNOWN: 4, CLOSED: 5, DISABLED: 6 };
 
 function bestByStatus(list) {
-  return list.slice().sort((a, b) => (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9))[0];
+  return list.slice().sort((a, b) => {
+    const rankDiff = (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9);
+    if (rankDiff !== 0) return rankDiff;
+    const idA = Number(a.id || a.raw?.cdat?.id || a.raw?.id || 0);
+    const idB = Number(b.id || b.raw?.cdat?.id || b.raw?.id || 0);
+    return idB - idA;
+  })[0];
 }
 
 // Returns { con, by } where by is 'binding' | 'binding_miss' | 'ip' | 'hostname' | null.
@@ -260,7 +289,7 @@ function isTerminal(status) { return TERMINAL_STATUSES.has(status); }
 
 module.exports = {
   SebError, isConfigured, getMonitoring, getConnection, registerQuit,
-  matchConnection, matchConnectionDetailed, isTerminal, TERMINAL_STATUSES,
+  matchConnection, matchConnectionDetailed, deduplicateConnections, isTerminal, TERMINAL_STATUSES,
   // exposed for the config endpoint (never includes secrets)
   publicConfig: () => { const c = cfg(); return { serverUrl: c.baseUrl, apiPrefix: c.prefix, authMode: c.authMode, instructionEncoding: c.encoding }; },
 };

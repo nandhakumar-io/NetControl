@@ -203,7 +203,7 @@ async function orchestrate(run) {
         await seb.registerQuit(run.examId, item.connection_token);
         await setItem(item, {
           state: 'waiting_exit', connection_token: item.connection_token, seb_status: item.seb_status,
-          instruction_sent_at: NOW, details: 'SEB_QUIT instruction registered — waiting for SEB to exit',
+          instruction_sent_at: NOW, details: 'SEB_QUIT instruction registered — waiting for SEB to exit (typically 5–15s)',
         });
       } catch (e) {
         await setItem(item, { state: 'failed', details: `Could not register SEB_QUIT: ${e.message}` });
@@ -320,7 +320,21 @@ async function cancelRun(runId, orgId) {
     'UPDATE seb_quit_runs SET status = \'cancelled\', finished_at = NOW() WHERE id = ? AND org_id = ? AND status = \'running\'',
     [runId, orgId]
   );
-  return r.affectedRows > 0;
+  if (r.affectedRows > 0) {
+    await execute(
+      `UPDATE seb_quit_items 
+         SET state = 'cancelled', 
+             details = CASE 
+               WHEN state = 'waiting_exit' THEN 'Run cancelled — SEB_QUIT instruction was sent, but PC shutdown is blocked'
+               WHEN state = 'shutdown_pending' THEN 'Run cancelled — PC shutdown blocked'
+               ELSE 'Run cancelled'
+             END
+       WHERE run_id = ? AND state IN ('queued', 'waiting_exit', 'shutdown_pending')`,
+      [runId]
+    );
+    return true;
+  }
+  return false;
 }
 
 async function getRun(runId, orgId) {
