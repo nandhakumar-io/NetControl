@@ -337,12 +337,13 @@ async function getRun(runId, orgId) {
 }
 
 async function listRuns(orgId, limit = 20) {
+  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
   return query(
     `SELECT r.id, r.exam_id, r.scope_type, r.scope_name, r.shutdown_after, r.status,
             r.created_by_username, r.created_at, r.finished_at,
             (SELECT COUNT(*) FROM seb_quit_items i WHERE i.run_id = r.id) AS device_count
-       FROM seb_quit_runs r WHERE r.org_id = ? ORDER BY r.created_at DESC LIMIT ?`,
-    [orgId, Math.min(Math.max(limit, 1), 100)]
+       FROM seb_quit_runs r WHERE r.org_id = ? ORDER BY r.created_at DESC LIMIT ${safeLimit}`,
+    [orgId]
   );
 }
 

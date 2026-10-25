@@ -117,6 +117,7 @@ async function request(method, path, { json, form } = {}, _retried = false) {
   let body;
   if (json !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(json); }
   else if (form) { headers['Content-Type'] = 'application/x-www-form-urlencoded'; body = new URLSearchParams(form).toString(); }
+  else { headers['Content-Type'] = 'application/x-www-form-urlencoded'; }
 
   const { res, data } = await fetchJson(`${c.baseUrl}${c.prefix}${path}`, { method, headers, body }, c.timeoutMs);
 
