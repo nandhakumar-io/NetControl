@@ -10,11 +10,12 @@
 import React, { useMemo, useState, useEffect } from 'react'
 import {
   LayoutGrid, X, Zap, Power, RotateCw, ShieldAlert,
-  CheckSquare, Square, MinusSquare, Pencil, MonitorX,
+  CheckSquare, Square, MinusSquare, Pencil, MonitorX, LogOut,
 } from 'lucide-react'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
 import ActionConfirmModal from '../modals/ActionConfirmModal'
+import SebQuitModal from '../modals/SebQuitModal'
 
 function seatKey(row, col) { return `${row}:${col}` }
 
@@ -35,6 +36,7 @@ export default function LabConsole({ group, devices, onClose, onEditLayout, isLi
 
   const [selected, setSelected] = useState(new Set()) // Set of device ids
   const [actionModal, setActionModal] = useState(null) // { type }
+  const [sebOpen, setSebOpen] = useState(false)
 
   const toggleSeat = (deviceId) => setSelected(prev => {
     const n = new Set(prev)
@@ -347,6 +349,11 @@ export default function LabConsole({ group, devices, onClose, onEditLayout, isLi
               style={{ background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }}>
               <RotateCw size={12} /> Restart
             </button>
+            <button onClick={() => setSebOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
+              style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa' }}>
+              <LogOut size={12} /> Quit SEB
+            </button>
             <button onClick={bulkMaintenance}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
               style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}>
@@ -359,6 +366,13 @@ export default function LabConsole({ group, devices, onClose, onEditLayout, isLi
           </div>
         </div>
       )}
+
+      <SebQuitModal
+        open={sebOpen}
+        onClose={() => setSebOpen(false)}
+        target={{ deviceIds: selectedDevices.map(d => d.id), label: `${selectedDevices.length} seat${selectedDevices.length === 1 ? '' : 's'}${group?.name ? ` · ${group.name}` : ''}` }}
+        onFinished={() => clearSelection()}
+      />
 
       <ActionConfirmModal
         open={!!actionModal}

@@ -1023,6 +1023,20 @@ run()
     } catch (e) {
       console.warn('  ⚠  devices.parent_device_id:', e.message);
     }
+    try {
+      const { migrateSebQuit } = require('./migrate-seb-quit');
+      await migrateSebQuit();
+      console.log('  ✓ seb_quit_runs / seb_quit_items (SEB Server quit orchestration — quit SEB, confirm exit, then optional shutdown)');
+    } catch (e) {
+      console.warn('  ⚠  seb-quit:', e.message);
+    }
+    try {
+      const { migrateSebBinding } = require('./migrate-seb-binding');
+      await migrateSebBinding();
+      console.log('  ✓ devices.seb_match_key (explicit device ↔ SEB client binding)');
+    } catch (e) {
+      console.warn('  ⚠  seb-binding:', e.message);
+    }
     console.log('\n✅ All done.\n');
   })
   .then(() => exitWhenFlushed(0))  // Always exit — don't let pool timers hang node

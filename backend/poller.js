@@ -63,6 +63,13 @@ digestService.start();
 syntheticCheckRunner.start();
 bulkCommandScheduler.start();
 
+// ── SEB quit run sweeper ────────────────────────────────────────────────────
+// Runs are executed by the web worker that received the request; if that
+// worker dies mid-run, its heartbeat stops and this marks the run interrupted
+// (never sends a shutdown). See services/sebQuit.js.
+const sebQuit = require('./services/sebQuit');
+sebQuit.startSweeper();
+
 // ── metrics_history compaction + retention ────────────────────────────────────
 // Raw 60s buckets are kept for METRICS_COMPRESS_AFTER_DAYS (default 35 —
 // "at least a month"), then folded into one row/device/day in
@@ -98,6 +105,7 @@ process.on('SIGTERM', () => {
   syntheticCheckRunner.stop();
   auditRetention.stop();
   bulkCommandScheduler.stop();
+  sebQuit.stopSweeper();
   clearInterval(approvalExpiryInterval);
   process.exit(0);
 });

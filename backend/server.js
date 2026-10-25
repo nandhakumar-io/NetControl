@@ -267,6 +267,7 @@ app.use('/api/devices',   require('./routes/devices'));
 app.use('/api/search',    require('./routes/search'));
 app.use('/api/groups',    require('./routes/groups'));
 app.use('/api/actions',   require('./routes/actions'));
+app.use('/api/seb',       require('./routes/seb'));
 app.use('/api/schedules', require('./routes/schedules'));
 app.use('/api/audit',     require('./routes/audit'));
 app.use('/api/jobs',      require('./routes/jobs'));

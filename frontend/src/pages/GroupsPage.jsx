@@ -3,12 +3,13 @@ import {
   Layers, Plus, Pencil, Trash2, Monitor, Zap, Power,
   RotateCcw, X, Loader2, ChevronDown, ChevronRight,
   Server, RefreshCw, Search, Users, Wifi, WifiOff, AlertOctagon, LayoutGrid,
-  TrendingUp, TrendingDown, Router, Waypoints, ShieldCheck, HelpCircle,
+  TrendingUp, TrendingDown, Router, Waypoints, ShieldCheck, HelpCircle, LogOut,
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
+import SebQuitModal from '../components/modals/SebQuitModal'
 import LabLayoutEditor from '../components/lab/LabLayoutEditor'
 import LabConsole from '../components/lab/LabConsole'
 import { useThemeStore } from '../store/themeStore'
@@ -313,11 +314,12 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
         )}
 
         {/* Action buttons */}
-        <div className="grid grid-cols-3 gap-2" onDoubleClick={e => e.stopPropagation()}>
+        <div className="grid grid-cols-4 gap-2" onDoubleClick={e => e.stopPropagation()}>
           {[
             { type: 'wake',     label: 'Wake All',  icon: <Zap size={12} />,       color: '#22c55e', bg: 'rgba(34,197,94,0.08)',   border: 'rgba(34,197,94,0.2)',   hbg: 'rgba(34,197,94,0.18)'  },
             { type: 'shutdown', label: 'Shut Down', icon: <Power size={12} />,     color: '#f87171', bg: 'rgba(239,68,68,0.08)',   border: 'rgba(239,68,68,0.2)',   hbg: 'rgba(239,68,68,0.18)'  },
             { type: 'restart',  label: 'Restart',   icon: <RotateCcw size={12} />, color: '#fbbf24', bg: 'rgba(251,191,36,0.08)',  border: 'rgba(251,191,36,0.2)',  hbg: 'rgba(251,191,36,0.18)' },
+            { type: 'quit_seb', label: 'Quit SEB',  icon: <LogOut size={12} />,    color: '#a78bfa', bg: 'rgba(167,139,250,0.08)', border: 'rgba(167,139,250,0.2)', hbg: 'rgba(167,139,250,0.18)' },
           ].map(({ type, label, icon, color, bg, border, hbg }) => (
             <button key={type}
               onClick={() => onAction({ type, group })}
@@ -644,8 +646,15 @@ export default function GroupsPage() {
         group={groupModal !== 'add' ? groupModal : null}
       />
 
+      <SebQuitModal
+        open={actionModal?.type === 'quit_seb'}
+        onClose={() => setActionModal(null)}
+        target={actionModal?.type === 'quit_seb' ? { groupId: actionModal.group.id, label: actionModal.group.name } : null}
+        onFinished={() => fetchAll(true)}
+      />
+
       <ActionConfirmModal
-        open={!!actionModal}
+        open={!!actionModal && actionModal.type !== 'quit_seb'}
         onClose={() => setActionModal(null)}
         onConfirm={executeAction}
         title={actionModal ? `${actionModal.type.charAt(0).toUpperCase() + actionModal.type.slice(1)} — ${actionModal.group?.name}` : ''}

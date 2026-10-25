@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown, Columns3, Check
+  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown, Columns3, Check, LogOut
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -15,6 +15,7 @@ import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import FilePushModal from '../components/modals/FilePushModal'
 import DeviceRegistrationModal from '../components/modals/DeviceRegistrationModal'
 import BulkEditModal from '../components/modals/BulkEditModal'
+import SebQuitModal from '../components/modals/SebQuitModal'
 import SavedViews from '../components/SavedViews'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
@@ -220,6 +221,7 @@ function ActionBtn({ onClick, title, color, children }) {
     green:  { bg: 'rgba(34,197,94,0.08)',   hbg: 'rgba(34,197,94,0.18)',   border: 'rgba(34,197,94,0.2)',   hborder: 'rgba(34,197,94,0.4)',   text: '#22c55e' },
     red:    { bg: 'rgba(239,68,68,0.08)',    hbg: 'rgba(239,68,68,0.18)',    border: 'rgba(239,68,68,0.2)',    hborder: 'rgba(239,68,68,0.4)',    text: '#f87171' },
     yellow: { bg: 'rgba(251,191,36,0.08)',   hbg: 'rgba(251,191,36,0.18)',   border: 'rgba(251,191,36,0.2)',   hborder: 'rgba(251,191,36,0.4)',   text: '#fbbf24' },
+    purple: { bg: 'rgba(167,139,250,0.08)',  hbg: 'rgba(167,139,250,0.18)',  border: 'rgba(167,139,250,0.2)',  hborder: 'rgba(167,139,250,0.4)',  text: '#a78bfa' },
   }
   const c = colors[color]
   return (
@@ -275,7 +277,7 @@ function Skeleton({ count = 8, view = 'grid' }) {
 }
 
 // ── Device Card (grid) ────────────────────────────────────────────────────────
-function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag }) {
+function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag }) {
   const isLight = useThemeStore(s => s.theme === 'light')
   const status  = device.status || 'unknown'
   const isOnline = status === 'online'
@@ -351,6 +353,9 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
         <ActionBtn onClick={() => onWake(device)}     title="Wake On LAN" color="green"><Zap size={11} />Wake</ActionBtn>
         <ActionBtn onClick={() => onShutdown(device)} title="Shutdown"    color="red"><Power size={11} />Off</ActionBtn>
         <ActionBtn onClick={() => onRestart(device)}  title="Restart"     color="yellow"><RotateCcw size={11} />Restart</ActionBtn>
+        {onQuitSeb && device.os_type === 'windows' && (
+          <ActionBtn onClick={() => onQuitSeb(device)} title="Quit Safe Exam Browser (via SEB Server)" color="purple"><LogOut size={11} />SEB</ActionBtn>
+        )}
 
         {/* Icon buttons */}
         <button onClick={() => onToggleMaintenance(device)}
@@ -414,7 +419,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 }
 
 // ── Group section header ──────────────────────────────────────────────────────
-function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag, onBulkAddTag }) {
+function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag, onBulkAddTag }) {
   const [open, setOpen] = useState(true)
   const online  = devices.filter(d => d.status === 'online').length
   const total   = devices.length
@@ -481,7 +486,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
             <DeviceCard key={d.id} device={d}
               selected={selectedIds.has(d.id)}
               onSelect={id => onSelect(id, !selectedIds.has(id))}
-              onWake={onWake} onShutdown={onShutdown} onRestart={onRestart}
+              onWake={onWake} onShutdown={onShutdown} onRestart={onRestart} onQuitSeb={onQuitSeb}
               onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance}
               latestAgentVersion={latestAgentVersion} wakeEligibility={wakeEligibility?.[d.id]}
               onAddTag={onAddTag} onRemoveTag={onRemoveTag} />
@@ -606,7 +611,7 @@ function TagQuickEditor({ tags, onAdd, onRemove, size = 'sm' }) {
   )
 }
 
-function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onEdit, onDelete, onToggleMaintenance, onAddTag, onRemoveTag, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
+function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, onAddTag, onRemoveTag, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -692,6 +697,9 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
           { fn: () => onWake(device),     icon: <Zap size={12} />,        color: '#22c55e', bg: 'rgba(34,197,94,0.1)',   title: 'Wake'     },
           { fn: () => onShutdown(device), icon: <Power size={12} />,      color: '#f87171', bg: 'rgba(239,68,68,0.1)',   title: 'Shutdown' },
           { fn: () => onRestart(device),  icon: <RotateCcw size={12} />,  color: '#fbbf24', bg: 'rgba(251,191,36,0.1)',  title: 'Restart'  },
+          ...(onQuitSeb && device.os_type === 'windows'
+            ? [{ fn: () => onQuitSeb(device), icon: <LogOut size={12} />, color: '#a78bfa', bg: 'rgba(167,139,250,0.1)', title: 'Quit Safe Exam Browser' }]
+            : []),
           { fn: () => onToggleMaintenance(device), icon: <Wrench size={12} />, color: '#fb923c', bg: 'rgba(251,146,60,0.1)',
             title: inMaintenance ? 'Mark as OK (resume alerts & webhooks)' : 'Mark under maintenance (pause alerts & webhooks)' },
           { fn: () => onEdit(device),     icon: <Pencil size={12} />,     color: null,       bg: null,                   title: 'Edit'     },
@@ -719,7 +727,7 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
 }
 
 // ── Bulk bar ──────────────────────────────────────────────────────────────────
-function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, onEditSelected, onMaintenanceAll, onAgentUpdateAll, onClear, canEdit }) {
+function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onQuitSebAll, onPushFile, onEditSelected, onMaintenanceAll, onAgentUpdateAll, onClear, canEdit }) {
   if (!count) return null
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 animate-slide-up">
@@ -747,6 +755,7 @@ function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onPushFile, on
           { fn: onWakeAll,     label: 'Wake All',  icon: <Zap size={11} />,       c: '#22c55e', bg: 'rgba(34,197,94,0.1)',  bc: 'rgba(34,197,94,0.25)'  },
           { fn: onShutdownAll, label: 'Shutdown',  icon: <Power size={11} />,     c: '#f87171', bg: 'rgba(239,68,68,0.1)',  bc: 'rgba(239,68,68,0.25)'  },
           { fn: onRestartAll,  label: 'Restart',   icon: <RotateCcw size={11} />, c: '#fbbf24', bg: 'rgba(251,191,36,0.1)', bc: 'rgba(251,191,36,0.25)' },
+          { fn: onQuitSebAll,  label: 'Quit SEB', icon: <LogOut size={11} />,      c: '#a78bfa', bg: 'rgba(167,139,250,0.1)', bc: 'rgba(167,139,250,0.25)' },
           { fn: onMaintenanceAll, label: 'Maintenance', icon: <Wrench size={11} />, c: '#fb923c', bg: 'rgba(251,146,60,0.1)', bc: 'rgba(251,146,60,0.25)' },
           { fn: onAgentUpdateAll, label: 'Update Agent', icon: <PackageCheck size={11} />, c: '#38bdf8', bg: 'rgba(56,189,248,0.1)', bc: 'rgba(56,189,248,0.25)' },
           { fn: onPushFile,    label: 'Push File', icon: <Upload size={11} />,    c: '#38bdf8', bg: 'rgba(56,189,248,0.1)', bc: 'rgba(56,189,248,0.25)' },
@@ -801,6 +810,7 @@ export default function DevicesPage() {
   const [deviceModal, setDeviceModal]   = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [actionModal, setActionModal]   = useState(null)
+  const [sebTarget, setSebTarget]       = useState(null) // { deviceId | deviceIds, label }
   const [filePushOpen, setFilePushOpen] = useState(false)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
@@ -880,6 +890,14 @@ export default function DevicesPage() {
   const clearSelection = () => setSelectedIds(new Set())
 
   const handleAction = (type, device) => setActionModal({ type, device })
+
+  // SEB quit: one device from its card/row, or every selected Windows device.
+  const handleQuitSeb = (device) => setSebTarget({ deviceId: device.id, label: device.name })
+  const bulkQuitSeb = () => {
+    const targets = devices.filter(d => selectedIds.has(d.id) && d.os_type === 'windows')
+    if (!targets.length) { toast.error('Select at least one Windows device'); return }
+    setSebTarget({ deviceIds: targets.map(d => d.id), label: `${targets.length} device${targets.length === 1 ? '' : 's'}` })
+  }
 
   const executeAction = async (pin) => {
     const { type, device } = actionModal
@@ -1475,6 +1493,7 @@ export default function DevicesPage() {
               onWake={d => handleAction('wake', d)}
               onShutdown={d => handleAction('shutdown', d)}
               onRestart={d => handleAction('restart', d)}
+              onQuitSeb={handleQuitSeb}
               onEdit={d => setDeviceModal(d)}
               onDelete={d => setDeleteTarget(d)}
               onToggleMaintenance={handleToggleMaintenance}
@@ -1546,6 +1565,7 @@ export default function DevicesPage() {
                 onWake={dev => handleAction('wake', dev)}
                 onShutdown={dev => handleAction('shutdown', dev)}
                 onRestart={dev => handleAction('restart', dev)}
+                onQuitSeb={handleQuitSeb}
                 onEdit={dev => setDeviceModal(dev)}
                 onDelete={dev => setDeleteTarget(dev)}
                 onToggleMaintenance={handleToggleMaintenance}
@@ -1565,6 +1585,7 @@ export default function DevicesPage() {
         onWakeAll={() => bulkAction('wake')}
         onShutdownAll={() => bulkAction('shutdown')}
         onRestartAll={() => bulkAction('restart')}
+        onQuitSebAll={bulkQuitSeb}
         onPushFile={() => setFilePushOpen(true)}
         onEditSelected={() => setBulkEditOpen(true)}
         onMaintenanceAll={bulkToggleMaintenance}
@@ -1585,6 +1606,11 @@ export default function DevicesPage() {
         title={actionModal ? `${actionModal.type.charAt(0).toUpperCase() + actionModal.type.slice(1)} — ${actionModal.device?.name}` : ''}
         description="Enter your action PIN to authorise this command."
         danger={actionModal?.type !== 'wake'} />
+
+      <SebQuitModal
+        open={!!sebTarget} onClose={() => setSebTarget(null)}
+        target={sebTarget}
+        onFinished={() => { clearSelection(); fetchAll(true) }} />
 
       <ActionConfirmModal
         open={!!deleteTarget} onClose={() => setDeleteTarget(null)}
