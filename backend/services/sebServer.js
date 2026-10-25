@@ -15,7 +15,7 @@
 
 const TERMINAL_STATUSES = new Set(['CLOSED', 'DISABLED']);
 const KNOWN_STATUSES = new Set([
-  'UNDEFINED', 'CONNECTION_REQUESTED', 'AUTHENTICATED', 'ACTIVE', 'CLOSED', 'DISABLED',
+  'UNDEFINED', 'CONNECTION_REQUESTED', 'AUTHENTICATED', 'READY', 'ACTIVE', 'CLOSED', 'DISABLED',
 ]);
 
 class SebError extends Error {
@@ -135,7 +135,7 @@ async function request(method, path, { json, form } = {}, _retried = false) {
 
 // ── Tolerant response parsing ────────────────────────────────────────────────
 function flatStrings(obj, depth = 0, out = []) {
-  if (!obj || typeof obj !== 'object' || depth > 1) return out;
+  if (!obj || typeof obj !== 'object' || depth > 2) return out;
   for (const v of Object.values(obj)) {
     if (typeof v === 'string' || typeof v === 'number') out.push(String(v));
     else if (v && typeof v === 'object' && !Array.isArray(v)) flatStrings(v, depth + 1, out);
@@ -143,31 +143,61 @@ function flatStrings(obj, depth = 0, out = []) {
   return out;
 }
 
-function normalizeConnection(c) {
-  if (!c || typeof c !== 'object') return null;
+function normalizeConnection(item) {
+  if (!item || typeof item !== 'object') return null;
+  const c = item.cdat || item;
   const token = c.tk ?? c.connectionToken ?? c.connection_token ?? null;
   if (!token) return null;
-  const values = flatStrings(c);
+  const values = flatStrings(item);
   let status = String(c.st ?? c.cs ?? c.status ?? c.connectionStatus ?? '').toUpperCase();
   if (!KNOWN_STATUSES.has(status)) {
     status = values.map(v => v.toUpperCase()).find(v => KNOWN_STATUSES.has(v)) || 'UNKNOWN';
   }
-  return { token: String(token), status, values, raw: c };
+  return { token: String(token), status, values, raw: item };
 }
 
 function extractConnections(payload) {
-  const cons = payload?.monitoringConnectionData?.cons
-            ?? payload?.cons
-            ?? [];
+  const cons = Array.isArray(payload)
+    ? payload
+    : payload?.monitoringConnectionData?.cons
+      ?? payload?.cons
+      ?? [];
   return (Array.isArray(cons) ? cons : []).map(normalizeConnection).filter(Boolean);
 }
 
-async function getMonitoring(examId) {
+async function resolveExamId(identifier) {
+  const str = String(identifier || '').trim();
+  if (!str) return str;
+  if (/^\d+$/.test(str)) return str;
+  try {
+    const data = await request('GET', '/exam');
+    const exams = Array.isArray(data?.content) ? data.content : [];
+    const match = exams.find(e =>
+      String(e.quizName || '').trim().toLowerCase() === str.toLowerCase() ||
+      String(e.externalId || '').trim().toLowerCase() === str.toLowerCase()
+    );
+    if (match) return String(match.id);
+  } catch (err) {
+    // ignore
+  }
+  return str;
+}
+
+async function getMonitoring(rawExamId) {
+  const examId = await resolveExamId(rawExamId);
+  try {
+    const directData = await request('GET', `/monitoring/${encodeURIComponent(examId)}`);
+    const list = extractConnections(directData);
+    if (list.length > 0) return list;
+  } catch (err) {
+    // fall back if SEB Server returns an error on this path
+  }
   const data = await request('GET', `/monitoring/${encodeURIComponent(examId)}/fullpage`);
   return extractConnections(data);
 }
 
-async function getConnection(examId, connectionToken) {
+async function getConnection(rawExamId, connectionToken) {
+  const examId = await resolveExamId(rawExamId);
   const data = await request('GET', `/monitoring/${encodeURIComponent(examId)}/${encodeURIComponent(connectionToken)}`);
   // Accept either a bare connection object or one wrapped in a container.
   const direct = normalizeConnection(data);
@@ -179,7 +209,8 @@ async function getConnection(examId, connectionToken) {
   return null;
 }
 
-async function registerQuit(examId, connectionToken) {
+async function registerQuit(rawExamId, connectionToken) {
+  const examId = await resolveExamId(rawExamId);
   const instruction = { examId: String(examId), connectionToken, type: 'SEB_QUIT', attributes: {} };
   const c = cfg();
   if (c.encoding === 'form') {
@@ -193,7 +224,7 @@ async function registerQuit(examId, connectionToken) {
 // ── Matching NetControl devices to SEB connections ───────────────────────────
 // Strong match: any recognised connection field equals the device IP.
 // Weak match: any field equals the device hostname / name (case-insensitive).
-const STATUS_RANK = { ACTIVE: 0, AUTHENTICATED: 1, CONNECTION_REQUESTED: 2, UNDEFINED: 3, UNKNOWN: 4, CLOSED: 5, DISABLED: 6 };
+const STATUS_RANK = { ACTIVE: 0, READY: 0, AUTHENTICATED: 1, CONNECTION_REQUESTED: 2, UNDEFINED: 3, UNKNOWN: 4, CLOSED: 5, DISABLED: 6 };
 
 function bestByStatus(list) {
   return list.slice().sort((a, b) => (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9))[0];
@@ -213,7 +244,10 @@ function matchConnectionDetailed(device, connections) {
   const names = [device.hostname, device.name].filter(Boolean).map(n => String(n).trim().toLowerCase());
   const byIp = ip ? connections.filter(c => c.values.some(v => v === ip || v.startsWith(`${ip}:`) || v === `/${ip}`)) : [];
   if (byIp.length) return { con: bestByStatus(byIp), by: 'ip' };
-  const byName = names.length ? connections.filter(c => c.values.some(v => names.includes(v.toLowerCase()))) : [];
+  const byName = names.length ? connections.filter(c => c.values.some(v => {
+    const vl = v.toLowerCase();
+    return names.some(n => vl === n || (n.length >= 4 && vl.startsWith(n)) || (vl.length >= 4 && n.startsWith(vl)));
+  })) : [];
   if (byName.length) return { con: bestByStatus(byName), by: 'hostname' };
   return { con: null, by: null };
 }

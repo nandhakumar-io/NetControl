@@ -1,5 +1,5 @@
 import React from 'react'
-import { Monitor, Power, RotateCcw, Zap, Pencil, Trash2, Server, TerminalSquare } from 'lucide-react'
+import { Monitor, Power, RotateCcw, Zap, Pencil, Trash2, Server, TerminalSquare, LogOut } from 'lucide-react'
 import { useThemeStore } from '../../store/themeStore'
 
 const STATUS_COLORS = {
@@ -17,7 +17,7 @@ const STATUS_LABELS = {
 
 export default function DeviceCard({
   device, selected,
-  onSelect, onWake, onShutdown, onRestart, onEdit, onDelete,
+  onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete,
 }) {
   const { theme } = useThemeStore()
   const isLight = theme === 'light'
@@ -115,6 +115,16 @@ export default function DeviceCard({
           <RotateCcw size={12} />
           <span className="text-[11px] font-body font-medium">Restart</span>
         </button>
+        {device.os_type === 'windows' && onQuitSeb && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onQuitSeb(device); }}
+            title="Quit Safe Exam Browser (SEB)"
+            className="icon-btn hover:!text-[#a78bfa] hover:!bg-[#a78bfa]/10 hover:!border-[#a78bfa]/20"
+            style={{ color: '#a78bfa' }}
+          >
+            <LogOut size={12} />
+          </button>
+        )}
         {/* Edit / Delete — use icon-btn class which adapts to theme */}
         <button
           onClick={() => onEdit(device)}
