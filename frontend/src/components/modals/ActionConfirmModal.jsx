@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { ShieldAlert, X, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react'
+import { ShieldAlert, X, Loader2, CheckCircle2, XCircle, AlertTriangle, MinusCircle } from 'lucide-react'
 import { getErrorMessage } from '../../lib/errors'
 
 export default function ActionConfirmModal({ open, onClose, onConfirm, title, description, danger = false }) {
@@ -34,7 +34,8 @@ export default function ActionConfirmModal({ open, onClose, onConfirm, title, de
   if (!open) return null
 
   const succeeded = results?.results?.filter(r => r.result === 'success').length ?? 0
-  const failed    = results?.results?.filter(r => r.result !== 'success').length ?? 0
+  const skipped   = results?.results?.filter(r => r.result === 'skipped').length ?? 0
+  const failed    = results?.results?.filter(r => r.result === 'failure').length ?? 0
   const overall   = results?.overall
 
   return (
@@ -80,7 +81,9 @@ export default function ActionConfirmModal({ open, onClose, onConfirm, title, de
                   {results ? 'Action Results' : title}
                 </h3>
                 <p className="text-xs font-body mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                  {results ? `${succeeded} succeeded · ${failed} failed` : description}
+                  {results
+                    ? `${succeeded} succeeded${skipped > 0 ? ` · ${skipped} skipped` : ''} · ${failed} failed`
+                    : description}
                 </p>
               </div>
             </div>
@@ -93,30 +96,49 @@ export default function ActionConfirmModal({ open, onClose, onConfirm, title, de
           {results ? (
             <div className="px-6 pb-6">
               {results.results.length > 1 && (
-                <div className="flex gap-3 mb-4">
+                <div className="flex gap-2 mb-4">
                   <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-accent-green/10 border border-accent-green/20">
                     <CheckCircle2 size={14} className="text-accent-green shrink-0" />
-                    <span className="text-sm font-body font-medium text-accent-green">{succeeded} succeeded</span>
+                    <span className="text-xs font-body font-medium text-accent-green">{succeeded} succeeded</span>
                   </div>
+                  {skipped > 0 && (
+                    <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-500/10 border border-slate-500/20">
+                      <MinusCircle size={14} className="text-slate-400 shrink-0" />
+                      <span className="text-xs font-body font-medium text-slate-300">{skipped} skipped</span>
+                    </div>
+                  )}
                   <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-accent-red/10 border border-accent-red/20">
                     <XCircle size={14} className="text-accent-red shrink-0" />
-                    <span className="text-sm font-body font-medium text-accent-red">{failed} failed</span>
+                    <span className="text-xs font-body font-medium text-accent-red">{failed} failed</span>
                   </div>
                 </div>
               )}
               <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                 {results.results.map((r, i) => (
                   <div key={i} className={`flex items-start gap-2.5 px-3 py-2 rounded-lg border ${
-                    r.result === 'success' ? 'bg-accent-green/5 border-accent-green/15' : 'bg-accent-red/5 border-accent-red/15'
+                    r.result === 'success'
+                      ? 'bg-accent-green/5 border-accent-green/15'
+                      : r.result === 'skipped'
+                      ? 'bg-slate-500/5 border-slate-500/15'
+                      : 'bg-accent-red/5 border-accent-red/15'
                   }`}>
-                    {r.result === 'success'
-                      ? <CheckCircle2 size={14} className="text-accent-green shrink-0 mt-0.5" />
-                      : <XCircle size={14} className="text-accent-red shrink-0 mt-0.5" />
-                    }
+                    {r.result === 'success' ? (
+                      <CheckCircle2 size={14} className="text-accent-green shrink-0 mt-0.5" />
+                    ) : r.result === 'skipped' ? (
+                      <MinusCircle size={14} className="text-slate-400 shrink-0 mt-0.5" />
+                    ) : (
+                      <XCircle size={14} className="text-accent-red shrink-0 mt-0.5" />
+                    )}
                     <div className="min-w-0">
                       <p className="text-xs font-body font-medium truncate" style={{ color: 'var(--text-primary)' }}>{r.device}</p>
                       {r.details && (
-                        <p className={`text-[11px] font-body mt-0.5 truncate ${r.result === 'success' ? '' : 'text-accent-red/70'}`}
+                        <p className={`text-[11px] font-body mt-0.5 truncate ${
+                          r.result === 'success'
+                            ? ''
+                            : r.result === 'skipped'
+                            ? 'text-slate-400'
+                            : 'text-accent-red/70'
+                        }`}
                           style={r.result === 'success' ? { color: 'var(--text-muted)' } : {}}>
                           {r.details}
                         </p>

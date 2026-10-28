@@ -889,7 +889,21 @@ export default function DevicesPage() {
   })
   const clearSelection = () => setSelectedIds(new Set())
 
-  const handleAction = (type, device) => setActionModal({ type, device })
+  const handleAction = (type, device) => {
+    if (type === 'wake' && device.status === 'online') {
+      toast('Device is already online', { icon: 'ℹ️' })
+      return
+    }
+    if (type === 'shutdown' && device.status === 'offline') {
+      toast('Device is already offline', { icon: 'ℹ️' })
+      return
+    }
+    if (type === 'restart' && device.status === 'offline') {
+      toast('Device is offline — wake it first to restart', { icon: 'ℹ️' })
+      return
+    }
+    setActionModal({ type, device })
+  }
 
   // SEB quit: one device from its card/row, or every selected Windows device.
   const handleQuitSeb = (device) => setSebTarget({ deviceId: device.id, label: device.name })
@@ -901,7 +915,7 @@ export default function DevicesPage() {
 
   const executeAction = async (pin) => {
     const { type, device } = actionModal
-    const { data } = await api.post(`/actions/${type}`, { deviceId: device.id, actionPin: pin })
+    const { data } = await api.post(`/actions/${type}`, { deviceId: device.id, actionPin: pin }, { timeout: 60000 })
     return data
   }
 
@@ -909,12 +923,17 @@ export default function DevicesPage() {
     const targets = devices.filter(d => selectedIds.has(d.id))
     if (!targets.length) return
 
-    // Wake specifically has known dead-ends up front (no MAC, no relay path
-    // — services/wol.js#checkEligibility, surfaced via wakeEligibility).
-    // Warn which devices will likely fail and why *before* firing the
-    // batch, rather than only reporting a bare failure count afterward.
     if (type === 'wake') {
+      const alreadyOn = targets.filter(d => d.status === 'online').length
+      if (alreadyOn === targets.length) {
+        toast('All selected devices are already online', { icon: 'ℹ️' })
+        return
+      }
+      if (alreadyOn > 0) {
+        toast(`${alreadyOn} of ${targets.length} selected devices are already online and will be skipped`, { icon: 'ℹ️', duration: 4000 })
+      }
       const skips = targets
+        .filter(d => d.status !== 'online')
         .map(d => ({ device: d, elig: wakeEligibility[d.id] }))
         .filter(({ elig }) => elig && elig.method === 'none')
       if (skips.length) {
@@ -926,7 +945,25 @@ export default function DevicesPage() {
         const summary = Object.entries(byReason)
           .map(([reason, names]) => `${names.length} ${WAKE_SKIP_REASONS[reason]?.label || 'no wake path'} (${names.slice(0, 3).join(', ')}${names.length > 3 ? `, +${names.length - 3} more` : ''})`)
           .join(' · ')
-        toast(`${skips.length} of ${targets.length} selected will likely fail to wake: ${summary}`, { icon: '⚠️', duration: 6000 })
+        toast(`${skips.length} will likely fail to wake: ${summary}`, { icon: '⚠️', duration: 6000 })
+      }
+    } else if (type === 'shutdown') {
+      const alreadyOff = targets.filter(d => d.status === 'offline').length
+      if (alreadyOff === targets.length) {
+        toast('All selected devices are already offline', { icon: 'ℹ️' })
+        return
+      }
+      if (alreadyOff > 0) {
+        toast(`${alreadyOff} of ${targets.length} selected devices are already offline and will be skipped`, { icon: 'ℹ️', duration: 4000 })
+      }
+    } else if (type === 'restart') {
+      const alreadyOff = targets.filter(d => d.status === 'offline').length
+      if (alreadyOff === targets.length) {
+        toast('All selected devices are offline — cannot restart', { icon: 'ℹ️' })
+        return
+      }
+      if (alreadyOff > 0) {
+        toast(`${alreadyOff} of ${targets.length} selected devices are offline and will be skipped`, { icon: 'ℹ️', duration: 4000 })
       }
     }
 
@@ -935,26 +972,56 @@ export default function DevicesPage() {
 
   const executeBulkAction = async (pin) => {
     const { type, bulk } = actionModal
-    const settled = await Promise.allSettled(
-      bulk.map(d => api.post(`/actions/${type}`, { deviceId: d.id, actionPin: pin }))
-    )
+
+    const alreadyDone = []
+    const toProcess = []
+    for (const d of bulk) {
+      if (type === 'wake' && d.status === 'online') {
+        alreadyDone.push({ device: d.name, id: d.id, result: 'skipped', details: 'Device is already online' })
+      } else if (type === 'shutdown' && d.status === 'offline') {
+        alreadyDone.push({ device: d.name, id: d.id, result: 'skipped', details: 'Device is already offline' })
+      } else if (type === 'restart' && d.status === 'offline') {
+        alreadyDone.push({ device: d.name, id: d.id, result: 'skipped', details: 'Device is offline' })
+      } else {
+        toProcess.push(d)
+      }
+    }
+
+    let processedResults = []
+    if (toProcess.length > 0) {
+      const CHUNK_SIZE = 50
+      const chunks = []
+      for (let i = 0; i < toProcess.length; i += CHUNK_SIZE) {
+        chunks.push(toProcess.slice(i, i + CHUNK_SIZE))
+      }
+
+      const chunkResponses = await Promise.allSettled(
+        chunks.map(chunk =>
+          api.post(`/actions/${type}`, {
+            deviceIds: chunk.map(d => d.id),
+            actionPin: pin,
+          }, { timeout: 60000 })
+        )
+      )
+
+      chunkResponses.forEach((res, idx) => {
+        const chunk = chunks[idx]
+        if (res.status === 'fulfilled' && res.value.data?.results) {
+          processedResults.push(...res.value.data.results)
+        } else {
+          const errMsg = res.reason?.response?.data?.error || res.reason?.message || 'Request failed'
+          chunk.forEach(d => {
+            processedResults.push({ device: d.name, id: d.id, result: 'failure', details: errMsg })
+          })
+        }
+      })
+    }
+
     clearSelection()
-    // A rejected settlement here (403 access denied, 409 under maintenance,
-    // etc.) used to just disappear from allResults — flatMap only pulled
-    // from the 'fulfilled' branch — so a locked device silently vanished
-    // from the count instead of showing up with its actual reason.
-    // Promise.allSettled preserves input order, so index back into `bulk`
-    // to know which device a rejection belonged to.
-    const allResults = settled.flatMap((s, i) => {
-      if (s.status === 'fulfilled') return s.value.data.results || []
-      const device = bulk[i]
-      return [{
-        device: device.name, id: device.id, result: 'failure',
-        details: s.reason?.response?.data?.error || s.reason?.message || 'Request failed',
-      }]
-    })
-    const failed  = allResults.filter(r => r.result !== 'success').length
-    const overall = allResults.length === 0 ? 'failure' : failed === 0 ? 'success' : failed === allResults.length ? 'failure' : 'partial'
+    const allResults = [...processedResults, ...alreadyDone]
+    const failed = allResults.filter(r => r.result === 'failure').length
+    const succeeded = allResults.filter(r => r.result === 'success').length
+    const overall = failed === 0 ? 'success' : succeeded === 0 ? 'failure' : 'partial'
     return { results: allResults, overall }
   }
 

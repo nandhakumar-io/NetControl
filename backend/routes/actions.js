@@ -65,19 +65,50 @@ async function performAction(action, device) {
   throw new Error(`Unknown action: ${action}`);
 }
 
+// Helper for concurrent bounded execution across multiple devices
+async function runWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let index = 0;
+  const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function shouldSkipAction(action, device) {
+  if (isUnderMaintenance(device)) {
+    return maintenanceBlockedReason(device);
+  }
+  if (action === 'wake' && device.status === 'online') {
+    return 'Device is already online';
+  }
+  if (action === 'shutdown' && device.status === 'offline') {
+    return 'Device is already offline';
+  }
+  if (action === 'restart' && device.status === 'offline') {
+    return 'Device is offline';
+  }
+  return null;
+}
+
 function actionRoute(action) {
   return [
     body('actionPin').notEmpty().isString(),
     body('deviceId').optional().isUUID(),
+    body('deviceIds').optional().isArray(),
     body('groupId').optional().isUUID(),
     requireActionPin,
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-      const { deviceId, groupId } = req.body;
-      if (!deviceId && !groupId)
-        return res.status(400).json({ error: 'deviceId or groupId required' });
+      const { deviceId, deviceIds, groupId } = req.body;
+      if (!deviceId && (!deviceIds || !deviceIds.length) && !groupId)
+        return res.status(400).json({ error: 'deviceId, deviceIds, or groupId required' });
 
       let devices = [];
       try {
@@ -92,13 +123,28 @@ function actionRoute(action) {
             );
             if (!access) return res.status(403).json({ error: 'Access denied to this device' });
           }
-          // Enforce the maintenance lock: block here, not just in the UI —
-          // this endpoint is what the UI itself calls, and the PIN/API can
-          // be hit directly, so the actual restriction has to live here.
           if (isUnderMaintenance(d)) {
             return res.status(409).json({ error: maintenanceBlockedReason(d), code: 'DEVICE_UNDER_MAINTENANCE' });
           }
           devices = [d];
+        } else if (deviceIds && Array.isArray(deviceIds) && deviceIds.length > 0) {
+          const headerOrgId = req.headers?.['x-org-id'];
+          const orgId = headerOrgId || req.user?.activeOrgId;
+          if (!orgId) return res.status(403).json({ error: 'Org context required' });
+          const placeholders = deviceIds.map(() => '?').join(',');
+          const rows = await query(`SELECT * FROM devices WHERE id IN (${placeholders}) AND org_id = ?`, [...deviceIds, orgId]);
+          let accessibleRows = rows;
+          if (req.user.role !== 'admin') {
+            const userGroups = await query('SELECT group_id FROM user_group_access WHERE user_id = ?', [req.user.id]);
+            const allowedGroups = new Set(userGroups.map(g => g.group_id));
+            accessibleRows = rows.filter(d => allowedGroups.has(d.group_id));
+          }
+          devices = accessibleRows.map(d => ({
+            ...d,
+            _ssh_password:   decrypt(d.ssh_password),
+            _ssh_key:        decrypt(d.ssh_key),
+            _winrm_password: decrypt(d.winrm_password),
+          }));
         } else {
           const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
           if (!group) return res.status(404).json({ error: 'Group not found' });
@@ -128,32 +174,32 @@ function actionRoute(action) {
 
       if (!devices.length) return res.status(400).json({ error: 'No devices found for target' });
 
-      const results = [];
-      let overall = 'success';
-
-      for (const device of devices) {
-        let result = 'success', details = '';
-        if (isUnderMaintenance(device)) {
-          result = 'skipped';
-          details = maintenanceBlockedReason(device);
-          if (overall === 'success') overall = 'partial';
-          await audit.log({ userId: req.user.id, username: req.user.username,
+      // Process devices with bounded concurrency (20 parallel operations)
+      const CONCURRENCY_LIMIT = 20;
+      const results = await runWithConcurrency(devices, CONCURRENCY_LIMIT, async (device) => {
+        const skipReason = shouldSkipAction(action, device);
+        if (skipReason) {
+          await audit.log({
+            userId: req.user.id, username: req.user.username,
             action, targetType: 'device', targetId: device.id,
-            targetName: device.name, ipSource: req.realIp, result: 'skipped', details });
-          results.push({ device: device.name, id: device.id, result, details });
-          continue;
+            targetName: device.name, ipSource: req.realIp, result: 'skipped', details: skipReason,
+          });
+          return { device: device.name, id: device.id, result: 'skipped', details: skipReason };
         }
+
+        let result = 'success', details = '';
         try {
           details = await performAction(action, device);
         } catch (e) {
           result = 'failure';
           details = e.message;
-          if (overall === 'success') overall = 'partial';
         }
-        await audit.log({ userId: req.user.id, username: req.user.username,
+
+        await audit.log({
+          userId: req.user.id, username: req.user.username,
           action, targetType: 'device', targetId: device.id,
-          targetName: device.name, ipSource: req.realIp, result, details });
-        results.push({ device: device.name, id: device.id, result, details });
+          targetName: device.name, ipSource: req.realIp, result, details,
+        });
 
         if (result === 'success') {
           webhook.fire(`device.${action}`, {
@@ -162,9 +208,18 @@ function actionRoute(action) {
             message: `${action} performed on ${device.name} by ${req.user.username}`,
           }).catch(() => {});
         }
+
+        return { device: device.name, id: device.id, result, details };
+      });
+
+      const failedCount = results.filter(r => r.result === 'failure').length;
+      let overall = 'success';
+      if (failedCount === results.length) {
+        overall = 'failure';
+      } else if (failedCount > 0) {
+        overall = 'partial';
       }
 
-      if (results.every(r => r.result === 'failure')) overall = 'failure';
       res.json({ action, results, overall });
     },
   ];

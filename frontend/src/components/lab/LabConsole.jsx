@@ -87,29 +87,91 @@ export default function LabConsole({ group, devices, onClose, onEditLayout, isLi
 
   const selectedDevices = devices.filter(d => selected.has(d.id))
 
+  const handleTriggerAction = (type) => {
+    if (!selectedDevices.length) return
+    if (type === 'wake') {
+      const alreadyOn = selectedDevices.filter(d => d.status === 'online').length
+      if (alreadyOn === selectedDevices.length) {
+        toast('All selected devices are already online', { icon: 'ℹ️' })
+        return
+      }
+      if (alreadyOn > 0) {
+        toast(`${alreadyOn} of ${selectedDevices.length} selected devices are already online and will be skipped`, { icon: 'ℹ️' })
+      }
+    } else if (type === 'shutdown') {
+      const alreadyOff = selectedDevices.filter(d => d.status === 'offline').length
+      if (alreadyOff === selectedDevices.length) {
+        toast('All selected devices are already offline', { icon: 'ℹ️' })
+        return
+      }
+      if (alreadyOff > 0) {
+        toast(`${alreadyOff} of ${selectedDevices.length} selected devices are already offline and will be skipped`, { icon: 'ℹ️' })
+      }
+    } else if (type === 'restart') {
+      const alreadyOff = selectedDevices.filter(d => d.status === 'offline').length
+      if (alreadyOff === selectedDevices.length) {
+        toast('All selected devices are offline — cannot restart', { icon: 'ℹ️' })
+        return
+      }
+      if (alreadyOff > 0) {
+        toast(`${alreadyOff} of ${selectedDevices.length} selected devices are offline and will be skipped`, { icon: 'ℹ️' })
+      }
+    }
+    setActionModal({ type })
+  }
+
   const executeBulkAction = async (pin) => {
     const { type } = actionModal
-    const settled = await Promise.allSettled(
-      selectedDevices.map(d => api.post(`/actions/${type}`, { deviceId: d.id, actionPin: pin }))
-    )
+
+    const alreadyDone = []
+    const toProcess = []
+    for (const d of selectedDevices) {
+      if (type === 'wake' && d.status === 'online') {
+        alreadyDone.push({ device: d.name, id: d.id, result: 'skipped', details: 'Device is already online' })
+      } else if (type === 'shutdown' && d.status === 'offline') {
+        alreadyDone.push({ device: d.name, id: d.id, result: 'skipped', details: 'Device is already offline' })
+      } else if (type === 'restart' && d.status === 'offline') {
+        alreadyDone.push({ device: d.name, id: d.id, result: 'skipped', details: 'Device is offline' })
+      } else {
+        toProcess.push(d)
+      }
+    }
+
+    let processedResults = []
+    if (toProcess.length > 0) {
+      const CHUNK_SIZE = 50
+      const chunks = []
+      for (let i = 0; i < toProcess.length; i += CHUNK_SIZE) {
+        chunks.push(toProcess.slice(i, i + CHUNK_SIZE))
+      }
+
+      const chunkResponses = await Promise.allSettled(
+        chunks.map(chunk =>
+          api.post(`/actions/${type}`, {
+            deviceIds: chunk.map(d => d.id),
+            actionPin: pin,
+          }, { timeout: 60000 })
+        )
+      )
+
+      chunkResponses.forEach((res, idx) => {
+        const chunk = chunks[idx]
+        if (res.status === 'fulfilled' && res.value.data?.results) {
+          processedResults.push(...res.value.data.results)
+        } else {
+          const errMsg = res.reason?.response?.data?.error || res.reason?.message || 'Request failed'
+          chunk.forEach(d => {
+            processedResults.push({ device: d.name, id: d.id, result: 'failure', details: errMsg })
+          })
+        }
+      })
+    }
+
     clearSelection()
-    // A rejected settlement here (403 access denied, 409 under maintenance,
-    // etc.) used to just disappear — flatMap only pulled from the
-    // 'fulfilled' branch — so a locked device silently vanished from the
-    // count instead of showing up with its actual reason. Same fix as
-    // DevicesPage.jsx's executeBulkAction. Promise.allSettled preserves
-    // input order, so index back into selectedDevices to know which device
-    // a rejection belonged to.
-    const allResults = settled.flatMap((s, i) => {
-      if (s.status === 'fulfilled') return s.value.data.results || []
-      const device = selectedDevices[i]
-      return [{
-        device: device.name, id: device.id, result: 'failure',
-        details: s.reason?.response?.data?.error || s.reason?.message || 'Request failed',
-      }]
-    })
-    const failed  = allResults.filter(r => r.result !== 'success').length
-    const overall = allResults.length === 0 ? 'failure' : failed === 0 ? 'success' : failed === allResults.length ? 'failure' : 'partial'
+    const allResults = [...processedResults, ...alreadyDone]
+    const failed  = allResults.filter(r => r.result === 'failure').length
+    const succeeded = allResults.filter(r => r.result === 'success').length
+    const overall = failed === 0 ? 'success' : succeeded === 0 ? 'failure' : 'partial'
     return { results: allResults, overall }
   }
 
@@ -334,17 +396,17 @@ export default function LabConsole({ group, devices, onClose, onEditLayout, isLi
             {selected.size} selected
           </span>
           <div className="flex items-center gap-2 ml-auto">
-            <button onClick={() => setActionModal({ type: 'wake' })}
+            <button onClick={() => handleTriggerAction('wake')}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
               style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', color: '#22c55e' }}>
               <Zap size={12} /> Wake
             </button>
-            <button onClick={() => setActionModal({ type: 'shutdown' })}
+            <button onClick={() => handleTriggerAction('shutdown')}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
               style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', color: '#f87171' }}>
               <Power size={12} /> Shutdown
             </button>
-            <button onClick={() => setActionModal({ type: 'restart' })}
+            <button onClick={() => handleTriggerAction('restart')}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
               style={{ background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', color: '#fbbf24' }}>
               <RotateCw size={12} /> Restart

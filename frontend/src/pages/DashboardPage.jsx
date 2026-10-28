@@ -454,10 +454,10 @@ export default function DashboardPage() {
   const executeAction = async (pin) => {
     const {type,target} = actionModal
     if (target?.groupId) {
-      const {data} = await api.post(`/actions/${type}`,{groupId:target.groupId,actionPin:pin})
+      const {data} = await api.post(`/actions/${type}`,{groupId:target.groupId,actionPin:pin}, { timeout: 60000 })
       fetchAll(true); return data
     }
-    const {data} = await api.post(`/actions/${type}`,{deviceId:target.id,actionPin:pin})
+    const {data} = await api.post(`/actions/${type}`,{deviceId:target.id,actionPin:pin}, { timeout: 60000 })
     fetchAll(true); return data
   }
 

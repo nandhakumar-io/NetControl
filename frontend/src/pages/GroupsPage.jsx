@@ -414,7 +414,7 @@ export default function GroupsPage() {
 
   const executeAction = async (pin) => {
     const { type, group } = actionModal
-    const { data } = await api.post(`/actions/${type}`, { groupId: group.id, actionPin: pin })
+    const { data } = await api.post(`/actions/${type}`, { groupId: group.id, actionPin: pin }, { timeout: 60000 })
     // Previously this ignored the response entirely and always toasted
     // success — even when some (or every) device in the group failed, or
     // was skipped for being under maintenance. The backend returns HTTP

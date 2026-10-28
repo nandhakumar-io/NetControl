@@ -42,6 +42,33 @@ async function executeScheduledAction(schedule) {
       });
       continue;
     }
+    if (schedule.action === 'wake' && device.status === 'online') {
+      result = 'skipped';
+      details = 'Device is already online';
+      await audit.log({
+        username: 'scheduler', action: `scheduled_${schedule.action}`, targetType: 'device',
+        targetId: device.id, targetName: device.name, ipSource: 'scheduler', result, details,
+      });
+      continue;
+    }
+    if (schedule.action === 'shutdown' && device.status === 'offline') {
+      result = 'skipped';
+      details = 'Device is already offline';
+      await audit.log({
+        username: 'scheduler', action: `scheduled_${schedule.action}`, targetType: 'device',
+        targetId: device.id, targetName: device.name, ipSource: 'scheduler', result, details,
+      });
+      continue;
+    }
+    if (schedule.action === 'restart' && device.status === 'offline') {
+      result = 'skipped';
+      details = 'Device is offline';
+      await audit.log({
+        username: 'scheduler', action: `scheduled_${schedule.action}`, targetType: 'device',
+        targetId: device.id, targetName: device.name, ipSource: 'scheduler', result, details,
+      });
+      continue;
+    }
     try {
       if (schedule.action === 'wake') {
         const { wakeSmart } = require('./wol');
