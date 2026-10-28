@@ -1,6 +1,6 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Zap, Loader2, Eye, EyeOff } from 'lucide-react'
+import { Zap, Loader2, Eye, EyeOff, CheckCircle2 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -19,8 +19,21 @@ export default function SetupPage() {
   const [showPw, setShowPw] = useState(false)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [alreadySetup, setAlreadySetup] = useState(false)
   const { setSession } = useAuthStore()
   const navigate = useNavigate()
+
+  useEffect(() => {
+    let cancelled = false
+    api.get('/auth/setup')
+      .then(({ data }) => {
+        if (!cancelled && data.needsSetup === false) {
+          setAlreadySetup(true)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -82,6 +95,21 @@ export default function SetupPage() {
           <div className="h-0.5 bg-gradient-to-r from-transparent via-brand-500 to-transparent opacity-60" />
 
           <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
+            {alreadySetup && (
+              <div className="px-3.5 py-2.5 rounded-lg bg-brand-500/10 border border-brand-500/30 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs text-brand-300 font-body">
+                  <CheckCircle2 size={14} className="shrink-0 text-brand-400" />
+                  <span>Setup is already completed.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate('/login')}
+                  className="text-xs text-brand-400 hover:text-brand-300 underline font-medium shrink-0"
+                >
+                  Sign in →
+                </button>
+              </div>
+            )}
             <div>
               <label className="label">Organization name <span className="text-slate-500">(optional)</span></label>
               <input
@@ -145,11 +173,21 @@ export default function SetupPage() {
             <button
               type="submit"
               className="btn-primary w-full justify-center mt-1"
-              disabled={isLoading}
+              disabled={isLoading || alreadySetup}
             >
               {isLoading ? <Loader2 size={14} className="animate-spin" /> : null}
               {isLoading ? 'Setting up...' : 'Create admin account'}
             </button>
+
+            <div className="flex items-center justify-center pt-2">
+              <button
+                type="button"
+                onClick={() => navigate('/login')}
+                className="text-xs text-slate-400 hover:text-white font-body transition-colors"
+              >
+                Already have an account? <span className="text-brand-400 hover:underline">Sign In</span>
+              </button>
+            </div>
           </form>
         </div>
 

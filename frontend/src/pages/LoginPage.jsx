@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Zap, Loader2, ShieldCheck, Eye, EyeOff } from 'lucide-react'
+import { Zap, Loader2, ShieldCheck, Eye, EyeOff, Sparkles } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -31,6 +31,7 @@ export default function LoginPage() {
   const [enrollData, setEnrollData] = useState(null) // { secret, otpauthUrl, qrDataUrl }
   const [enrollCode, setEnrollCode] = useState('')
   const [backupCodes, setBackupCodes] = useState(null)
+  const [needsSetup, setNeedsSetup] = useState(false)
   const { login, verify2FA, startEnrollment, confirmEnrollment, isLoading, token } = useAuthStore()
   const navigate = useNavigate()
 
@@ -68,13 +69,12 @@ export default function LoginPage() {
     return () => { cancelled = true }
   }, [enrollToken])
 
-  // A freshly deployed instance has no users yet — send the operator to the
-  // setup wizard instead of a login form they can't possibly get through.
+  // Check if instance needs initial setup, letting operator switch between login and setup
   useEffect(() => {
     let cancelled = false
     api.get('/auth/setup')
-      .then(({ data }) => { if (!cancelled && data.needsSetup) navigate('/setup', { replace: true }) })
-      .catch(() => { /* if this check fails, fall through to the normal login form */ })
+      .then(({ data }) => { if (!cancelled && data.needsSetup) setNeedsSetup(true) })
+      .catch(() => { /* if this check fails, fall through to normal login form */ })
     return () => { cancelled = true }
   }, [])
 
@@ -261,6 +261,21 @@ export default function LoginPage() {
             )
           ) : !mfaToken ? (
           <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
+            {needsSetup && (
+              <div className="px-3 py-2.5 rounded-lg bg-brand-500/10 border border-brand-500/30 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs text-brand-300 font-body">
+                  <Sparkles size={14} className="shrink-0 text-brand-400" />
+                  <span>No admin account found yet.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate('/setup')}
+                  className="text-xs text-brand-400 hover:text-brand-300 underline font-medium shrink-0"
+                >
+                  Setup now →
+                </button>
+              </div>
+            )}
             <div>
               <label className="label">Username</label>
               <input
@@ -308,6 +323,16 @@ export default function LoginPage() {
               {isLoading ? <Loader2 size={14} className="animate-spin" /> : null}
               {isLoading ? 'Signing in...' : 'Sign In'}
             </button>
+
+            <div className="flex items-center justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => navigate('/setup')}
+                className="text-xs text-slate-400 hover:text-white font-body transition-colors"
+              >
+                First-time setup? <span className="text-brand-400 hover:underline">Register admin</span>
+              </button>
+            </div>
           </form>
           ) : (
           <form onSubmit={handleVerify2FA} className="p-6 flex flex-col gap-4">

@@ -175,11 +175,16 @@ async function createRefreshToken(userId, res, req) {
 router.get('/setup', async (req, res) => {
   try {
     const row = await queryOne('SELECT COUNT(*) AS c FROM users');
-    res.json({ needsSetup: row.c === 0 });
+    res.json({ needsSetup: Number(row?.c || 0) === 0 });
   } catch (e) {
-    // Table may not exist yet if migrations haven't run — surface as "needs setup"
-    // rather than a raw 500, since that's the state the operator needs to fix first.
-    res.json({ needsSetup: true });
+    // Only surface as "needs setup" if the users table does not exist yet.
+    // If the database is starting up or temporarily unreachable, do not
+    // falsely trigger first-time setup redirects.
+    if (e.code === 'ER_NO_SUCH_TABLE' || e.errno === 1146) {
+      return res.json({ needsSetup: true });
+    }
+    console.warn('[Auth] GET /setup DB check failed:', e.message);
+    res.status(503).json({ error: 'Database unavailable', needsSetup: false });
   }
 });
 
