@@ -99,8 +99,10 @@ async function getAccessToken(force = false) {
   }, c.timeoutMs);
 
   if (!res.ok || !data?.access_token) {
+    const errObj = Array.isArray(data) ? data[0] : (data?.messages?.[0] || data);
+    const detail = errObj?.error_description || errObj?.details || errObj?.systemMessage || errObj?.message || errObj?.error || (typeof data === 'string' ? data : '');
     throw new SebError(
-      `SEB Server authentication failed (HTTP ${res.status})${data?.error_description ? `: ${data.error_description}` : ''}`,
+      `SEB Server authentication failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}`,
       { status: res.status, code: 'SEB_AUTH' }
     );
   }
@@ -127,7 +129,8 @@ async function request(method, path, { json, form } = {}, _retried = false) {
     return request(method, path, { json, form }, true);
   }
   if (!res.ok) {
-    const msg = (data && typeof data === 'object' && (data.messages?.[0]?.systemMessage || data.message || data.error)) || `HTTP ${res.status}`;
+    const errObj = Array.isArray(data) ? data[0] : (data?.messages?.[0] || data);
+    const msg = (errObj && typeof errObj === 'object' && (errObj.details || errObj.systemMessage || errObj.message || errObj.error_description || errObj.error)) || (typeof data === 'string' ? data : null) || `HTTP ${res.status}`;
     throw new SebError(`SEB Server ${method} ${path} failed: ${msg}`, { status: res.status, code: res.status === 404 ? 'SEB_NOT_FOUND' : 'SEB_HTTP' });
   }
   return data;
