@@ -556,8 +556,8 @@ export default function Layout() {
         style={isLight ? { boxShadow: '2px 0 12px rgba(0,0,0,0.05)' } : {}}
       >
         {/* Logo */}
-        <div className={`flex items-center gap-3 px-4 py-5 border-b ${isLight ? 'border-black/[0.06]' : 'border-white/6'}`}>
-          <img src="/logo.png" alt="NetControl Logo" className="w-8 h-8 rounded-lg shrink-0 object-cover" />
+        <div className={`flex items-center ${collapsed ? 'justify-center px-2' : 'gap-3 px-4'} py-5 border-b ${isLight ? 'border-black/[0.06]' : 'border-white/6'}`}>
+          <img src="/logo.png" alt="NetControl Logo" className="w-8 h-8 rounded-lg shrink-0 object-cover shadow-sm transition-transform duration-200 hover:scale-105" />
           {!collapsed && (
             <span className={`font-display text-sm tracking-wide whitespace-nowrap ${isLight ? 'text-[#1a1a2e]' : 'text-white'}`}>
               NetControl

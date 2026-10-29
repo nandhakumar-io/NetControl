@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111326" />
+      <stop offset="50%" stop-color="#0a0c18" />
+      <stop offset="100%" stop-color="#05060d" />
+    </linearGradient>
+
+    <!-- Squircle Border Stroke Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.9" />
+      <stop offset="35%" stop-color="#818cf8" stop-opacity="0.5" />
+      <stop offset="70%" stop-color="#c084fc" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.4" />
+    </linearGradient>
+
+    <!-- Network Power Ring Gradient -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" />
+      <stop offset="25%" stop-color="#38bdf8" />
+      <stop offset="60%" stop-color="#818cf8" />
+      <stop offset="100%" stop-color="#c084fc" />
+    </linearGradient>
+
+    <!-- Electric Lightning Bolt Gradient -->
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="25%" stop-color="#67e8f9" />
+      <stop offset="60%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+
+    <!-- Ambient Center Flare -->
+    <radialGradient id="centerFlare" cx="50%" cy="48%" r="48%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.28" />
+      <stop offset="45%" stop-color="#7c5cf5" stop-opacity="0.15" />
+      <stop offset="100%" stop-color="#05060d" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Subtle Glow Filter -->
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="boltGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="14" result="blur1" />
+      <feGaussianBlur stdDeviation="5" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur1" />
+        <feMergeNode in="blur2" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Container Squircle with Smooth Curvature -->
+  <rect x="18" y="18" width="476" height="476" rx="114" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="3.5" />
+
+  <!-- Ambient Light Aura -->
+  <circle cx="256" cy="256" r="185" fill="url(#centerFlare)" />
+
+  <!-- The Network Power Arc (Open Power Ring 260 degrees) -->
+  <path d="M 188 122 A 152 152 0 1 0 324 122" 
+        fill="none" 
+        stroke="url(#ringGrad)" 
+        stroke-width="26" 
+        stroke-linecap="round" />
+
+  <!-- Network Station Nodes Distributed on the Ring -->
+  <!-- Top Left Terminal Node -->
+  <circle cx="188" cy="122" r="23" fill="#0b0d1b" stroke="#00f2fe" stroke-width="5" filter="url(#neonGlow)" />
+  <circle cx="188" cy="122" r="9" fill="#00f2fe" />
+
+  <!-- Mid-Upper Left Node -->
+  <circle cx="112" cy="214" r="19" fill="#0b0d1b" stroke="#38bdf8" stroke-width="4.5" />
+  <circle cx="112" cy="214" r="7.5" fill="#38bdf8" />
+
+  <!-- Lower Left Node -->
+  <circle cx="154" cy="350" r="19" fill="#0b0d1b" stroke="#6366f1" stroke-width="4.5" />
+  <circle cx="154" cy="350" r="7.5" fill="#818cf8" />
+
+  <!-- Bottom Apex Node -->
+  <circle cx="256" cy="408" r="18" fill="#0b0d1b" stroke="#818cf8" stroke-width="4.5" />
+  <circle cx="256" cy="408" r="7" fill="#a78bfa" />
+
+  <!-- Lower Right Node -->
+  <circle cx="358" cy="350" r="19" fill="#0b0d1b" stroke="#a78bfa" stroke-width="4.5" />
+  <circle cx="358" cy="350" r="7.5" fill="#c084fc" />
+
+  <!-- Mid-Upper Right Node -->
+  <circle cx="400" cy="214" r="19" fill="#0b0d1b" stroke="#c084fc" stroke-width="4.5" />
+  <circle cx="400" cy="214" r="7.5" fill="#c084fc" />
+
+  <!-- Top Right Terminal Node -->
+  <circle cx="324" cy="122" r="23" fill="#0b0d1b" stroke="#c084fc" stroke-width="5" filter="url(#neonGlow)" />
+  <circle cx="324" cy="122" r="9" fill="#c084fc" />
+
+  <!-- Central Dynamic Power Bolt (Energy surge / Wake-on-LAN) -->
+  <path d="M 284 72 
+           L 182 248 
+           L 248 248 
+           L 220 366 
+           L 336 210 
+           L 268 210 Z" 
+        fill="url(#boltGrad)" 
+        filter="url(#boltGlow)" />
+
+  <!-- Core White Light Specular on the Bolt Apex -->
+  <polygon points="274,96 200,236 248,236 230,320 310,218 266,218" fill="#ffffff" opacity="0.35" />
+</svg>

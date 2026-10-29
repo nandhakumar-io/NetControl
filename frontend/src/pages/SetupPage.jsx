@@ -82,9 +82,7 @@ export default function SetupPage() {
 
       <div className="w-full max-w-sm animate-slide-up">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-brand-500/15 border border-brand-500/30 flex items-center justify-center mb-4 animate-glow">
-            <Zap size={28} className="text-brand-400" />
-          </div>
+          <img src="/logo.png" alt="NetControl Logo" className="w-16 h-16 rounded-2xl mb-4 shadow-xl shadow-brand-500/25 ring-1 ring-white/10 animate-glow" />
           <h1 className="font-display text-2xl text-white">Welcome to NetControl</h1>
           <p className="text-sm text-slate-400 font-body mt-1 text-center">
             No admin account exists yet. Create one to get started.
