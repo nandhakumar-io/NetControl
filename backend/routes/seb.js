@@ -76,12 +76,22 @@ router.get('/exams/:examId/connections',
         const { con, by } = seb.matchConnectionDetailed(d, connections);
         if (con) matchedBy.set(con.token, { device: d, by });
       }
+      let activeCount = 0;
+      let exitedCount = 0;
+      for (const c of connections) {
+        if (seb.isTerminal(c.status) || ['CLOSED', 'DISABLED'].includes(c.status)) exitedCount++;
+        else if (['READY', 'ACTIVE', 'AUTHENTICATED', 'CONNECTION_REQUESTED'].includes(c.status)) activeCount++;
+      }
       res.json({
         examId: req.params.examId,
         total: connections.length,
+        activeCount,
+        exitedCount,
         connections: connections.map(c => ({
           tokenSuffix: c.token.slice(-6),
           status: c.status,
+          isExited: seb.isTerminal(c.status) || ['CLOSED', 'DISABLED'].includes(c.status),
+          isActive: !seb.isTerminal(c.status) && ['READY', 'ACTIVE', 'AUTHENTICATED'].includes(c.status),
           ip: c.clientAddress || null,
           user: c.userSession || null,
           fields: [...new Set(c.values.filter(v => v !== c.token && v !== ''))].slice(0, 14),
@@ -94,6 +104,72 @@ router.get('/exams/:examId/connections',
     }
   }
 );
+
+// ── GET /api/seb/device-statuses ─────────────────────────────────────────────
+// Returns live SEB connection status for all devices in the current org.
+// Powers the "SEB Active" / "SEB Exited" indicators and filters in NetControl.
+router.get('/device-statuses', async (req, res) => {
+  try {
+    if (!seb.isConfigured()) {
+      return res.json({ configured: false, devices: {}, activeCount: 0, exitedCount: 0 });
+    }
+    const examId = req.query.examId || process.env.SEB_DEFAULT_EXAM_ID || '2';
+    const connections = await seb.getMonitoring(examId, { deduplicate: true });
+
+    const params = [req.orgId];
+    let scope = '';
+    if (req.user.role !== 'admin') {
+      scope = ' AND group_id IN (SELECT group_id FROM user_group_access WHERE user_id = ?)';
+      params.push(req.user.id);
+    }
+    const devices = await query(
+      `SELECT id, name, hostname, ip_address, group_id, seb_match_key FROM devices WHERE org_id = ? AND os_type = 'windows'${scope}`,
+      params
+    );
+
+    const byDevice = {};
+    let activeCount = 0;
+    let exitedCount = 0;
+
+    for (const d of devices) {
+      const { con, by } = seb.matchConnectionDetailed(d, connections);
+      if (con) {
+        const isExited = seb.isTerminal(con.status) || ['CLOSED', 'DISABLED'].includes(con.status);
+        const isActive = !isExited && ['READY', 'ACTIVE', 'AUTHENTICATED', 'CONNECTION_REQUESTED'].includes(con.status);
+        if (isActive) activeCount++;
+        if (isExited) exitedCount++;
+
+        byDevice[d.id] = {
+          status: con.status,
+          isActive,
+          isExited,
+          user: con.userSession || null,
+          ip: con.clientAddress || null,
+          tokenSuffix: (con.token || '').slice(-6),
+          matchedBy: by,
+          examId,
+        };
+      }
+    }
+
+    res.json({
+      configured: true,
+      examId,
+      totalConnections: connections.length,
+      activeCount,
+      exitedCount,
+      devices: byDevice,
+    });
+  } catch (err) {
+    res.json({
+      configured: true,
+      error: err.message,
+      devices: {},
+      activeCount: 0,
+      exitedCount: 0,
+    });
+  }
+});
 
 // ── GET /api/seb/bindings ────────────────────────────────────────────────────
 router.get('/bindings', async (req, res) => {

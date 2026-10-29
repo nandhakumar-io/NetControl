@@ -277,7 +277,7 @@ function Skeleton({ count = 8, view = 'grid' }) {
 }
 
 // ── Device Card (grid) ────────────────────────────────────────────────────────
-function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag }) {
+function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, sebStatus, onAddTag, onRemoveTag }) {
   const isLight = useThemeStore(s => s.theme === 'light')
   const status  = device.status || 'unknown'
   const isOnline = status === 'online'
@@ -341,6 +341,20 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
           <StatusBadge status={status} />
           {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
           <WakeEligibilityBadge eligibility={wakeEligibility} />
+          {sebStatus?.isActive && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+              title={`Safe Exam Browser active (${sebStatus.status}) · User: ${sebStatus.user || 'Unknown'}`}>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              SEB Active
+            </span>
+          )}
+          {sebStatus?.isExited && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30"
+              title={`Safe Exam Browser exited (${sebStatus.status})`}>
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              SEB Exited
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
           <AgentVersionBadge agentVersion={device.agent_version} latestVersion={latestAgentVersion} lastSeen={device.last_seen} />
@@ -419,7 +433,7 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
 }
 
 // ── Group section header ──────────────────────────────────────────────────────
-function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, onAddTag, onRemoveTag, onBulkAddTag }) {
+function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, latestAgentVersion, wakeEligibility, sebStatuses, onAddTag, onRemoveTag, onBulkAddTag }) {
   const [open, setOpen] = useState(true)
   const online  = devices.filter(d => d.status === 'online').length
   const total   = devices.length
@@ -489,6 +503,7 @@ function GroupSection({ groupName, devices, selectedIds, onSelect, onWake, onShu
               onWake={onWake} onShutdown={onShutdown} onRestart={onRestart} onQuitSeb={onQuitSeb}
               onEdit={onEdit} onDelete={onDelete} onToggleMaintenance={onToggleMaintenance}
               latestAgentVersion={latestAgentVersion} wakeEligibility={wakeEligibility?.[d.id]}
+              sebStatus={sebStatuses?.[d.id]}
               onAddTag={onAddTag} onRemoveTag={onRemoveTag} />
           ))}
         </div>
@@ -611,7 +626,7 @@ function TagQuickEditor({ tags, onAdd, onRemove, size = 'sm' }) {
   )
 }
 
-function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, onAddTag, onRemoveTag, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility }) {
+function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake, onShutdown, onRestart, onQuitSeb, onEdit, onDelete, onToggleMaintenance, onAddTag, onRemoveTag, latestAgentVersion, health, healthLoading, visibleCols, wakeEligibility, sebStatus }) {
   const status = device.status || 'unknown'
   const isLight = useThemeStore(s => s.theme === 'light')
   const inMaintenance = !!device.maintenance_mode
@@ -688,6 +703,20 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
         <StatusBadge status={status} />
         {inMaintenance && <MaintenanceBadge note={device.maintenance_note} until={device.maintenance_until} />}
         <WakeEligibilityBadge eligibility={wakeEligibility} />
+        {sebStatus?.isActive && (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+            title={`Safe Exam Browser active (${sebStatus.status}) · User: ${sebStatus.user || 'Unknown'}`}>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            SEB Active
+          </span>
+        )}
+        {sebStatus?.isExited && (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30"
+            title={`Safe Exam Browser exited (${sebStatus.status})`}>
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            SEB Exited
+          </span>
+        )}
       </div>
 
       {/* Actions */}
@@ -811,6 +840,8 @@ export default function DevicesPage() {
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [actionModal, setActionModal]   = useState(null)
   const [sebTarget, setSebTarget]       = useState(null) // { deviceId | deviceIds, label }
+  const [sebData, setSebData]           = useState({ configured: false, devices: {}, activeCount: 0, exitedCount: 0 })
+  const [sebFilter, setSebFilter]       = useState('all') // 'all' | 'active' | 'exited'
   const [filePushOpen, setFilePushOpen] = useState(false)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [deleteAllOpen, setDeleteAllOpen] = useState(false)
@@ -834,15 +865,31 @@ export default function DevicesPage() {
     if (!quiet) setLoading(true)
     else setRefreshing(true)
     try {
-      const [d, g, t] = await Promise.all([api.get('/devices'), api.get('/groups'), api.get('/devices/tags').catch(() => ({ data: [] }))])
+      const [d, g, t, s] = await Promise.all([
+        api.get('/devices'),
+        api.get('/groups'),
+        api.get('/devices/tags').catch(() => ({ data: [] })),
+        api.get('/seb/device-statuses').catch(() => ({ data: { configured: false, devices: {}, activeCount: 0, exitedCount: 0 } })),
+      ])
       setDevices(d.data)
       setGroups(g.data)
       setAllTags(t.data)
+      if (s?.data) setSebData(s.data)
     } catch { toast.error('Failed to load devices') }
     finally { setLoading(false); setRefreshing(false) }
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
+
+  // Live polling of SEB device statuses (every 10s) so live exam sessions and exits reflect in real time
+  useEffect(() => {
+    const timer = setInterval(() => {
+      api.get('/seb/device-statuses')
+        .then(({ data }) => { if (data?.devices) setSebData(data) })
+        .catch(() => {})
+    }, 10000)
+    return () => clearInterval(timer)
+  }, [])
 
   // Composite health score — rolls up open alerts, drift, capacity runway,
   // and uptime (see backend/services/deviceHealthScore.js). Fetched
@@ -1224,6 +1271,8 @@ export default function DevicesPage() {
       if (statusFilter !== 'all' && d.status !== statusFilter) return false
       if (groupFilter !== 'all' && d.group_id !== groupFilter) return false
       if (tagFilter.size > 0 && !(d.tags || []).some(t => tagFilter.has(t))) return false
+      if (sebFilter === 'active' && !sebData.devices[d.id]?.isActive) return false
+      if (sebFilter === 'exited' && !sebData.devices[d.id]?.isExited) return false
       return true
     })
     if (sortKey === 'health') {
@@ -1261,7 +1310,7 @@ export default function DevicesPage() {
       return withTrend
     }
     return base
-  }, [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter, sortKey, sortDir, healthScores])
+  }, [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter, sebFilter, sebData, sortKey, sortDir, healthScores])
 
   // Grouped for grid view
   const grouped = useMemo(() => {
@@ -1277,7 +1326,7 @@ export default function DevicesPage() {
   const onlineCount  = manageableDevices.filter(d => d.status === 'online').length
   const offlineCount = manageableDevices.filter(d => d.status === 'offline').length
   const unknownCount = manageableDevices.filter(d => !d.status || d.status === 'unknown').length
-  const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all' || tagFilter.size > 0
+  const hasFilters   = search || osFilter !== 'all' || statusFilter !== 'all' || groupFilter !== 'all' || tagFilter.size > 0 || sebFilter !== 'all'
 
   // ── Jump-to-device from global search (Cmd+K → Enter) ─────────────────────
   // Arriving here via /devices?highlight=<id> should reliably show that
@@ -1287,12 +1336,12 @@ export default function DevicesPage() {
   const highlightId = useHighlightParam(!loading && filtered.length > 0)
   useEffect(() => {
     if (!highlightId) return
-    setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set())
+    setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()); setSebFilter('all')
     setViewMode('list') // a single highlighted row reads more clearly in the list view than buried in a grid
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlightId])
 
-  const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()) }
+  const clearFilters = () => { setSearch(''); setOsFilter('all'); setStatusFilter('all'); setGroupFilter('all'); setTagFilter(new Set()); setSebFilter('all') }
   const currentFilters = { search, osFilter, statusFilter, groupFilter, tagFilter: [...tagFilter], sortKey, sortDir, visibleCols }
   const applyView = (f) => {
     setSearch(f.search || '')
@@ -1459,6 +1508,44 @@ export default function DevicesPage() {
           ))}
         </div>
 
+        {/* SEB filter buttons */}
+        {sebData.configured && (
+          <div className="flex gap-1 items-center">
+            <button
+              onClick={() => setSebFilter(f => f === 'active' ? 'all' : 'active')}
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold transition-all flex items-center gap-1.5"
+              style={{
+                background: sebFilter === 'active'
+                  ? 'rgba(16,185,129,0.18)'
+                  : 'transparent',
+                color: sebFilter === 'active' ? '#10b981' : 'var(--text-muted)',
+                border: `1px solid ${sebFilter === 'active' ? 'rgba(16,185,129,0.4)' : 'var(--border-subtle)'}`,
+              }}
+              title="Filter to show only devices running an active Safe Exam Browser session"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${sebFilter === 'active' ? 'bg-emerald-400 animate-pulse' : 'bg-emerald-500/60'}`} />
+              SEB Active{sebData.activeCount > 0 ? ` (${sebData.activeCount})` : ''}
+            </button>
+            {sebData.exitedCount > 0 && (
+              <button
+                onClick={() => setSebFilter(f => f === 'exited' ? 'all' : 'exited')}
+                className="px-3 py-1.5 rounded-lg text-sm font-semibold transition-all flex items-center gap-1.5"
+                style={{
+                  background: sebFilter === 'exited'
+                    ? 'rgba(245,158,11,0.18)'
+                    : 'transparent',
+                  color: sebFilter === 'exited' ? '#f59e0b' : 'var(--text-muted)',
+                  border: `1px solid ${sebFilter === 'exited' ? 'rgba(245,158,11,0.4)' : 'var(--border-subtle)'}`,
+                }}
+                title="Filter to show only devices that have exited Safe Exam Browser"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                SEB Exited ({sebData.exitedCount})
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Group filter */}
         {groups.length > 0 && (
           <select value={groupFilter} onChange={e => setGroupFilter(e.target.value)}
@@ -1566,6 +1653,7 @@ export default function DevicesPage() {
               onToggleMaintenance={handleToggleMaintenance}
               latestAgentVersion={latestAgentVersion}
               wakeEligibility={wakeEligibility}
+              sebStatuses={sebData.devices}
               onAddTag={handleAddTag}
               onRemoveTag={handleRemoveTag}
               onBulkAddTag={handleBulkAddTag} />
@@ -1642,7 +1730,8 @@ export default function DevicesPage() {
                 health={healthScores[d.id]}
                 healthLoading={healthLoading}
                 visibleCols={visibleCols}
-                wakeEligibility={wakeEligibility[d.id]} />
+                wakeEligibility={wakeEligibility[d.id]}
+                sebStatus={sebData.devices[d.id]} />
             ))}
           </div>
         </div>

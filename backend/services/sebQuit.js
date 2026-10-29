@@ -40,7 +40,7 @@ function intEnv(name, def, min, max) {
 const POLL_MS             = () => intEnv('SEB_POLL_INTERVAL_MS', 3000, 1000, 30000);
 const DEFAULT_TIMEOUT_SEC = () => intEnv('SEB_QUIT_TIMEOUT_SEC', 120, 15, 900);
 const MAX_TIMEOUT_SEC     = 900;
-const SHUTDOWN_DELAY_SEC  = () => intEnv('SEB_SHUTDOWN_DELAY_SEC', 5, 0, 120);
+const SHUTDOWN_DELAY_SEC  = () => intEnv('SEB_SHUTDOWN_DELAY_SEC', 0, 0, 120);
 const VERIFY_PROCESS      = () => (process.env.SEB_VERIFY_PROCESS ?? 'true').toLowerCase() !== 'false';
 const PROCESS_FILTER      = () => (process.env.SEB_PROCESS_FILTER || 'SafeExamBrowser*').replace(/[^\w.*-]/g, '');
 const INSTRUCT_CONCURRENCY = 8;
@@ -114,8 +114,11 @@ async function sebProcessRunning(device) {
 async function shutdownDevice(run, item) {
   try {
     const delay = SHUTDOWN_DELAY_SEC();
-    await setItem(item, { state: 'shutdown_pending', details: `SEB exited — shutting down in ${delay}s` });
-    if (delay) await sleep(delay * 1000);
+    await setItem(item, {
+      state: 'shutdown_pending',
+      details: delay > 0 ? `SEB exited — shutting down in ${delay}s` : 'SEB exited — shutting down immediately',
+    });
+    if (delay > 0) await sleep(delay * 1000);
 
     if (await isCancelled(run.id)) {
       await setItem(item, { state: 'cancelled', details: 'Run cancelled before shutdown was sent (SEB had already exited)' });
@@ -169,6 +172,7 @@ async function orchestrate(run) {
 
     const claimed = new Set();
     const toInstruct = [];
+    const shutdowns = [];
     for (const item of items) {
       const { con, by } = seb.matchConnectionDetailed(item.device, connections);
       if (!con) {
@@ -180,9 +184,16 @@ async function orchestrate(run) {
         continue;
       }
       if (seb.isTerminal(con.status)) {
-        const d = `SEB connection is already ${con.status} — nothing to quit, no shutdown sent`;
-        await setItem(item, { state: 'no_connection', seb_status: con.status, details: d });
-        await auditItem(run, item, 'seb_quit', 'partial', d);
+        if (run.shutdownAfter) {
+          const d = `SEB already exited (${con.status}) — shutting down`;
+          await setItem(item, { state: 'exited', seb_status: con.status, details: d });
+          await auditItem(run, item, 'seb_quit', 'success', d);
+          shutdowns.push(shutdownDevice(run, item));
+        } else {
+          const d = `SEB already exited (${con.status})`;
+          await setItem(item, { state: 'exited', seb_status: con.status, details: d });
+          await auditItem(run, item, 'seb_quit', 'success', d);
+        }
         continue;
       }
       if (claimed.has(con.token)) {
@@ -203,7 +214,7 @@ async function orchestrate(run) {
         await seb.registerQuit(run.examId, item.connection_token);
         await setItem(item, {
           state: 'waiting_exit', connection_token: item.connection_token, seb_status: item.seb_status,
-          instruction_sent_at: NOW, details: 'SEB_QUIT instruction registered — waiting for SEB to exit (typically 5–15s)',
+          instruction_sent_at: NOW, details: 'SEB_QUIT instruction registered — waiting for SEB to exit',
         });
       } catch (e) {
         await setItem(item, { state: 'failed', details: `Could not register SEB_QUIT: ${e.message}` });
@@ -213,7 +224,6 @@ async function orchestrate(run) {
 
     // 3) Track outcome until every device exits, or the deadline passes.
     const deadline = Date.now() + run.timeoutSec * 1000;
-    const shutdowns = [];
     for (;;) {
       const waiting = items.filter(i => i.state === 'waiting_exit');
       if (!waiting.length) break;

@@ -237,12 +237,22 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
                 </button>
               </div>
               {preview && (
-                <p className="text-[11px] font-body mt-1.5" style={{ color: 'var(--text-muted)' }}>
-                  {preview.total} connection(s) in exam · {preview.connections.filter(c => c.device).length} matched to NetControl devices
-                  {preview.connections.filter(c => c.device).length === 0 && preview.total > 0 && (
-                    <span className="text-accent-yellow"> — none matched by IP/hostname; the quit would find nothing.</span>
-                  )}
-                </p>
+                <div className="mt-2 p-2.5 rounded-lg text-xs font-body" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-subtle)' }}>
+                  <div className="flex items-center justify-between font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    <span>{preview.total} connection(s) found</span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-accent-green font-semibold">{preview.activeCount ?? 0} active</span>
+                      <span className="text-slate-400">·</span>
+                      <span className="text-accent-yellow font-semibold">{preview.exitedCount ?? 0} exited</span>
+                    </span>
+                  </div>
+                  <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
+                    {preview.connections.filter(c => c.device).length} matched to NetControl devices
+                    {preview.connections.filter(c => c.device).length === 0 && preview.total > 0 && (
+                      <span className="text-accent-yellow"> — none matched by IP/hostname; the quit would find nothing.</span>
+                    )}
+                  </p>
+                </div>
               )}
 
               <label className="flex items-start gap-2.5 mt-4 cursor-pointer select-none">
