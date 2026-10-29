@@ -7,6 +7,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { requireOrgContext } = require('../middleware/tenant');
 const { encrypt } = require('../services/crypto');
 const audit = require('../services/audit');
+const { deviceAccessSql, canUserAccessDevice } = require('../services/accessControl');
 
 const router = express.Router();
 router.use(requireAuth, requireOrgContext);
@@ -31,6 +32,7 @@ const deviceValidation = [
   body('mac_address').matches(/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/),
   body('os_type').isIn(['windows', 'linux']),
   body('group_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)).withMessage('Invalid group_id'),
+  body('cluster_id').optional({ nullable: true }).custom(v => !v || /^[0-9a-f-]{36}$/i.test(v)).withMessage('Invalid cluster_id'),
   // Dependency-aware alerting: which device this one sits behind (its
   // switch/AP/router). See migrate-device-parent.js + evaluateAlerts() in
   // routes/alerts.js, which suppresses a device's own offline-alert noise
@@ -137,18 +139,24 @@ router.get('/', async (req, res) => {
       // still pending approval (org-wide visible, no group yet) or (b) it's
       // assigned to a group this user has access to. Devices that are fully
       // approved but NOT in one of the user's groups are still excluded.
+      const devFilter = deviceAccessSql(req.user, 'd');
       devices = await query(
-        'SELECT d.*, g.name as group_name FROM devices d ' +
-        'LEFT JOIN `groups` g ON g.id = d.group_id ' +
-        'WHERE d.org_id = ? AND (' +
-        '  d.status = \'needs_approval\' OR ' +
-        '  EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id = d.group_id AND uga.user_id = ?)' +
-        ') ORDER BY d.name',
-        [req.orgId, req.user.id]
+        `SELECT d.*, g.name AS group_name, c.name AS cluster_name, c.color AS cluster_color
+         FROM devices d
+         LEFT JOIN \`groups\` g ON g.id = d.group_id
+         LEFT JOIN clusters c ON c.id = d.cluster_id
+         WHERE d.org_id = ? AND ${devFilter.sql}
+         ORDER BY d.name`,
+        [req.orgId, ...devFilter.params]
       );
     } else {
       devices = await query(
-        'SELECT d.*, g.name as group_name FROM devices d LEFT JOIN `groups` g ON g.id = d.group_id WHERE d.org_id = ? ORDER BY d.name',
+        `SELECT d.*, g.name AS group_name, c.name AS cluster_name, c.color AS cluster_color
+         FROM devices d
+         LEFT JOIN \`groups\` g ON g.id = d.group_id
+         LEFT JOIN clusters c ON c.id = d.cluster_id
+         WHERE d.org_id = ?
+         ORDER BY d.name`,
         [req.orgId]
       );
     }
@@ -260,16 +268,22 @@ router.get('/:id', param('id').isUUID(), async (req, res) => {
   try {
     let device;
     if (req.user.role !== 'admin') {
+      const devFilter = deviceAccessSql(req.user, 'd');
       device = await queryOne(
-        'SELECT d.*, g.name as group_name FROM devices d ' +
-        'INNER JOIN `groups` g ON g.id = d.group_id ' +
-        'INNER JOIN user_group_access uga ON uga.group_id = d.group_id AND uga.user_id = ? ' +
-        'WHERE d.id = ? AND d.org_id = ?',
-        [req.user.id, req.params.id, req.orgId]
+        `SELECT d.*, g.name AS group_name, c.name AS cluster_name, c.color AS cluster_color
+         FROM devices d
+         LEFT JOIN \`groups\` g ON g.id = d.group_id
+         LEFT JOIN clusters c ON c.id = d.cluster_id
+         WHERE d.id = ? AND d.org_id = ? AND ${devFilter.sql}`,
+        [req.params.id, req.orgId, ...devFilter.params]
       );
     } else {
       device = await queryOne(
-        'SELECT d.*, g.name as group_name FROM devices d LEFT JOIN `groups` g ON g.id = d.group_id WHERE d.id = ? AND d.org_id = ?',
+        `SELECT d.*, g.name AS group_name, c.name AS cluster_name, c.color AS cluster_color
+         FROM devices d
+         LEFT JOIN \`groups\` g ON g.id = d.group_id
+         LEFT JOIN clusters c ON c.id = d.cluster_id
+         WHERE d.id = ? AND d.org_id = ?`,
         [req.params.id, req.orgId]
       );
     }
@@ -348,7 +362,7 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
   try {
     const id = uuidv4();
     const {
-      name, ip_address, mac_address, os_type, group_id, parent_device_id,
+      name, ip_address, mac_address, os_type, group_id, cluster_id, parent_device_id,
       ssh_username, ssh_password, ssh_key,
       rpc_username, rpc_password,
     } = req.body;
@@ -365,6 +379,11 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
       });
     }
 
+    if (cluster_id) {
+      const cluster = await queryOne('SELECT id, group_id FROM clusters WHERE id = ? AND org_id = ?', [cluster_id, req.orgId]);
+      if (!cluster) return res.status(400).json({ error: 'Cluster not found' });
+    }
+
     // SECURITY: parent_device_id must belong to this same org, otherwise a
     // device could be linked to (and effectively suppress its alerts based
     // on the status of) another tenant's device.
@@ -375,12 +394,12 @@ router.post('/', requireRole('admin'), deviceValidation, async (req, res) => {
 
     await execute(
       `INSERT INTO devices
-         (id, name, ip_address, mac_address, os_type, group_id, parent_device_id,
+         (id, name, ip_address, mac_address, os_type, group_id, cluster_id, parent_device_id,
           ssh_username, ssh_password, ssh_key,
           rpc_username, rpc_password, org_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        id, name, ip_address, normalizedMac, os_type, group_id || null, parent_device_id || null,
+        id, name, ip_address, normalizedMac, os_type, group_id || null, cluster_id || null, parent_device_id || null,
         ssh_username  || null,
         ssh_password  ? encrypt(ssh_password)  : null,
         ssh_key       ? encrypt(ssh_key)        : null,
@@ -1095,7 +1114,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
   try {
     const deviceId = req.params.id;
     const {
-      name, ip_address, mac_address, os_type, group_id, parent_device_id,
+      name, ip_address, mac_address, os_type, group_id, cluster_id, parent_device_id,
       ssh_username, ssh_password, ssh_key,
       rpc_username, rpc_password,
     } = req.body;
@@ -1111,14 +1130,14 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       if (!group) return res.status(400).json({ error: 'Group not found' });
     }
 
+    if (cluster_id) {
+      const cluster = await queryOne('SELECT id, group_id FROM clusters WHERE id = ? AND org_id = ?', [cluster_id, req.orgId]);
+      if (!cluster) return res.status(400).json({ error: 'Cluster not found' });
+    }
+
     // Dependency-aware alerting: parent_device_id must belong to the same
     // org (same reasoning as group_id above), can't be the device itself,
-    // and can't create a cycle. Only a single-level parent relationship is
-    // supported (no chains) — checking one level deep back is enough to
-    // catch both direct self-reference and the immediate A<->B cycle;
-    // deeper cycles are prevented for free since a device can only ever
-    // pick an *existing* device as its parent, and existing devices were
-    // themselves validated the same way when they were assigned.
+    // and can't create a cycle.
     if (parent_device_id) {
       if (parent_device_id === deviceId) {
         return res.status(400).json({ error: 'A device cannot be its own parent' });
@@ -1136,7 +1155,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
     // Update device
     await execute(
       `UPDATE devices
-       SET name=?, ip_address=?, mac_address=?, os_type=?, group_id=?, parent_device_id=?,
+       SET name=?, ip_address=?, mac_address=?, os_type=?, group_id=?, cluster_id=?, parent_device_id=?,
            ssh_username=?, ssh_password=?, ssh_key=?,
            rpc_username=?, rpc_password=?, updated_at=?
        WHERE id=? AND org_id=?`,
@@ -1146,6 +1165,7 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
         normalizedMac,
         os_type,
         group_id || null,
+        cluster_id === undefined ? device.cluster_id : (cluster_id || null),
         parent_device_id || null,
         ssh_username || null,
         ssh_password ? encrypt(ssh_password) : (req.body.ssh_password === null ? null : device.ssh_password),
@@ -1158,13 +1178,14 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       ]
     );
 
-    // Structured before/after diff — powers the Audit page's side-by-side
-    // diff view for this event. Only fields that actually changed are
-    // included, and credential fields (ssh_password, ssh_key, rpc_password)
-    // are reported as changed/unchanged only — their values are secrets
-    // and never belong in the audit trail, even encrypted.
-    const DIFF_FIELDS = ['name', 'ip_address', 'mac_address', 'os_type', 'group_id', 'parent_device_id'];
-    const newValues = { name, ip_address: ip_address, mac_address: normalizedMac, os_type, group_id: group_id || null, parent_device_id: parent_device_id || null };
+    // Structured before/after diff
+    const DIFF_FIELDS = ['name', 'ip_address', 'mac_address', 'os_type', 'group_id', 'cluster_id', 'parent_device_id'];
+    const newValues = {
+      name, ip_address, mac_address: normalizedMac, os_type,
+      group_id: group_id || null,
+      cluster_id: cluster_id === undefined ? device.cluster_id : (cluster_id || null),
+      parent_device_id: parent_device_id || null
+    };
     const changed = {};
     for (const field of DIFF_FIELDS) {
       const before = device[field] ?? null;
@@ -1187,12 +1208,58 @@ router.put('/:id', requireRole('admin'), param('id').isUUID(), deviceValidation,
       details: Object.keys(changed).length ? JSON.stringify({ diff: changed }) : null,
     });
 
-    const updated = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [deviceId, req.orgId]);
+    const updated = await queryOne(
+      `SELECT d.*, g.name AS group_name, c.name AS cluster_name, c.color AS cluster_color
+       FROM devices d
+       LEFT JOIN \`groups\` g ON g.id = d.group_id
+       LEFT JOIN clusters c ON c.id = d.cluster_id
+       WHERE d.id = ? AND d.org_id = ?`,
+      [deviceId, req.orgId]
+    );
     res.json(sanitizeDevice(updated));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+// ── POST /api/devices/assign-cluster — bulk assign devices to a cluster/batch
+router.post('/assign-cluster',
+  requireRole('admin'),
+  body('deviceIds').isArray({ min: 1, max: 500 }).withMessage('deviceIds must be an array of 1–500 IDs'),
+  body('clusterId').optional({ nullable: true }),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const { deviceIds, clusterId } = req.body;
+      let clusterName = 'None (Unassigned)';
+      if (clusterId) {
+        const cluster = await queryOne('SELECT id, name, group_id FROM clusters WHERE id = ? AND org_id = ?', [clusterId, req.orgId]);
+        if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
+        clusterName = cluster.name;
+        const placeholders = deviceIds.map(() => '?').join(',');
+        await execute(
+          `UPDATE devices SET cluster_id = ?, group_id = COALESCE(group_id, ?) WHERE id IN (${placeholders}) AND org_id = ?`,
+          [clusterId, cluster.group_id, ...deviceIds, req.orgId]
+        );
+      } else {
+        const placeholders = deviceIds.map(() => '?').join(',');
+        await execute(
+          `UPDATE devices SET cluster_id = NULL WHERE id IN (${placeholders}) AND org_id = ?`,
+          [...deviceIds, req.orgId]
+        );
+      }
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'assign_cluster', targetType: 'device', targetId: null,
+        targetName: `${deviceIds.length} device(s)`, ipSource: req.realIp, result: 'success',
+        details: `Assigned ${deviceIds.length} device(s) to cluster "${clusterName}"`,
+      });
+
+      res.json({ ok: true, count: deviceIds.length, clusterId: clusterId || null, clusterName });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
 
 module.exports = router;

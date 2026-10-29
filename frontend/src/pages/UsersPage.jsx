@@ -35,46 +35,118 @@ function formatTs(ts) {
 
 // ── Group assignment panel ────────────────────────────────────────────────────
 function GroupAccessPanel({ user, allGroups, onClose, onSaved }) {
-  const [assigned, setAssigned] = useState([])
+  const [assignedGroups, setAssignedGroups] = useState(new Set())
+  const [assignedClusters, setAssignedClusters] = useState(new Set())
+  const [groupModes, setGroupModes] = useState({}) // { [groupId]: 'all' | 'clusters' }
   const [saving, setSaving] = useState(false)
   const isLight = useThemeStore(s => s.theme === 'light')
 
   useEffect(() => {
-    api.get(`/users/${user.id}/groups`)
-      .then(r => setAssigned(r.data.map(g => g.id)))
-      .catch(() => {})
+    Promise.all([
+      api.get(`/users/${user.id}/groups`),
+      api.get(`/users/${user.id}/clusters`),
+    ]).then(([gRes, cRes]) => {
+      const gIds = new Set(gRes.data.map(g => g.id))
+      const cRows = cRes.data || []
+      const cIds = new Set(cRows.map(c => c.cluster_id))
+
+      const modes = {}
+      for (const c of cRows) {
+        gIds.add(c.group_id)
+        modes[c.group_id] = 'clusters'
+      }
+      for (const gid of gIds) {
+        if (!modes[gid]) modes[gid] = 'all'
+      }
+
+      setAssignedGroups(gIds)
+      setAssignedClusters(cIds)
+      setGroupModes(modes)
+    }).catch(() => {})
   }, [user.id])
 
-  const toggle = (id) => setAssigned(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  const toggleGroup = (gid) => {
+    setAssignedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(gid)) {
+        next.delete(gid)
+      } else {
+        next.add(gid)
+        if (!groupModes[gid]) {
+          setGroupModes(m => ({ ...m, [gid]: 'all' }))
+        }
+      }
+      return next
+    })
+  }
+
+  const setMode = (gid, mode) => {
+    setGroupModes(m => ({ ...m, [gid]: mode }))
+  }
+
+  const toggleCluster = (cid) => {
+    setAssignedClusters(prev => {
+      const next = new Set(prev)
+      if (next.has(cid)) next.delete(cid)
+      else next.add(cid)
+      return next
+    })
+  }
 
   const save = async () => {
     setSaving(true)
     try {
-      await api.put(`/users/${user.id}/groups`, { groupIds: assigned })
-      toast.success('Group access updated')
-      onSaved(); onClose()
+      const groupIds = []
+      const clusterGrants = []
+
+      for (const gid of assignedGroups) {
+        const mode = groupModes[gid] || 'all'
+        const grp = allGroups.find(g => g.id === gid)
+        const clusters = grp?.clusters || []
+
+        if (mode === 'clusters' && clusters.length > 0) {
+          const selected = clusters.filter(c => assignedClusters.has(c.id))
+          if (selected.length === 0) {
+            toast.error(`Please select at least one batch for "${grp.name}", or choose Full Lab Access`)
+            setSaving(false)
+            return
+          }
+          for (const c of selected) {
+            clusterGrants.push({ clusterId: c.id, groupId: gid })
+          }
+        } else {
+          groupIds.push(gid)
+        }
+      }
+
+      await api.put(`/users/${user.id}/groups`, { groupIds, clusterGrants })
+      toast.success('Lab and batch access updated')
+      onSaved()
+      onClose()
     } catch (e) {
       toast.error(e.response?.data?.error || 'Failed to save')
-    } finally { setSaving(false) }
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-      <div className="relative z-10 w-full max-w-md rounded-2xl overflow-hidden animate-slide-up"
+      <div className="relative z-10 w-full max-w-lg rounded-2xl overflow-hidden animate-slide-up"
         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}
         onClick={e => e.stopPropagation()}>
         <div style={{ height: 3, background: 'linear-gradient(90deg,#38bdf8,#a78bfa)' }} />
-        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center"
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
               style={{ background: 'rgba(56,189,248,0.12)', border: '1px solid rgba(56,189,248,0.25)' }}>
               <Layers size={14} style={{ color: '#38bdf8' }} />
             </div>
             <div>
-              <p className="text-sm font-body font-semibold" style={{ color: 'var(--text-primary)' }}>Group Access</p>
+              <p className="text-sm font-body font-semibold" style={{ color: 'var(--text-primary)' }}>Lab & Batch Access</p>
               <p className="text-[11px] font-body" style={{ color: 'var(--text-muted)' }}>
-                Operator <strong>{user.username}</strong> — select accessible labs/groups
+                Operator <strong>{user.username}</strong> — assign labs or restrict to specific batches
               </p>
             </div>
           </div>
@@ -83,39 +155,117 @@ function GroupAccessPanel({ user, allGroups, onClose, onSaved }) {
           </button>
         </div>
 
-        <div className="px-5 py-4 max-h-72 overflow-y-auto space-y-2">
+        <div className="px-6 py-4 max-h-[60vh] overflow-y-auto space-y-3">
           {allGroups.length === 0 ? (
             <p className="text-sm text-center py-6" style={{ color: 'var(--text-muted)' }}>No groups configured</p>
           ) : allGroups.map(g => {
-            const on = assigned.includes(g.id)
+            const isAssigned = assignedGroups.has(g.id)
+            const mode = groupModes[g.id] || 'all'
+            const hasClusters = g.clusters && g.clusters.length > 0
+
             return (
-              <button key={g.id} onClick={() => toggle(g.id)}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all"
+              <div key={g.id} className="rounded-xl overflow-hidden transition-all"
                 style={{
-                  background: on ? 'rgba(56,189,248,0.08)' : 'var(--bg-input)',
-                  border: `1px solid ${on ? 'rgba(56,189,248,0.35)' : 'var(--border-subtle)'}`,
+                  background: isAssigned ? 'rgba(56,189,248,0.04)' : 'var(--bg-input)',
+                  border: `1px solid ${isAssigned ? 'rgba(56,189,248,0.3)' : 'var(--border-subtle)'}`,
                 }}>
-                <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-                  style={{ background: on ? 'rgba(56,189,248,0.15)' : 'rgba(255,255,255,0.05)', border: `1px solid ${on ? 'rgba(56,189,248,0.3)' : 'var(--border-subtle)'}` }}>
-                  <Layers size={12} style={{ color: on ? '#38bdf8' : 'var(--text-muted)' }} />
+                {/* Group header toggle */}
+                <div onClick={() => toggleGroup(g.id)}
+                  className="flex items-center gap-3 px-3.5 py-3 cursor-pointer select-none">
+                  <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                    style={{ background: isAssigned ? 'rgba(56,189,248,0.15)' : 'rgba(255,255,255,0.05)', border: `1px solid ${isAssigned ? 'rgba(56,189,248,0.3)' : 'var(--border-subtle)'}` }}>
+                    <Layers size={12} style={{ color: isAssigned ? '#38bdf8' : 'var(--text-muted)' }} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-body font-semibold" style={{ color: 'var(--text-primary)' }}>{g.name}</p>
+                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      {hasClusters ? `${g.clusters.length} batch(es)` : 'No batches created'}
+                      {g.description ? ` · ${g.description}` : ''}
+                    </p>
+                  </div>
+                  <div className="w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-all"
+                    style={{ borderColor: isAssigned ? '#38bdf8' : 'var(--text-muted)', background: isAssigned ? '#38bdf8' : 'transparent' }}>
+                    {isAssigned && <Check size={10} className="text-white" />}
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-body font-medium" style={{ color: 'var(--text-primary)' }}>{g.name}</p>
-                  {g.description && <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{g.description}</p>}
-                </div>
-                <div className="w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-all"
-                  style={{ borderColor: on ? '#38bdf8' : 'var(--text-muted)', background: on ? '#38bdf8' : 'transparent' }}>
-                  {on && <Check size={10} className="text-white" />}
-                </div>
-              </button>
+
+                {/* Sub-options when group is active */}
+                {isAssigned && (
+                  <div className="px-4 pb-3.5 pt-1 space-y-2.5" style={{ borderTop: '1px dashed var(--border-subtle)' }}>
+                    {hasClusters ? (
+                      <>
+                        <div className="flex items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setMode(g.id, 'all')}
+                            className="flex-1 py-1 px-2.5 rounded-lg text-xs font-medium transition-all"
+                            style={{
+                              background: mode === 'all' ? 'rgba(56,189,248,0.15)' : 'var(--bg-surface-2)',
+                              border: `1px solid ${mode === 'all' ? '#38bdf8' : 'var(--border-subtle)'}`,
+                              color: mode === 'all' ? '#38bdf8' : 'var(--text-muted)',
+                            }}>
+                            Full Lab Access
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setMode(g.id, 'clusters')}
+                            className="flex-1 py-1 px-2.5 rounded-lg text-xs font-medium transition-all"
+                            style={{
+                              background: mode === 'clusters' ? 'rgba(168,85,247,0.15)' : 'var(--bg-surface-2)',
+                              border: `1px solid ${mode === 'clusters' ? '#a855f7' : 'var(--border-subtle)'}`,
+                              color: mode === 'clusters' ? '#a855f7' : 'var(--text-muted)',
+                            }}>
+                            Assigned Batches Only
+                          </button>
+                        </div>
+
+                        {mode === 'clusters' && (
+                          <div className="space-y-1.5 pt-1">
+                            <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                              Select Batch / Cluster Access:
+                            </p>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              {g.clusters.map(c => {
+                                const checked = assignedClusters.has(c.id)
+                                return (
+                                  <div
+                                    key={c.id}
+                                    onClick={() => toggleCluster(c.id)}
+                                    className="flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs transition-all"
+                                    style={{
+                                      background: checked ? `${c.color || '#a855f7'}18` : 'var(--bg-surface-2)',
+                                      border: `1px solid ${checked ? `${c.color || '#a855f7'}50` : 'var(--border-subtle)'}`,
+                                    }}
+                                  >
+                                    <div className="w-3.5 h-3.5 rounded flex items-center justify-center border shrink-0"
+                                      style={{ borderColor: checked ? (c.color || '#a855f7') : 'var(--text-muted)', background: checked ? (c.color || '#a855f7') : 'transparent' }}>
+                                      {checked && <Check size={9} className="text-white" />}
+                                    </div>
+                                    <span className="w-2 h-2 rounded-full shrink-0" style={{ background: c.color || '#a855f7' }} />
+                                    <span className="truncate font-medium" style={{ color: 'var(--text-primary)' }}>{c.name}</span>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
+                        Operator has full access to this lab (no batches configured).
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
             )
           })}
         </div>
 
-        <div className="flex gap-2 px-5 py-4" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+        <div className="flex gap-2 px-6 py-4" style={{ borderTop: '1px solid var(--border-subtle)' }}>
           <button onClick={onClose} className="btn-ghost flex-1 justify-center text-sm">Cancel</button>
           <button onClick={save} disabled={saving} className="btn-primary flex-1 justify-center text-sm disabled:opacity-40">
-            {saving ? 'Saving…' : `Save (${assigned.length} group${assigned.length !== 1 ? 's' : ''})`}
+            {saving ? 'Saving…' : 'Save Access'}
           </button>
         </div>
       </div>
@@ -198,7 +348,7 @@ function UserRow({ user, currentUserId, groups, onEdit, onDelete, onToggle, onAc
             <button onClick={() => onAssignGroups(user)}
               className="flex items-center gap-1 text-xs hover:underline"
               style={{ color: '#38bdf8' }}>
-              <Layers size={10} /> Manage groups
+              <Layers size={10} /> Labs & Batches
             </button>
           ) : user.role === 'viewer' ? 'Read-only'
           : <span className="font-mono text-[10px]">0b{(user.permissions || 0).toString(2).padStart(8, '0')}</span>}

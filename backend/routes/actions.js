@@ -12,6 +12,7 @@ const winrm = require('../services/winrm');
 const audit = require('../services/audit');
 const webhook = require('../services/webhook');
 const { isUnderMaintenance, maintenanceBlockedReason } = require('../services/maintenance');
+const { deviceAccessSql, canUserAccessDevice, canUserAccessGroup, canUserAccessCluster } = require('../services/accessControl');
 
 const router = express.Router();
 // SECURITY FIX: requireActionPin checks a single PIN shared by everyone in
@@ -101,43 +102,57 @@ function actionRoute(action) {
     body('deviceId').optional().isUUID(),
     body('deviceIds').optional().isArray(),
     body('groupId').optional().isUUID(),
+    body('clusterId').optional().isUUID(),
     requireActionPin,
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-      const { deviceId, deviceIds, groupId } = req.body;
-      if (!deviceId && (!deviceIds || !deviceIds.length) && !groupId)
-        return res.status(400).json({ error: 'deviceId, deviceIds, or groupId required' });
+      const { deviceId, deviceIds, groupId, clusterId } = req.body;
+      if (!deviceId && (!deviceIds || !deviceIds.length) && !groupId && !clusterId)
+        return res.status(400).json({ error: 'deviceId, deviceIds, groupId, or clusterId required' });
 
       let devices = [];
       try {
+        const headerOrgId = req.headers?.['x-org-id'];
+        const orgId = headerOrgId || req.user?.activeOrgId;
+        if (!orgId) return res.status(403).json({ error: 'Org context required' });
+
         if (deviceId) {
           const d = await loadDevice(deviceId);
           if (!d) return res.status(404).json({ error: 'Device not found' });
           await verifyDeviceOrgAccess(req, d);
           if (req.user.role !== 'admin') {
-            const access = await queryOne(
-              'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
-              [req.user.id, d.group_id]
-            );
-            if (!access) return res.status(403).json({ error: 'Access denied to this device' });
+            const canAccess = await canUserAccessDevice(req.user, d);
+            if (!canAccess) return res.status(403).json({ error: 'Access denied to this device (cluster/batch isolation)' });
           }
           if (isUnderMaintenance(d)) {
             return res.status(409).json({ error: maintenanceBlockedReason(d), code: 'DEVICE_UNDER_MAINTENANCE' });
           }
           devices = [d];
+        } else if (clusterId) {
+          const cluster = await queryOne('SELECT * FROM clusters WHERE id = ? AND org_id = ?', [clusterId, orgId]);
+          if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
+          if (req.user.role !== 'admin') {
+            const canAccess = await canUserAccessCluster(req.user, clusterId, cluster.group_id);
+            if (!canAccess) return res.status(403).json({ error: 'Access denied to this cluster/batch' });
+          }
+          const rows = await query('SELECT * FROM devices WHERE cluster_id = ? AND org_id = ?', [clusterId, orgId]);
+          devices = rows.map(d => ({
+            ...d,
+            _ssh_password:   decrypt(d.ssh_password),
+            _ssh_key:        decrypt(d.ssh_key),
+            _winrm_password: decrypt(d.winrm_password),
+          }));
         } else if (deviceIds && Array.isArray(deviceIds) && deviceIds.length > 0) {
-          const headerOrgId = req.headers?.['x-org-id'];
-          const orgId = headerOrgId || req.user?.activeOrgId;
-          if (!orgId) return res.status(403).json({ error: 'Org context required' });
           const placeholders = deviceIds.map(() => '?').join(',');
           const rows = await query(`SELECT * FROM devices WHERE id IN (${placeholders}) AND org_id = ?`, [...deviceIds, orgId]);
           let accessibleRows = rows;
           if (req.user.role !== 'admin') {
-            const userGroups = await query('SELECT group_id FROM user_group_access WHERE user_id = ?', [req.user.id]);
-            const allowedGroups = new Set(userGroups.map(g => g.group_id));
-            accessibleRows = rows.filter(d => allowedGroups.has(d.group_id));
+            accessibleRows = [];
+            for (const d of rows) {
+              if (await canUserAccessDevice(req.user, d)) accessibleRows.push(d);
+            }
           }
           devices = accessibleRows.map(d => ({
             ...d,
@@ -148,25 +163,32 @@ function actionRoute(action) {
         } else {
           const group = await queryOne('SELECT * FROM `groups` WHERE id = ?', [groupId]);
           if (!group) return res.status(404).json({ error: 'Group not found' });
-          const headerOrgId = req.headers?.['x-org-id'];
-          const orgId = headerOrgId || req.user?.activeOrgId;
-          if (!orgId || group.org_id !== orgId) {
+          if (group.org_id !== orgId) {
             return res.status(403).json({ error: 'Access denied to this group' });
           }
           if (req.user.role !== 'admin') {
-            const access = await queryOne(
-              'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
-              [req.user.id, groupId]
+            const canAccess = await canUserAccessGroup(req.user, groupId);
+            if (!canAccess) return res.status(403).json({ error: 'Access denied to this group' });
+            const devFilter = deviceAccessSql(req.user, 'd');
+            const rows = await query(
+              `SELECT d.* FROM devices d WHERE d.group_id = ? AND d.org_id = ? AND ${devFilter.sql}`,
+              [groupId, orgId, ...devFilter.params]
             );
-            if (!access) return res.status(403).json({ error: 'Access denied to this group' });
+            devices = rows.map(d => ({
+              ...d,
+              _ssh_password:   decrypt(d.ssh_password),
+              _ssh_key:        decrypt(d.ssh_key),
+              _winrm_password: decrypt(d.winrm_password),
+            }));
+          } else {
+            const rows = await query('SELECT * FROM devices WHERE group_id = ? AND org_id = ?', [groupId, orgId]);
+            devices = rows.map(d => ({
+              ...d,
+              _ssh_password:   decrypt(d.ssh_password),
+              _ssh_key:        decrypt(d.ssh_key),
+              _winrm_password: decrypt(d.winrm_password),
+            }));
           }
-          const rows = await query('SELECT * FROM devices WHERE group_id = ? AND org_id = ?', [groupId, orgId]);
-          devices = rows.map(d => ({
-            ...d,
-            _ssh_password:   decrypt(d.ssh_password),
-            _ssh_key:        decrypt(d.ssh_key),
-            _winrm_password: decrypt(d.winrm_password),
-          }));
         }
       } catch (e) {
         return res.status(e.status || 500).json({ error: e.message, code: e.code });

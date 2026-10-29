@@ -7,6 +7,7 @@ const { requireAuth, requirePermission } = require('../middleware/auth');
 const { requireOrgContext } = require('../middleware/tenant');
 const audit = require('../services/audit');
 const { DEVICE_TYPES } = require('../db/migrate-group-device-type');
+const { deviceAccessSql, canUserAccessGroup, canUserAccessCluster } = require('../services/accessControl');
 
 const router = express.Router();
 router.use(requireAuth, requireOrgContext);
@@ -22,28 +23,67 @@ router.get('/', async (req, res) => {
   try {
     let groups;
     if (req.user.role !== 'admin') {
-      // Operators only see groups they have been explicitly granted access to
+      const devFilter = deviceAccessSql(req.user, 'd');
       groups = await query(
-        'SELECT g.*, COUNT(d.id) as device_count, prev.device_count as device_count_prev ' +
-        'FROM `groups` g ' +
-        'INNER JOIN user_group_access uga ON uga.group_id = g.id AND uga.user_id = ? ' +
-        'LEFT JOIN devices d ON d.group_id = g.id ' +
-        'LEFT JOIN group_device_count_snapshots prev ON prev.group_id = g.id ' +
-        '  AND prev.snapshot_date = (SELECT MAX(snapshot_date) FROM group_device_count_snapshots WHERE group_id = g.id AND snapshot_date < CURDATE()) ' +
-        'WHERE g.org_id = ? ' +
-        'GROUP BY g.id, prev.device_count ORDER BY g.name',
-        [req.user.id, req.orgId]
+        `SELECT g.*, COUNT(d.id) as device_count, prev.device_count as device_count_prev
+         FROM \`groups\` g
+         LEFT JOIN devices d ON d.group_id = g.id AND ${devFilter.sql}
+         LEFT JOIN group_device_count_snapshots prev ON prev.group_id = g.id
+           AND prev.snapshot_date = (SELECT MAX(snapshot_date) FROM group_device_count_snapshots WHERE group_id = g.id AND snapshot_date < CURDATE())
+         WHERE g.org_id = ? AND (
+           EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id = g.id AND uga.user_id = ?) OR
+           EXISTS (SELECT 1 FROM user_cluster_access uca WHERE uca.group_id = g.id AND uca.user_id = ?)
+         )
+         GROUP BY g.id, prev.device_count ORDER BY g.name`,
+        [...devFilter.params, req.orgId, req.user.id, req.user.id]
       );
     } else {
       groups = await query(
-        'SELECT g.*, COUNT(d.id) as device_count, prev.device_count as device_count_prev ' +
-        'FROM `groups` g LEFT JOIN devices d ON d.group_id = g.id ' +
-        'LEFT JOIN group_device_count_snapshots prev ON prev.group_id = g.id ' +
-        '  AND prev.snapshot_date = (SELECT MAX(snapshot_date) FROM group_device_count_snapshots WHERE group_id = g.id AND snapshot_date < CURDATE()) ' +
-        'WHERE g.org_id = ? GROUP BY g.id, prev.device_count ORDER BY g.name',
+        `SELECT g.*, COUNT(d.id) as device_count, prev.device_count as device_count_prev
+         FROM \`groups\` g LEFT JOIN devices d ON d.group_id = g.id
+         LEFT JOIN group_device_count_snapshots prev ON prev.group_id = g.id
+           AND prev.snapshot_date = (SELECT MAX(snapshot_date) FROM group_device_count_snapshots WHERE group_id = g.id AND snapshot_date < CURDATE())
+         WHERE g.org_id = ? GROUP BY g.id, prev.device_count ORDER BY g.name`,
         [req.orgId]
       );
     }
+
+    let clusters = [];
+    if (req.user.role !== 'admin') {
+      clusters = await query(
+        `SELECT c.*, COUNT(d.id) AS device_count
+           FROM clusters c
+           LEFT JOIN devices d ON d.cluster_id = c.id
+          WHERE c.org_id = ? AND (
+            EXISTS (SELECT 1 FROM user_cluster_access uca WHERE uca.cluster_id = c.id AND uca.user_id = ?) OR
+            (
+              EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id = c.group_id AND uga.user_id = ?) AND
+              NOT EXISTS (SELECT 1 FROM user_cluster_access uca WHERE uca.group_id = c.group_id AND uca.user_id = ?)
+            )
+          )
+          GROUP BY c.id ORDER BY c.name`,
+        [req.orgId, req.user.id, req.user.id, req.user.id]
+      );
+    } else {
+      clusters = await query(
+        `SELECT c.*, COUNT(d.id) AS device_count
+           FROM clusters c
+           LEFT JOIN devices d ON d.cluster_id = c.id
+          WHERE c.org_id = ?
+          GROUP BY c.id ORDER BY c.name`,
+        [req.orgId]
+      );
+    }
+
+    const clusterMap = new Map();
+    for (const c of clusters) {
+      if (!clusterMap.has(c.group_id)) clusterMap.set(c.group_id, []);
+      clusterMap.get(c.group_id).push(c);
+    }
+    for (const g of groups) {
+      g.clusters = clusterMap.get(g.id) || [];
+    }
+
     res.json(groups);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -52,17 +92,20 @@ router.get('/', async (req, res) => {
 router.get('/:id/devices', param('id').isUUID(), async (req, res) => {
   if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
   try {
-    // Operators must have access to this group
     if (req.user.role !== 'admin') {
-      const access = await queryOne(
-        'SELECT 1 FROM user_group_access WHERE user_id = ? AND group_id = ?',
-        [req.user.id, req.params.id]
-      );
+      const access = await canUserAccessGroup(req.user, req.params.id);
       if (!access) return res.status(403).json({ error: 'Access denied to this group' });
     }
+    const devFilter = deviceAccessSql(req.user, 'd');
     const devices = await query(
-      'SELECT id, name, ip_address, mac_address, os_type, group_id, status, last_seen, created_at, seat_row, seat_col FROM devices WHERE group_id = ? AND org_id = ? ORDER BY name',
-      [req.params.id, req.orgId]
+      `SELECT d.id, d.name, d.ip_address, d.mac_address, d.os_type, d.group_id, d.cluster_id,
+              d.status, d.last_seen, d.created_at, d.seat_row, d.seat_col,
+              c.name as cluster_name, c.color as cluster_color
+       FROM devices d
+       LEFT JOIN clusters c ON c.id = d.cluster_id
+       WHERE d.group_id = ? AND d.org_id = ? AND ${devFilter.sql}
+       ORDER BY d.name`,
+      [req.params.id, req.orgId, ...devFilter.params]
     );
     res.json(devices);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -245,6 +288,187 @@ router.put('/:id/layout',
         [req.params.id, req.orgId]
       );
       res.json({ group: updatedGroup, devices });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// ── Clusters / Batches Endpoints ─────────────────────────────────────────────
+
+// GET /api/groups/:id/clusters — list clusters in this group
+router.get('/:id/clusters', param('id').isUUID(), async (req, res) => {
+  if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    if (req.user.role !== 'admin') {
+      const canAccess = await canUserAccessGroup(req.user, req.params.id);
+      if (!canAccess) return res.status(403).json({ error: 'Access denied to this group' });
+    }
+
+    let clusterFilter = '';
+    const clusterParams = [req.params.id, req.orgId];
+    if (req.user.role !== 'admin') {
+      const hasRestrictions = await queryOne(
+        'SELECT 1 FROM user_cluster_access WHERE user_id = ? AND group_id = ?',
+        [req.user.id, req.params.id]
+      );
+      if (hasRestrictions) {
+        clusterFilter = ' AND c.id IN (SELECT cluster_id FROM user_cluster_access WHERE user_id = ? AND group_id = ?)';
+        clusterParams.push(req.user.id, req.params.id);
+      }
+    }
+
+    const clusters = await query(
+      `SELECT c.*, 
+              COUNT(d.id) AS device_count,
+              SUM(CASE WHEN d.status = 'online' THEN 1 ELSE 0 END) AS online_count
+         FROM clusters c
+         LEFT JOIN devices d ON d.cluster_id = c.id
+        WHERE c.group_id = ? AND c.org_id = ?${clusterFilter}
+        GROUP BY c.id
+        ORDER BY c.name`,
+      clusterParams
+    );
+
+    // Get assigned staff/operators for each cluster
+    const assignments = await query(
+      `SELECT uca.cluster_id, u.id AS user_id, u.username, u.name
+         FROM user_cluster_access uca
+         JOIN users u ON u.id = uca.user_id
+        WHERE uca.group_id = ?`,
+      [req.params.id]
+    );
+    const assignMap = new Map();
+    for (const a of assignments) {
+      if (!assignMap.has(a.cluster_id)) assignMap.set(a.cluster_id, []);
+      assignMap.get(a.cluster_id).push({ id: a.user_id, username: a.username, name: a.name });
+    }
+
+    res.json(clusters.map(c => ({
+      ...c,
+      device_count: parseInt(c.device_count, 10) || 0,
+      online_count: parseInt(c.online_count, 10) || 0,
+      assigned_operators: assignMap.get(c.id) || [],
+    })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/groups/:id/clusters — create cluster/batch in this group
+router.post('/:id/clusters',
+  requireManageGroups,
+  param('id').isUUID(),
+  body('name').trim().notEmpty().isLength({ max: 100 }),
+  body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
+  body('color').optional().trim().matches(/^#[0-9a-fA-F]{6}$/),
+  body('deviceIds').optional().isArray(),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const group = await queryOne('SELECT id, name FROM `groups` WHERE id = ? AND org_id = ?', [req.params.id, req.orgId]);
+      if (!group) return res.status(404).json({ error: 'Group not found' });
+
+      const clusterId = uuidv4();
+      const { name, description, color = '#a855f7', deviceIds = [] } = req.body;
+
+      await execute(
+        'INSERT INTO clusters (id, group_id, org_id, name, description, color) VALUES (?, ?, ?, ?, ?, ?)',
+        [clusterId, req.params.id, req.orgId, name, description || null, color]
+      );
+
+      if (deviceIds.length > 0) {
+        const placeholders = deviceIds.map(() => '?').join(',');
+        await execute(
+          `UPDATE devices SET cluster_id = ? WHERE id IN (${placeholders}) AND group_id = ? AND org_id = ?`,
+          [clusterId, ...deviceIds, req.params.id, req.orgId]
+        );
+      }
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'create_cluster', targetType: 'cluster', targetId: clusterId,
+        targetName: `${group.name} / ${name}`, ipSource: req.realIp, result: 'success',
+        details: `Created cluster "${name}" in group "${group.name}" with ${deviceIds.length} device(s)`,
+      });
+
+      const cluster = await queryOne('SELECT * FROM clusters WHERE id = ?', [clusterId]);
+      res.status(201).json(cluster);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// PUT /api/groups/:id/clusters/:clusterId — update cluster details & device membership
+router.put('/:id/clusters/:clusterId',
+  requireManageGroups,
+  param('id').isUUID(),
+  param('clusterId').isUUID(),
+  body('name').trim().notEmpty().isLength({ max: 100 }),
+  body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
+  body('color').optional().trim().matches(/^#[0-9a-fA-F]{6}$/),
+  body('deviceIds').optional().isArray(),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    try {
+      const cluster = await queryOne(
+        'SELECT * FROM clusters WHERE id = ? AND group_id = ? AND org_id = ?',
+        [req.params.clusterId, req.params.id, req.orgId]
+      );
+      if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
+
+      const { name, description, color, deviceIds } = req.body;
+      await execute(
+        'UPDATE clusters SET name = ?, description = ?, color = ? WHERE id = ?',
+        [name, description || null, color || cluster.color, req.params.clusterId]
+      );
+
+      if (Array.isArray(deviceIds)) {
+        await execute(
+          'UPDATE devices SET cluster_id = NULL WHERE cluster_id = ? AND group_id = ? AND org_id = ?',
+          [req.params.clusterId, req.params.id, req.orgId]
+        );
+        if (deviceIds.length > 0) {
+          const placeholders = deviceIds.map(() => '?').join(',');
+          await execute(
+            `UPDATE devices SET cluster_id = ? WHERE id IN (${placeholders}) AND group_id = ? AND org_id = ?`,
+            [req.params.clusterId, ...deviceIds, req.params.id, req.orgId]
+          );
+        }
+      }
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'update_cluster', targetType: 'cluster', targetId: req.params.clusterId,
+        targetName: name, ipSource: req.realIp, result: 'success',
+      });
+
+      res.json(await queryOne('SELECT * FROM clusters WHERE id = ?', [req.params.clusterId]));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+);
+
+// DELETE /api/groups/:id/clusters/:clusterId — delete cluster (devices become unclustered)
+router.delete('/:id/clusters/:clusterId',
+  requireManageGroups,
+  param('id').isUUID(),
+  param('clusterId').isUUID(),
+  async (req, res) => {
+    if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Invalid id' });
+    try {
+      const cluster = await queryOne(
+        'SELECT * FROM clusters WHERE id = ? AND group_id = ? AND org_id = ?',
+        [req.params.clusterId, req.params.id, req.orgId]
+      );
+      if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
+
+      await execute('UPDATE devices SET cluster_id = NULL WHERE cluster_id = ?', [req.params.clusterId]);
+      await execute('DELETE FROM clusters WHERE id = ?', [req.params.clusterId]);
+
+      await audit.log({
+        userId: req.user.id, username: req.user.username,
+        action: 'delete_cluster', targetType: 'cluster', targetId: req.params.clusterId,
+        targetName: cluster.name, ipSource: req.realIp, result: 'success',
+      });
+
+      res.json({ message: 'Cluster deleted' });
     } catch (e) { res.status(500).json({ error: e.message }); }
   }
 );

@@ -25,6 +25,7 @@ const { isUnderMaintenance, maintenanceBlockedReason } = require('../services/ma
 const seb = require('../services/sebServer');
 const sebQuit = require('../services/sebQuit');
 const audit = require('../services/audit');
+const { deviceAccessSql, canUserAccessDevice, canUserAccessGroup, canUserAccessCluster } = require('../services/accessControl');
 
 const router = express.Router();
 router.use(requireAuth, requireOrgContext, requireRole('admin', 'operator'));
@@ -37,12 +38,6 @@ function sebErrorStatus(e) {
   if (e.code === 'SEB_NOT_FOUND') return 404;
   if (e.code === 'SEB_AUTH' || e.code === 'SEB_UNREACHABLE' || e.code === 'SEB_TIMEOUT' || e.code === 'SEB_HTTP') return 502;
   return 500;
-}
-
-async function userCanAccessGroup(req, groupId) {
-  if (req.user.role === 'admin') return true;
-  const a = await queryOne('SELECT 1 AS ok FROM user_group_access WHERE user_id = ? AND group_id = ?', [req.user.id, groupId]);
-  return !!a;
 }
 
 // ── GET /api/seb/config ──────────────────────────────────────────────────────
@@ -116,15 +111,12 @@ router.get('/device-statuses', async (req, res) => {
     const examId = req.query.examId || process.env.SEB_DEFAULT_EXAM_ID || '2';
     const connections = await seb.getMonitoring(examId, { deduplicate: true });
 
-    const params = [req.orgId];
-    let scope = '';
-    if (req.user.role !== 'admin') {
-      scope = ' AND group_id IN (SELECT group_id FROM user_group_access WHERE user_id = ?)';
-      params.push(req.user.id);
-    }
+    const devAccess = deviceAccessSql(req.user, 'd');
     const devices = await query(
-      `SELECT id, name, hostname, ip_address, group_id, seb_match_key FROM devices WHERE org_id = ? AND os_type = 'windows'${scope}`,
-      params
+      `SELECT d.id, d.name, d.hostname, d.ip_address, d.group_id, d.cluster_id, d.seb_match_key
+         FROM devices d
+        WHERE d.org_id = ? AND d.os_type = 'windows' AND ${devAccess.sql}`,
+      [req.orgId, ...devAccess.params]
     );
 
     const byDevice = {};
@@ -174,18 +166,16 @@ router.get('/device-statuses', async (req, res) => {
 // ── GET /api/seb/bindings ────────────────────────────────────────────────────
 router.get('/bindings', async (req, res) => {
   try {
-    const params = [req.orgId];
-    let scope = '';
-    if (req.user.role !== 'admin') {
-      scope = ' AND d.group_id IN (SELECT group_id FROM user_group_access WHERE user_id = ?)';
-      params.push(req.user.id);
-    }
+    const devAccess = deviceAccessSql(req.user, 'd');
     const rows = await query(
-      `SELECT d.id, d.name, d.ip_address, d.hostname, d.group_id, g.name AS group_name, d.seb_match_key
-         FROM devices d LEFT JOIN \`groups\` g ON g.id = d.group_id
-        WHERE d.org_id = ? AND d.os_type = 'windows'${scope}
-        ORDER BY g.name, d.name`,
-      params
+      `SELECT d.id, d.name, d.ip_address, d.hostname, d.group_id, d.cluster_id,
+              c.name AS cluster_name, c.color AS cluster_color, g.name AS group_name, d.seb_match_key
+         FROM devices d
+         LEFT JOIN \`groups\` g ON g.id = d.group_id
+         LEFT JOIN clusters c ON c.id = d.cluster_id
+        WHERE d.org_id = ? AND d.os_type = 'windows' AND ${devAccess.sql}
+        ORDER BY g.name, c.name, d.name`,
+      [req.orgId, ...devAccess.params]
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -204,7 +194,7 @@ router.put('/bindings/:deviceId',
       const device = await queryOne('SELECT * FROM devices WHERE id = ? AND org_id = ?', [req.params.deviceId, req.orgId]);
       if (!device) return res.status(404).json({ error: 'Device not found' });
       if (device.os_type !== 'windows') return res.status(400).json({ error: 'Only Windows devices can be bound to a SEB client' });
-      if (device.group_id ? !(await userCanAccessGroup(req, device.group_id)) : req.user.role !== 'admin') {
+      if (req.user.role !== 'admin' && !(await canUserAccessDevice(req.user, device))) {
         return res.status(403).json({ error: 'Access denied to this device' });
       }
 
@@ -229,7 +219,7 @@ router.put('/bindings/:deviceId',
 );
 
 // ── POST /api/seb/quit ───────────────────────────────────────────────────────
-// body: { actionPin, examId, shutdownAfter?, timeoutSec?, deviceId | deviceIds[] | groupId }
+// body: { actionPin, examId, shutdownAfter?, timeoutSec?, deviceId | deviceIds[] | groupId | clusterId }
 router.post('/quit',
   actionLimiter,
   body('actionPin').notEmpty().isString(),
@@ -238,6 +228,7 @@ router.post('/quit',
   body('timeoutSec').optional().isInt({ min: 15, max: sebQuit.MAX_TIMEOUT_SEC }),
   body('deviceId').optional().isUUID(),
   body('groupId').optional().isUUID(),
+  body('clusterId').optional().isUUID(),
   body('deviceIds').optional().isArray({ min: 1, max: MAX_DEVICES }),
   body('deviceIds.*').optional().isUUID(),
   requireActionPin,
@@ -248,20 +239,31 @@ router.post('/quit',
       return res.status(503).json({ error: 'SEB Server integration is not configured on this NetControl instance', code: 'SEB_NOT_CONFIGURED' });
     }
 
-    const { examId, deviceId, groupId, deviceIds } = req.body;
+    const { examId, deviceId, groupId, clusterId, deviceIds } = req.body;
     const shutdownAfter = req.body.shutdownAfter === true || req.body.shutdownAfter === 'true';
-    if (!deviceId && !groupId && !deviceIds) {
-      return res.status(400).json({ error: 'deviceId, deviceIds or groupId required' });
+    if (!deviceId && !groupId && !clusterId && !deviceIds) {
+      return res.status(400).json({ error: 'deviceId, deviceIds, groupId or clusterId required' });
     }
 
     // ── resolve scope → device rows (org filter lives in the query itself) ──
     let rows = [];
     let scopeType, scopeId = null, scopeName;
     try {
-      if (groupId) {
+      if (clusterId) {
+        const cluster = await queryOne(
+          'SELECT c.*, g.name AS group_name FROM clusters c JOIN `groups` g ON g.id = c.group_id WHERE c.id = ? AND c.org_id = ?',
+          [clusterId, req.orgId]
+        );
+        if (!cluster) return res.status(404).json({ error: 'Cluster / batch not found' });
+        if (!(await canUserAccessCluster(req.user, clusterId, cluster.group_id))) {
+          return res.status(403).json({ error: 'Access denied to this cluster / batch' });
+        }
+        rows = await query('SELECT * FROM devices WHERE cluster_id = ? AND org_id = ?', [clusterId, req.orgId]);
+        scopeType = 'cluster'; scopeId = clusterId; scopeName = `${cluster.group_name} / ${cluster.name}`;
+      } else if (groupId) {
         const group = await queryOne('SELECT * FROM `groups` WHERE id = ? AND org_id = ?', [groupId, req.orgId]);
         if (!group) return res.status(404).json({ error: 'Group not found' });
-        if (!(await userCanAccessGroup(req, groupId))) return res.status(403).json({ error: 'Access denied to this group' });
+        if (!(await canUserAccessGroup(req.user, groupId))) return res.status(403).json({ error: 'Access denied to this group' });
         rows = await query('SELECT * FROM devices WHERE group_id = ? AND org_id = ?', [groupId, req.orgId]);
         scopeType = 'group'; scopeId = groupId; scopeName = group.name;
       } else {
@@ -281,14 +283,10 @@ router.post('/quit',
     if (!rows.length) return res.status(400).json({ error: 'No devices found for target' });
 
     // ── per-device eligibility ──────────────────────────────────────────────
-    const groupAccess = new Map();
     const eligible = [], skipped = [];
     const busy = await sebQuit.devicesInFlight(rows.map(r => r.id));
     for (const d of rows) {
-      if (req.user.role !== 'admin' && d.group_id) {
-        if (!groupAccess.has(d.group_id)) groupAccess.set(d.group_id, await userCanAccessGroup(req, d.group_id));
-        if (!groupAccess.get(d.group_id)) { skipped.push({ device: d, reason: 'Access denied to this device' }); continue; }
-      } else if (req.user.role !== 'admin' && !d.group_id) {
+      if (req.user.role !== 'admin' && !(await canUserAccessDevice(req.user, d))) {
         skipped.push({ device: d, reason: 'Access denied to this device' }); continue;
       }
       if (d.os_type !== 'windows') { skipped.push({ device: d, reason: 'Not a Windows device — SEB quit applies to Windows endpoints only' }); continue; }
@@ -312,7 +310,7 @@ router.post('/quit',
       });
       await audit.log({
         userId: req.user.id, username: req.user.username, orgId: req.orgId,
-        action: 'seb_quit_run', targetType: scopeType === 'group' ? 'group' : 'device', targetId: scopeId,
+        action: 'seb_quit_run', targetType: scopeType === 'group' ? 'group' : (scopeType === 'cluster' ? 'cluster' : 'device'), targetId: scopeId,
         targetName: scopeName, ipSource: req.realIp, result: 'success',
         details: `exam ${examId}; ${eligible.length} device(s); shutdown after exit: ${shutdownAfter ? 'yes' : 'no'}; run ${runId}`,
       }).catch(() => {});

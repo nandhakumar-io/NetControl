@@ -4,7 +4,7 @@ import {
   LayoutGrid, LayoutList, Server, CheckSquare, Square,
   ChevronDown, ChevronRight, Upload, Pencil, Trash2,
   TerminalSquare, RefreshCw, Wifi, WifiOff, HelpCircle,
-  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown, Columns3, Check, LogOut
+  SlidersHorizontal, X, AlertOctagon, Users, Wrench, PackageCheck, ArrowUp, ArrowDown, Columns3, Check, LogOut, Layers
 } from 'lucide-react'
 import api from '../lib/api'
 import toast from 'react-hot-toast'
@@ -16,6 +16,7 @@ import FilePushModal from '../components/modals/FilePushModal'
 import DeviceRegistrationModal from '../components/modals/DeviceRegistrationModal'
 import BulkEditModal from '../components/modals/BulkEditModal'
 import SebQuitModal from '../components/modals/SebQuitModal'
+import AssignClusterModal from '../components/modals/AssignClusterModal'
 import SavedViews from '../components/SavedViews'
 import { useThemeStore } from '../store/themeStore'
 import { usePermissions } from '../hooks/usePermissions'
@@ -420,12 +421,25 @@ function DeviceCard({ device, selected, onSelect, onWake, onShutdown, onRestart,
         </div>
       )}
 
-      {/* Group tag */}
-      {device.group_name && (
-        <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-          <span className="text-sm" style={{ color: 'var(--text-faint)' }}>
-            <span style={{ color: 'var(--text-muted)' }}>Group: </span>{device.group_name}
-          </span>
+      {/* Group & Cluster tag */}
+      {(device.group_name || device.cluster_name) && (
+        <div className="mt-2.5 pt-2.5 flex items-center justify-between gap-1 flex-wrap" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+          {device.group_name ? (
+            <span className="text-sm" style={{ color: 'var(--text-faint)' }}>
+              <span style={{ color: 'var(--text-muted)' }}>Group: </span>{device.group_name}
+            </span>
+          ) : <span />}
+          {device.cluster_name && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold"
+              style={{
+                background: `${device.cluster_color || '#a855f7'}18`,
+                color: device.cluster_color || '#a855f7',
+                border: `1px solid ${device.cluster_color || '#a855f7'}35`
+              }}>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: device.cluster_color || '#a855f7' }} />
+              {device.cluster_name}
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -673,7 +687,20 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
       {/* Name */}
       <div className="min-w-0">
         <p className="text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{device.name}</p>
-        {group && <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {group && <p className="text-sm truncate" style={{ color: 'var(--text-faint)' }}>{group.name}</p>}
+          {device.cluster_name && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold"
+              style={{
+                background: `${device.cluster_color || '#a855f7'}18`,
+                color: device.cluster_color || '#a855f7',
+                border: `1px solid ${device.cluster_color || '#a855f7'}35`
+              }}>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: device.cluster_color || '#a855f7' }} />
+              {device.cluster_name}
+            </span>
+          )}
+        </div>
         {(device.tags?.length > 0 || onAddTag) && (
           <div className="mt-1">
             <TagQuickEditor tags={device.tags}
@@ -756,7 +783,7 @@ function DeviceListRow({ device, group, selected, highlighted, onSelect, onWake,
 }
 
 // ── Bulk bar ──────────────────────────────────────────────────────────────────
-function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onQuitSebAll, onPushFile, onEditSelected, onMaintenanceAll, onAgentUpdateAll, onClear, canEdit }) {
+function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onQuitSebAll, onPushFile, onEditSelected, onAssignCluster, onMaintenanceAll, onAgentUpdateAll, onClear, canEdit }) {
   if (!count) return null
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 animate-slide-up">
@@ -780,6 +807,17 @@ function BulkBar({ count, onWakeAll, onShutdownAll, onRestartAll, onQuitSebAll, 
           }}>
           <Users size={12} />Edit Selected
         </button>
+        {canEdit && onAssignCluster && (
+          <button onClick={onAssignCluster}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-semibold transition-all"
+            style={{
+              background: 'rgba(168,85,247,0.12)',
+              border: '1px solid rgba(168,85,247,0.3)',
+              color: '#a855f7',
+            }}>
+            <Layers size={12} />Assign Batch
+          </button>
+        )}
         {[
           { fn: onWakeAll,     label: 'Wake All',  icon: <Zap size={11} />,       c: '#22c55e', bg: 'rgba(34,197,94,0.1)',  bc: 'rgba(34,197,94,0.25)'  },
           { fn: onShutdownAll, label: 'Shutdown',  icon: <Power size={11} />,     c: '#f87171', bg: 'rgba(239,68,68,0.1)',  bc: 'rgba(239,68,68,0.25)'  },
@@ -829,6 +867,8 @@ export default function DevicesPage() {
   const [osFilter, setOsFilter]         = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [groupFilter, setGroupFilter]   = useState('all')
+  const [clusterFilter, setClusterFilter] = useState('all')
+  const [assignClusterOpen, setAssignClusterOpen] = useState(false)
   // Freeform ad-hoc labels, independent of the group hierarchy — lets
   // someone slice the fleet by e.g. "prod" + "k8s-node" without having to
   // restructure groups just to get a temporary view.
@@ -1262,14 +1302,33 @@ export default function DevicesPage() {
   const pendingDevices = useMemo(() => devices.filter(d => d.status === 'needs_approval'), [devices])
   const manageableDevices = useMemo(() => devices.filter(d => d.status !== 'needs_approval'), [devices])
 
+  const availableClusters = useMemo(() => {
+    const map = new Map()
+    for (const g of groups) {
+      if (Array.isArray(g.clusters)) {
+        for (const c of g.clusters) {
+          map.set(c.id, c)
+        }
+      }
+    }
+    for (const d of devices) {
+      if (d.cluster_id && d.cluster_name && !map.has(d.cluster_id)) {
+        map.set(d.cluster_id, { id: d.cluster_id, name: d.cluster_name, color: d.cluster_color, group_id: d.group_id })
+      }
+    }
+    return Array.from(map.values())
+  }, [groups, devices])
+
   // Filtering
   const filtered = useMemo(() => {
     const base = manageableDevices.filter(d => {
       const q = search.toLowerCase()
-      if (q && !d.name.toLowerCase().includes(q) && !d.ip_address.includes(q) && !(d.mac_address||'').toLowerCase().includes(q)) return false
+      if (q && !d.name.toLowerCase().includes(q) && !d.ip_address.includes(q) && !(d.mac_address||'').toLowerCase().includes(q) && !(d.cluster_name||'').toLowerCase().includes(q)) return false
       if (osFilter !== 'all' && d.os_type !== osFilter) return false
       if (statusFilter !== 'all' && d.status !== statusFilter) return false
       if (groupFilter !== 'all' && d.group_id !== groupFilter) return false
+      if (clusterFilter === 'unassigned' && d.cluster_id) return false
+      if (clusterFilter !== 'all' && clusterFilter !== 'unassigned' && d.cluster_id !== clusterFilter) return false
       if (tagFilter.size > 0 && !(d.tags || []).some(t => tagFilter.has(t))) return false
       if (sebFilter === 'active' && !sebData.devices[d.id]?.isActive) return false
       if (sebFilter === 'exited' && !sebData.devices[d.id]?.isExited) return false
@@ -1310,7 +1369,7 @@ export default function DevicesPage() {
       return withTrend
     }
     return base
-  }, [manageableDevices, search, osFilter, statusFilter, groupFilter, tagFilter, sebFilter, sebData, sortKey, sortDir, healthScores])
+  }, [manageableDevices, search, osFilter, statusFilter, groupFilter, clusterFilter, tagFilter, sebFilter, sebData, sortKey, sortDir, healthScores])
 
   // Grouped for grid view
   const grouped = useMemo(() => {
@@ -1548,10 +1607,26 @@ export default function DevicesPage() {
 
         {/* Group filter */}
         {groups.length > 0 && (
-          <select value={groupFilter} onChange={e => setGroupFilter(e.target.value)}
+          <select value={groupFilter} onChange={e => {
+            setGroupFilter(e.target.value)
+            setClusterFilter('all')
+          }}
             className="input-field h-9 text-sm py-0" style={{ minWidth: 130 }}>
             <option value="all">All Groups</option>
             {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+        )}
+
+        {/* Cluster / Batch filter */}
+        {availableClusters.length > 0 && (
+          <select value={clusterFilter} onChange={e => setClusterFilter(e.target.value)}
+            className="input-field h-9 text-sm py-0" style={{ minWidth: 140 }}>
+            <option value="all">All Batches</option>
+            <option value="unassigned">Unassigned (No Batch)</option>
+            {availableClusters
+              .filter(c => groupFilter === 'all' || c.group_id === groupFilter)
+              .map(c => <option key={c.id} value={c.id}>{c.name}</option>)
+            }
           </select>
         )}
 
@@ -1744,10 +1819,22 @@ export default function DevicesPage() {
         onQuitSebAll={bulkQuitSeb}
         onPushFile={() => setFilePushOpen(true)}
         onEditSelected={() => setBulkEditOpen(true)}
+        onAssignCluster={() => setAssignClusterOpen(true)}
         onMaintenanceAll={bulkToggleMaintenance}
         onAgentUpdateAll={isAdmin ? bulkAgentUpdate : null}
         canEdit={isAdmin}
         onClear={clearSelection} />
+
+      <AssignClusterModal
+        open={assignClusterOpen}
+        onClose={() => setAssignClusterOpen(false)}
+        selectedDevices={devices.filter(d => selectedIds.has(d.id))}
+        groups={groups}
+        onSaved={() => {
+          clearSelection()
+          fetchAll(true)
+        }}
+      />
 
       {/* Modals */}
       <DeviceModal open={!!deviceModal} onClose={() => setDeviceModal(null)}

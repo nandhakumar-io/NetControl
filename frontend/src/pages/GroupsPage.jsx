@@ -10,6 +10,7 @@ import toast from 'react-hot-toast'
 import PageHeader from '../components/ui/PageHeader'
 import ActionConfirmModal from '../components/modals/ActionConfirmModal'
 import SebQuitModal from '../components/modals/SebQuitModal'
+import ClusterModal from '../components/modals/ClusterModal'
 import LabLayoutEditor from '../components/lab/LabLayoutEditor'
 import LabConsole from '../components/lab/LabConsole'
 import { useThemeStore } from '../store/themeStore'
@@ -166,7 +167,10 @@ function DeviceChip({ device }) {
 }
 
 // ── Group card ────────────────────────────────────────────────────────────────
-function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labActive, isLight, highlighted }) {
+function GroupCard({
+  group, devices, onEdit, onDelete, onAction, onOpenLab, labActive, isLight, highlighted,
+  canManageClusters, onAddCluster, onEditCluster, onDeleteCluster, onClusterAction
+}) {
   const [expanded, setExpanded] = useState(false)
   const online  = devices.filter(d => d.status === 'online').length
   const offline = devices.length - online
@@ -174,13 +178,6 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
 
   const healthColor = pct === 100 ? '#22c55e' : pct >= 50 ? '#fbbf24' : pct > 0 ? '#fb923c' : '#64748b'
 
-  // Day-over-day device count trend — group.device_count_prev comes from
-  // the most recent daily snapshot before today (routes/groups.js LEFT
-  // JOINs group_device_count_snapshots, populated by
-  // services/scheduledJobs.js's snapshotGroupDeviceCounts()). null means no
-  // snapshot exists yet (fresh install / group created today) — in that
-  // case there's nothing true to compare against, so no trend is shown
-  // rather than implying "+N" against a number that was never real.
   const prevCount = group.device_count_prev
   const trendDelta = prevCount != null ? devices.length - prevCount : null
 
@@ -283,6 +280,105 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
           ))}
         </div>
 
+        {/* Batches / Clusters section */}
+        <div className="mb-4 pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }} onDoubleClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5" style={{ color: 'var(--text-muted)' }}>
+              <Layers size={11} className="text-accent-purple" />
+              Batches / Clusters {group.clusters?.length ? `(${group.clusters.length})` : ''}
+            </span>
+            {canManageClusters && (
+              <button
+                type="button"
+                onClick={() => onAddCluster(group)}
+                className="text-[11px] font-semibold flex items-center gap-1 px-2 py-0.5 rounded-lg transition-colors hover:brightness-110"
+                style={{ color: '#a855f7', background: 'rgba(168,85,247,0.12)', border: '1px solid rgba(168,85,247,0.25)' }}
+              >
+                <Plus size={10} /> New Batch
+              </button>
+            )}
+          </div>
+
+          {group.clusters?.length > 0 ? (
+            <div className="space-y-2">
+              {group.clusters.map(c => {
+                const clusterDevices = devices.filter(d => d.cluster_id === c.id)
+                const cOnline = clusterDevices.filter(d => d.status === 'online').length
+                const cTotal = clusterDevices.length
+                return (
+                  <div key={c.id} className="p-2.5 rounded-xl transition-all"
+                    style={{ background: 'var(--bg-surface-3)', border: '1px solid var(--border-subtle)' }}>
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: c.color || '#a855f7' }} />
+                        <span className="font-semibold text-xs truncate" style={{ color: 'var(--text-primary)' }}>{c.name}</span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                          style={{ background: 'var(--bg-surface-1)', color: 'var(--text-faint)', border: '1px solid var(--border-subtle)' }}>
+                          {cOnline}/{cTotal} online
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {canManageClusters && (
+                          <>
+                            <button onClick={() => onEditCluster(group, c)} title="Edit batch"
+                              className="p-1 rounded hover:text-accent-purple transition-colors" style={{ color: 'var(--text-muted)' }}>
+                              <Pencil size={11} />
+                            </button>
+                            <button onClick={() => onDeleteCluster(group, c)} title="Delete batch"
+                              className="p-1 rounded hover:text-red-400 transition-colors" style={{ color: 'var(--text-muted)' }}>
+                              <Trash2 size={11} />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {/* Per-cluster batch power actions */}
+                    <div className="grid grid-cols-4 gap-1.5 pt-1.5" style={{ borderTop: '1px dashed var(--border-subtle)' }}>
+                      <button
+                        onClick={() => onClusterAction({ type: 'wake', cluster: c, group })}
+                        disabled={cTotal === 0}
+                        title={`Wake all in ${c.name}`}
+                        className="flex items-center justify-center gap-1 py-1 rounded-lg text-[10px] font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ background: 'rgba(34,197,94,0.08)', color: '#22c55e', border: '1px solid rgba(34,197,94,0.2)' }}>
+                        <Zap size={9} /> Wake
+                      </button>
+                      <button
+                        onClick={() => onClusterAction({ type: 'shutdown', cluster: c, group })}
+                        disabled={cTotal === 0}
+                        title={`Shut down all in ${c.name}`}
+                        className="flex items-center justify-center gap-1 py-1 rounded-lg text-[10px] font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}>
+                        <Power size={9} /> Off
+                      </button>
+                      <button
+                        onClick={() => onClusterAction({ type: 'restart', cluster: c, group })}
+                        disabled={cTotal === 0}
+                        title={`Restart all in ${c.name}`}
+                        className="flex items-center justify-center gap-1 py-1 rounded-lg text-[10px] font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.2)' }}>
+                        <RotateCcw size={9} /> Restart
+                      </button>
+                      <button
+                        onClick={() => onClusterAction({ type: 'quit_seb', cluster: c, group })}
+                        disabled={cTotal === 0}
+                        title={`Quit SEB on ${c.name}`}
+                        className="flex items-center justify-center gap-1 py-1 rounded-lg text-[10px] font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ background: 'rgba(167,139,250,0.08)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.2)' }}>
+                        <LogOut size={9} /> SEB
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="py-2.5 px-3 rounded-xl text-center text-[11px]"
+              style={{ background: 'var(--bg-surface-3)', border: '1px dashed var(--border-subtle)', color: 'var(--text-faint)' }}>
+              No batches formed yet.{canManageClusters ? ' Click "New Batch" to split lab into batches.' : ''}
+            </div>
+          )}
+        </div>
+
         {/* Device chips */}
         {devices.length > 0 && (
           <div className="mb-4" onDoubleClick={e => e.stopPropagation()}>
@@ -313,7 +409,7 @@ function GroupCard({ group, devices, onEdit, onDelete, onAction, onOpenLab, labA
           </div>
         )}
 
-        {/* Action buttons */}
+        {/* Group-level action buttons */}
         <div className="grid grid-cols-4 gap-2" onDoubleClick={e => e.stopPropagation()}>
           {[
             { type: 'wake',     label: 'Wake All',  icon: <Zap size={12} />,       color: '#22c55e', bg: 'rgba(34,197,94,0.08)',   border: 'rgba(34,197,94,0.2)',   hbg: 'rgba(34,197,94,0.18)'  },
@@ -344,11 +440,13 @@ export default function GroupsPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [search, setSearch]   = useState('')
-  const [groupModal,    setGroupModal]    = useState(null)
-  const [deleteTarget,  setDeleteTarget]  = useState(null)
-  const [actionModal,   setActionModal]   = useState(null)
-  const [deleteAllOpen, setDeleteAllOpen] = useState(false)
-  const [activeLabId,   setActiveLabId]   = useState(null)
+  const [groupModal,          setGroupModal]          = useState(null)
+  const [clusterModal,        setClusterModal]        = useState(null)
+  const [deleteTarget,        setDeleteTarget]        = useState(null)
+  const [deleteClusterTarget, setDeleteClusterTarget] = useState(null)
+  const [actionModal,         setActionModal]         = useState(null)
+  const [deleteAllOpen,       setDeleteAllOpen]       = useState(false)
+  const [activeLabId,         setActiveLabId]         = useState(null)
   // BUG FIX: this used to only ever mount LabLayoutEditor — there was no
   // way to actually USE a saved layout to select/act on devices by row or
   // block, only to keep re-editing it. 'console' (default, once a layout
@@ -413,18 +511,30 @@ export default function GroupsPage() {
   }
 
   const executeAction = async (pin) => {
-    const { type, group } = actionModal
-    const { data } = await api.post(`/actions/${type}`, { groupId: group.id, actionPin: pin }, { timeout: 60000 })
-    // Previously this ignored the response entirely and always toasted
-    // success — even when some (or every) device in the group failed, or
-    // was skipped for being under maintenance. The backend returns HTTP
-    // 200 regardless of `overall` (failure/partial devices aren't a
-    // request-level error), so nothing here would have caught it. Return
-    // the real per-device results so ActionConfirmModal renders its actual
-    // outcome breakdown, same as the single-device and DevicesPage bulk
-    // paths already do, instead of a toast that's right by coincidence.
-    if (data.overall === 'success') toast.success(`${type} sent to ${group.name}`)
+    const { type, group, cluster } = actionModal
+    let data
+    if (cluster) {
+      const res = await api.post(`/actions/${type}`, { clusterId: cluster.id, actionPin: pin }, { timeout: 60000 })
+      data = res.data
+      if (data.overall === 'success') toast.success(`${type} sent to ${cluster.name}`)
+    } else {
+      const res = await api.post(`/actions/${type}`, { groupId: group.id, actionPin: pin }, { timeout: 60000 })
+      data = res.data
+      if (data.overall === 'success') toast.success(`${type} sent to ${group.name}`)
+    }
     return data
+  }
+
+  const executeClusterDelete = async () => {
+    if (!deleteClusterTarget) return
+    try {
+      await api.delete(`/groups/${deleteClusterTarget.group.id}/clusters/${deleteClusterTarget.cluster.id}`)
+      toast.success(`Cluster "${deleteClusterTarget.cluster.name}" deleted`)
+      setDeleteClusterTarget(null)
+      fetchAll(true)
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to delete cluster')
+    }
   }
 
   const getGroupDevices = useCallback((id) => devices.filter(d => d.group_id === id), [devices])
@@ -576,6 +686,11 @@ export default function GroupsPage() {
               labActive={activeLabId === group.id}
               isLight={isLight}
               highlighted={group.id === highlightId || String(group.id) === highlightId}
+              canManageClusters={isAdmin}
+              onAddCluster={g => setClusterModal({ group: g })}
+              onEditCluster={(g, c) => setClusterModal({ group: g, cluster: c })}
+              onDeleteCluster={(g, c) => setDeleteClusterTarget({ group: g, cluster: c })}
+              onClusterAction={({ type, cluster, group }) => setActionModal({ type, cluster, group })}
             />
           ))}
         </div>
@@ -646,10 +761,23 @@ export default function GroupsPage() {
         group={groupModal !== 'add' ? groupModal : null}
       />
 
+      <ClusterModal
+        open={!!clusterModal}
+        onClose={() => setClusterModal(null)}
+        group={clusterModal?.group}
+        cluster={clusterModal?.cluster}
+        groupDevices={clusterModal?.group ? getGroupDevices(clusterModal.group.id) : []}
+        onSaved={() => fetchAll(true)}
+      />
+
       <SebQuitModal
         open={actionModal?.type === 'quit_seb'}
         onClose={() => setActionModal(null)}
-        target={actionModal?.type === 'quit_seb' ? { groupId: actionModal.group.id, label: actionModal.group.name } : null}
+        target={actionModal?.type === 'quit_seb' ? (
+          actionModal.cluster
+            ? { clusterId: actionModal.cluster.id, label: `${actionModal.group.name} / ${actionModal.cluster.name}` }
+            : { groupId: actionModal.group.id, label: actionModal.group.name }
+        ) : null}
         onFinished={() => fetchAll(true)}
       />
 
@@ -657,9 +785,18 @@ export default function GroupsPage() {
         open={!!actionModal && actionModal.type !== 'quit_seb'}
         onClose={() => setActionModal(null)}
         onConfirm={executeAction}
-        title={actionModal ? `${actionModal.type.charAt(0).toUpperCase() + actionModal.type.slice(1)} — ${actionModal.group?.name}` : ''}
-        description={`This will ${actionModal?.type} all devices in this group. Enter your action PIN.`}
+        title={actionModal ? `${actionModal.type.charAt(0).toUpperCase() + actionModal.type.slice(1)} — ${actionModal.cluster ? actionModal.cluster.name : actionModal.group?.name}` : ''}
+        description={`This will ${actionModal?.type} all devices in ${actionModal?.cluster ? `batch "${actionModal.cluster.name}"` : 'this group'}. Enter your action PIN.`}
         danger={actionModal?.type !== 'wake'}
+      />
+
+      <ActionConfirmModal
+        open={!!deleteClusterTarget}
+        onClose={() => setDeleteClusterTarget(null)}
+        onConfirm={executeClusterDelete}
+        title={`Delete Cluster "${deleteClusterTarget?.cluster?.name}"`}
+        description="Devices in this batch will become unclustered. This cannot be undone."
+        danger
       />
 
       <ActionConfirmModal

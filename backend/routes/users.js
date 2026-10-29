@@ -569,8 +569,6 @@ router.get('/:id/activity', requireRole('admin'), param('id').isUUID(), async (r
   }
 });
 
-module.exports = router;
-
 // ── GET /api/users/:id/groups — get group access for a user ──────────────────
 router.get('/:id/groups', requireRole('admin'), async (req, res) => {
   try {
@@ -586,9 +584,25 @@ router.get('/:id/groups', requireRole('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── PUT /api/users/:id/groups — set group access for a user (replaces all) ───
+// ── GET /api/users/:id/clusters — get cluster/batch access for a user ────────
+router.get('/:id/clusters', requireRole('admin'), async (req, res) => {
+  try {
+    const rows = await query(
+      `SELECT uca.cluster_id, uca.group_id, c.name AS cluster_name, c.color AS cluster_color, g.name AS group_name, uca.granted_at
+         FROM user_cluster_access uca
+         JOIN clusters c ON c.id = uca.cluster_id
+         JOIN \`groups\` g ON g.id = uca.group_id
+        WHERE uca.user_id = ?
+        ORDER BY g.name, c.name`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PUT /api/users/:id/groups — set group and cluster access for a user ─────
 router.put('/:id/groups', requireRole('admin'), async (req, res) => {
-  const { groupIds = [] } = req.body;
+  const { groupIds = [], clusterGrants = [] } = req.body;
   const userId = req.params.id;
   const now = Math.floor(Date.now() / 1000);
   const pool = require('../db').getPool();
@@ -596,15 +610,31 @@ router.put('/:id/groups', requireRole('admin'), async (req, res) => {
   try {
     await conn.beginTransaction();
     await conn.query('DELETE FROM user_group_access WHERE user_id = ?', [userId]);
-    if (groupIds.length > 0) {
-      const vals = groupIds.map(gid => [userId, gid, req.user.id, now]);
+    await conn.query('DELETE FROM user_cluster_access WHERE user_id = ?', [userId]);
+
+    const allGroupIds = new Set(groupIds);
+    for (const cg of clusterGrants) {
+      if (cg.groupId) allGroupIds.add(cg.groupId);
+    }
+
+    if (allGroupIds.size > 0) {
+      const vals = [...allGroupIds].map(gid => [userId, gid, req.user.id, now]);
       await conn.query(
         'INSERT INTO user_group_access (user_id, group_id, granted_by, granted_at) VALUES ?',
         [vals]
       );
     }
+
+    if (clusterGrants.length > 0) {
+      const clusterVals = clusterGrants.map(cg => [userId, cg.clusterId, cg.groupId, req.user.id, now]);
+      await conn.query(
+        'INSERT INTO user_cluster_access (user_id, cluster_id, group_id, granted_by, granted_at) VALUES ?',
+        [clusterVals]
+      );
+    }
+
     await conn.commit();
-    res.json({ ok: true, groupIds });
+    res.json({ ok: true, groupIds: [...allGroupIds], clusterGrants });
   } catch (e) {
     await conn.rollback();
     res.status(500).json({ error: e.message });
@@ -612,3 +642,5 @@ router.put('/:id/groups', requireRole('admin'), async (req, res) => {
     conn.release();
   }
 });
+
+module.exports = router;

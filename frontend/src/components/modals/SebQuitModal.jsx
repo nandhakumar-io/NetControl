@@ -103,7 +103,8 @@ export default function SebQuitModal({ open, onClose, target, onFinished }) {
 
   const body = useCallback(() => {
     const b = { actionPin: pin, examId: examId.trim(), shutdownAfter }
-    if (target?.groupId) b.groupId = target.groupId
+    if (target?.clusterId) b.clusterId = target.clusterId
+    else if (target?.groupId) b.groupId = target.groupId
     else if (target?.deviceIds) b.deviceIds = target.deviceIds
     else if (target?.deviceId) b.deviceId = target.deviceId
     return b

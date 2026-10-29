@@ -7,7 +7,7 @@ import { getErrorMessage } from '../../lib/errors'
 
 const EMPTY = {
   name: '', ip_address: '', mac_address: '',
-  os_type: 'linux', group_id: '', parent_device_id: '',
+  os_type: 'linux', group_id: '', cluster_id: '', parent_device_id: '',
   ssh_username: '', ssh_password: '', ssh_key: '',
   winrm_username: '', winrm_password: '',
   tags: [],
@@ -441,6 +441,7 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups, al
         mac_address:    device.mac_address    || '',
         os_type:        device.os_type        || 'linux',
         group_id:       device.group_id       || '',
+        cluster_id:     device.cluster_id     || '',
         parent_device_id: device.parent_device_id || '',
         ssh_username:   device.ssh_username   || '',
         ssh_password:   '',
@@ -483,7 +484,8 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups, al
     try {
       const payload = { ...form }
       delete payload.tags // saved separately via PUT /devices/:id/tags below
-      if (!payload.group_id) payload.group_id = null
+      if (!payload.group_id) { payload.group_id = null; payload.cluster_id = null }
+      if (!payload.cluster_id) payload.cluster_id = null
       if (!payload.parent_device_id) payload.parent_device_id = null
       if (!payload.ssh_password)   delete payload.ssh_password
       if (!payload.ssh_key)        delete payload.ssh_key
@@ -608,11 +610,25 @@ export default function DeviceModal({ open, onClose, onSaved, device, groups, al
                 </F>
 
                 <F label="Group / Lab" id="group_id" errors={errors}>
-                  <select id="group_id" className="input-field" value={form.group_id} onChange={e => set('group_id', e.target.value)}>
+                  <select id="group_id" className="input-field" value={form.group_id} onChange={e => {
+                    set('group_id', e.target.value)
+                    set('cluster_id', '')
+                  }}>
                     <option value="">No Group</option>
                     {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select>
                 </F>
+
+                {form.group_id && groups?.find(g => g.id === form.group_id)?.clusters?.length > 0 && (
+                  <F label="Batch / Cluster" id="cluster_id" errors={errors}>
+                    <select id="cluster_id" className="input-field" value={form.cluster_id} onChange={e => set('cluster_id', e.target.value)}>
+                      <option value="">No Batch (Unassigned)</option>
+                      {groups.find(g => g.id === form.group_id).clusters.map(c => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </F>
+                )}
 
                 <F label="Parent device" id="parent_device_id" errors={errors}>
                   <select id="parent_device_id" className="input-field" value={form.parent_device_id}
