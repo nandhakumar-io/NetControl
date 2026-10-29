@@ -82,6 +82,8 @@ router.get('/exams/:examId/connections',
         connections: connections.map(c => ({
           tokenSuffix: c.token.slice(-6),
           status: c.status,
+          ip: c.clientAddress || null,
+          user: c.userSession || null,
           fields: [...new Set(c.values.filter(v => v !== c.token && v !== ''))].slice(0, 14),
           device: matchedBy.has(c.token) ? { id: matchedBy.get(c.token).device.id, name: matchedBy.get(c.token).device.name } : null,
           matchedBy: matchedBy.has(c.token) ? matchedBy.get(c.token).by : null,

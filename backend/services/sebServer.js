@@ -17,6 +17,10 @@ const TERMINAL_STATUSES = new Set(['CLOSED', 'DISABLED']);
 const KNOWN_STATUSES = new Set([
   'UNDEFINED', 'CONNECTION_REQUESTED', 'AUTHENTICATED', 'READY', 'ACTIVE', 'CLOSED', 'DISABLED',
 ]);
+const GENERIC_USERS = new Set([
+  'student', 'students', 'user', 'users', 'admin', 'administrator',
+  'guest', 'kiosk', 'lab', 'exam', 'test', 'pc', 'desktop', 'default',
+]);
 
 class SebError extends Error {
   constructor(message, { status = null, code = 'SEB_ERROR' } = {}) {
@@ -174,10 +178,26 @@ function extractConnections(payload) {
 function deduplicateConnections(connections) {
   const groups = new Map();
   for (const c of connections) {
-    const user = (c.userSession || '').toLowerCase();
-    const ip = (c.clientAddress || '').toLowerCase();
-    // Unique identity key: candidate session username if present, else client IP, else token
-    const key = user ? `user:${user}` : (ip ? `ip:${ip}` : `tok:${c.token}`);
+    const user = (c.userSession || '').trim().toLowerCase();
+    const ip = (c.clientAddress || '').trim().toLowerCase();
+    const isGenericUser = !user || GENERIC_USERS.has(user);
+
+    // Grouping identity:
+    // 1) If IP is present and user is non-generic, group by both (preserves multiple distinct users behind NAT)
+    // 2) If IP is present and user is generic (or empty), group by IP (preserves separate lab machines with shared accounts)
+    // 3) If no IP, group by non-generic username if present
+    // 4) Otherwise fall back to connection token
+    let key;
+    if (ip && !isGenericUser) {
+      key = `ip:${ip}:user:${user}`;
+    } else if (ip) {
+      key = `ip:${ip}`;
+    } else if (!isGenericUser) {
+      key = `user:${user}`;
+    } else {
+      key = `tok:${c.token}`;
+    }
+
     if (!groups.has(key)) groups.set(key, [c]);
     else groups.get(key).push(c);
   }
