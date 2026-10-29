@@ -742,16 +742,18 @@ export default function Layout() {
           </button>
 
           {/* Active sessions — see/revoke your own logged-in devices */}
-          <button
-            onClick={() => setShowSessions(true)}
-            title="Active sessions"
-            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
-              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
-                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
-          >
-            <Monitor size={16} className="shrink-0" />
-            {!collapsed && <span className="text-sm font-body font-medium">Sessions</span>}
-          </button>
+          {!isOperator && (
+            <button
+              onClick={() => setShowSessions(true)}
+              title="Active sessions"
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+                ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
+                          : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
+            >
+              <Monitor size={16} className="shrink-0" />
+              {!collapsed && <span className="text-sm font-body font-medium">Sessions</span>}
+            </button>
+          )}
 
           {/* Logout */}
           <button
