@@ -81,10 +81,11 @@ export default function CommandPalette({ open, onClose }) {
     if (open) {
       setQ(''); setResults([]); setActive(0)
       setPending(null); setConfirming(false); setPinModal(null); setPin(''); setPinError('')
-      setRecent(getRecent())
+      const rec = getRecent()
+      setRecent(isOperator ? rec.filter(r => r.path?.startsWith('/devices') || r.path?.startsWith('/groups') || r.path?.startsWith('/schedules') || r.path?.startsWith('/audit')) : rec)
       setTimeout(() => inputRef.current?.focus(), 30)
     }
-  }, [open])
+  }, [open, isOperator])
 
   // Sorts device results so an exact (case-insensitive) name match always
   // lands first — e.g. typing the full hostname and hitting Enter should
@@ -117,7 +118,9 @@ export default function CommandPalette({ open, onClose }) {
       .then(r => {
         if (requestId !== requestIdRef.current) return [] // superseded by a newer request
         const cats = r.data?.categories || {}
-        const order = ['device', 'group', 'runbook', 'schedule', 'alertRule', 'syntheticCheck', 'bulkTemplate', 'user']
+        const order = isOperator
+          ? ['device', 'group', 'schedule']
+          : ['device', 'group', 'runbook', 'schedule', 'alertRule', 'syntheticCheck', 'bulkTemplate', 'user']
         const KEY_BY_TYPE = {
           device: 'devices', group: 'groups', runbook: 'runbooks', schedule: 'schedules',
           alertRule: 'alertRules', syntheticCheck: 'syntheticChecks', bulkTemplate: 'bulkTemplates',
@@ -134,7 +137,7 @@ export default function CommandPalette({ open, onClose }) {
       })
       .catch(() => { if (requestId === requestIdRef.current) setResults([]); return [] })
       .finally(() => { if (requestId === requestIdRef.current) setLoading(false) })
-  }, [])
+  }, [isOperator])
 
   // Resolves a quick-action verb's target(s) against live data (devices,
   // runbooks, open alerts) as the person types, same debounce cadence as

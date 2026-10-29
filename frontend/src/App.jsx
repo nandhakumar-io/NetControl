@@ -21,14 +21,12 @@ import FilePushPage    from './pages/FilePushPage'
 import UsersPage       from './pages/UsersPage'
 import MonitoringPage  from './pages/MonitoringPage'
 import MonitoringHistoryPage from './pages/MonitoringHistoryPage'
-import SecurityPage    from './pages/SecurityPage'
 import AlertsPage      from './pages/AlertsPage'
 import DiscoveryPage   from './pages/DiscoveryPage'
 import CompliancePage  from './pages/CompliancePage'
 import ProcessPoliciesPage from './pages/ProcessPoliciesPage'
 import BackupsPage    from './pages/BackupPage'
 import SlaReportsPage from './pages/SlaReportsPage'
-import OrganizationsPage from './pages/OrganizationsPage'
 import RunbooksPage   from './pages/RunbooksPage'
 import SyntheticChecksPage from './pages/SyntheticChecksPage'
 import CapacityForecastPage from './pages/CapacityForecastPage'
@@ -46,29 +44,36 @@ function RequireAuth({ children }) {
   return children
 }
 
-/**
- * RequireRole — wraps a route and redirects to /dashboard if the current
- * user's role isn't in the allowed list.
- */
+function IndexRoute() {
+  const user = useAuthStore(s => s.user)
+  if (user === null) return null
+  return <Navigate to={user?.role === 'operator' ? '/devices' : '/dashboard'} replace />
+}
+
 function RequireRole({ roles, children }) {
   const user = useAuthStore(s => s.user)
-  // While user is still loading (null), render nothing to avoid flash
   if (user === null) return null
-  if (!roles.includes(user?.role)) return <Navigate to="/dashboard" replace />
+  const fallback = user?.role === 'operator' ? '/devices' : '/dashboard'
+  if (!roles.includes(user?.role)) return <Navigate to={fallback} replace />
   return children
 }
 
-/**
- * RequirePermission — same idea as RequireRole, but checks a permission bit
- * instead of a fixed role list. This mirrors the bits Layout.jsx already
- * uses to decide which links to show in the sidebar, so a user who can't
- * see "Audit Log" in the nav also can't reach /audit by typing the URL.
- */
-function RequirePermission({ bit, children }) {
+function RequirePermission({ bit, children, allowOperator = false }) {
   const user = useAuthStore(s => s.user)
   const { can } = usePermissions()
   if (user === null) return null
-  if (!can(bit)) return <Navigate to="/dashboard" replace />
+  if (user?.role === 'operator' && !allowOperator) {
+    return <Navigate to="/devices" replace />
+  }
+  const fallback = user?.role === 'operator' ? '/devices' : '/dashboard'
+  if (!can(bit)) return <Navigate to={fallback} replace />
+  return children
+}
+
+function RequireNonOperator({ children }) {
+  const user = useAuthStore(s => s.user)
+  if (user === null) return null
+  if (user?.role === 'operator') return <Navigate to="/devices" replace />
   return children
 }
 
@@ -113,15 +118,15 @@ export default function App() {
 
         {/* Main app */}
         <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          <Route path="dashboard"     element={<DashboardPage />} />
-          <Route path="devices"       element={<RequirePermission bit={1}><DevicesPage /></RequirePermission>} />
+          <Route index element={<IndexRoute />} />
+          <Route path="dashboard"     element={<RequireNonOperator><DashboardPage /></RequireNonOperator>} />
+          <Route path="devices"       element={<RequirePermission bit={1} allowOperator><DevicesPage /></RequirePermission>} />
           <Route path="topology"      element={<RequirePermission bit={1}><TopologyPage /></RequirePermission>} />
-          <Route path="groups"        element={<RequirePermission bit={8}><GroupsPage /></RequirePermission>} />
+          <Route path="groups"        element={<RequirePermission bit={8} allowOperator><GroupsPage /></RequirePermission>} />
           <Route path="remote-access" element={<RequirePermission bit={1}><RemoteAccessPage /></RequirePermission>} />
           <Route path="file-push"     element={<RequirePermission bit={1}><FilePushPage /></RequirePermission>} />
-          <Route path="schedules"     element={<RequirePermission bit={32}><SchedulesPage /></RequirePermission>} />
-          <Route path="audit"         element={<RequirePermission bit={128}><AuditPage /></RequirePermission>} />
+          <Route path="schedules"     element={<RequirePermission bit={32} allowOperator><SchedulesPage /></RequirePermission>} />
+          <Route path="audit"         element={<RequirePermission bit={128} allowOperator><AuditPage /></RequirePermission>} />
           <Route path="jobs"          element={<RequirePermission bit={128}><JobsPage /></RequirePermission>} />
           <Route path="monitoring"     element={<RequirePermission bit={1}><MonitoringPage /></RequirePermission>} />
           <Route path="monitoring/history" element={<RequirePermission bit={1}><MonitoringHistoryPage /></RequirePermission>} />
@@ -132,7 +137,6 @@ export default function App() {
           <Route path="process-policies" element={<RequirePermission bit={4096}><ProcessPoliciesPage /></RequirePermission>} />
           <Route path="backups"          element={<RequirePermission bit={8192}><BackupsPage /></RequirePermission>} />
           <Route path="sla-reports"      element={<RequirePermission bit={16384}><SlaReportsPage /></RequirePermission>} />
-          <Route path="organizations"    element={<OrganizationsPage />} />
           <Route path="runbooks"         element={<RequirePermission bit={1}><RunbooksPage /></RequirePermission>} />
           <Route path="capacity"         element={<RequirePermission bit={1}><CapacityForecastPage /></RequirePermission>} />
           <Route path="bulk-command"     element={<RequirePermission bit={4}><BulkCommandPage /></RequirePermission>} />
@@ -145,14 +149,6 @@ export default function App() {
             element={
               <RequireRole roles={['admin']}>
                 <UsersPage />
-              </RequireRole>
-            }
-          />
-          <Route
-            path="security"
-            element={
-              <RequireRole roles={['admin']}>
-                <SecurityPage />
               </RequireRole>
             }
           />

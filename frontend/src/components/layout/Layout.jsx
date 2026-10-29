@@ -2,23 +2,20 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Monitor, Layers, Clock, ScrollText, Activity,
-  LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon, Rows2, Rows3,
-  Users, FolderOpen, Share2, Bell, X, AlertTriangle, ShieldAlert, Radar, ShieldCheck, Waypoints,
-  ShieldBan, Archive, FileBarChart2, Wrench, Building2, Menu,
+  LogOut, ChevronLeft, ChevronRight, Zap, Shield, Sun, Moon,
+  Users, FolderOpen, Share2, Bell, X, AlertTriangle, Radar, ShieldCheck, Waypoints,
+  ShieldBan, Archive, FileBarChart2, Wrench, Menu,
   ChevronRight as ArrowIcon, TrendingUp, TerminalSquare, Loader2, Search,
   PackageCheck, CalendarClock, CalendarDays, BellRing, ChevronDown,
   HardDrive, Gauge, Workflow, ClipboardCheck, Settings2, Network, ListChecks,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
-import { useDensityStore } from '../../store/densityStore'
 import { usePermissions } from '../../hooks/usePermissions'
 import api from '../../lib/api'
 import toast from 'react-hot-toast'
-import TwoFactorModal from '../modals/TwoFactorModal'
 import SessionsModal from '../modals/SessionsModal'
 import NotificationPrefsModal from '../modals/NotificationPrefsModal'
-import OrgSwitcher from './OrgSwitcher'
 import CommandPalette from './CommandPalette'
 import ErrorBoundary from '../ErrorBoundary'
 
@@ -359,16 +356,9 @@ export default function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const location = useLocation()
   useEffect(() => { setMobileOpen(false) }, [location.pathname])
-  // BUG FIX: TwoFactorModal (setup/disable/backup codes — routes/users.js's
-  // /me/2fa/* endpoints) was fully built but never mounted or given a
-  // trigger anywhere in the app — there's no Settings/Profile page, so it
-  // had no home. This was the only reason 2FA was invisible even though
-  // the whole backend flow already worked end to end.
-  const [show2FA, setShow2FA] = useState(false)
   const [showSessions, setShowSessions] = useState(false)
   // Per-user in-app/push notification preferences (severity thresholds +
-  // temporary mute) — same "backend existed, needed a home" situation as
-  // TwoFactorModal above. See routes/notificationPrefs.js.
+  // temporary mute). See routes/notificationPrefs.js.
   const [showNotifPrefs, setShowNotifPrefs] = useState(false)
   // Command palette (Cmd+K / Ctrl+K) — a single fast "jump to" search across
   // devices/groups/runbooks/schedules/users instead of navigating through
@@ -379,9 +369,6 @@ export default function Layout() {
     const onKeyDown = (e) => {
       const isMeta = e.metaKey || e.ctrlKey
       if (isMeta && e.key.toLowerCase() === 'k') {
-        // Don't hijack Cmd/Ctrl+K while it's already open (let Escape inside
-        // the palette handle closing) or while focus is in a contentEditable
-        // area that might have its own use for the shortcut.
         e.preventDefault()
         setShowPalette(v => !v)
       }
@@ -394,10 +381,9 @@ export default function Layout() {
   const navigate = useNavigate()
 
   const { theme, toggleTheme, applyTheme } = useThemeStore()
-  const { density, toggleDensity } = useDensityStore()
-  const isCompact = density === 'compact'
   const isLight = theme === 'light'
   const { isAdmin, can } = usePermissions()
+  const isOperator = user?.role === 'operator'
 
   useEffect(() => { applyTheme(theme) }, [])
 
@@ -418,64 +404,74 @@ export default function Layout() {
   }
 
   // ── Nav items — grouped into logical sections instead of one long flat list ──
-  const NAV_SECTIONS = [
-    {
-      label: null, // ungrouped, always-visible top item
-      items: [
-        { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', show: true },
-        { to: '/organizations', icon: Building2, label: 'Organizations', show: true },
-      ],
-    },
-    {
-      label: 'Devices',
-      items: [
-        { to: '/devices',       icon: Monitor,   label: 'Devices',       show: can(1) },
-        { to: '/topology',      icon: Network,   label: 'Topology',      show: can(1) },
-        { to: '/groups',        icon: Layers,    label: 'Labs & Groups', show: can(8) },
-        { to: '/remote-access', icon: Share2,    label: 'Remote Access', show: can(1) },
-        { to: '/file-push',     icon: FolderOpen,label: 'File Push',     show: can(1) },
-        { to: '/bulk-command',  icon: TerminalSquare, label: 'Bulk Command', show: can(4) },
-      ],
-    },
-    {
-      label: 'Monitoring',
-      items: [
-        { to: '/monitoring', icon: Activity, label: 'Monitoring', show: can(1) },
-        { to: '/alerts',     icon: Bell,     label: 'Alerts',     show: can(1) },
-        { to: '/discovery',  icon: Radar,    label: 'Discovery',  show: can(1024) },
-        { to: '/synthetic-checks', icon: Waypoints, label: 'Health Checks', show: can(65536) },
-        { to: '/capacity',   icon: TrendingUp, label: 'Capacity Forecast', show: can(1) },
-      ],
-    },
-    {
-      label: 'Automation',
-      items: [
-        { to: '/schedules',        icon: Clock,     label: 'Schedules',     show: can(32) },
-        { to: '/bulk-command-schedules', icon: CalendarClock, label: 'Command Schedules', show: can(4) },
-        { to: '/ops-calendar',     icon: CalendarDays, label: 'Ops Calendar', show: can(1) },
-        { to: '/process-policies', icon: ShieldBan, label: 'Process Rules', show: can(4096) },
-        { to: '/runbooks',         icon: Wrench,    label: 'Runbooks',      show: can(1) },
-        { to: '/backups',          icon: Archive,   label: 'Backups',       show: can(8192) },
-      ],
-    },
-    {
-      label: 'Compliance',
-      items: [
-        { to: '/compliance', icon: ShieldCheck, label: 'Compliance', show: can(2048) },
-        { to: '/sla-reports', icon: FileBarChart2, label: 'SLA Reports', show: can(16384) },
-        { to: '/audit',      icon: ScrollText,  label: 'Audit Log',  show: can(128) },
-        { to: '/jobs',       icon: ListChecks,  label: 'Jobs',       show: can(128) },
-      ],
-    },
-  ]
+  const NAV_SECTIONS = (isOperator
+    ? [
+        {
+          label: null,
+          items: [
+            { to: '/devices',   icon: Monitor,    label: 'Devices',       show: true },
+            { to: '/groups',    icon: Layers,     label: 'Labs & Groups', show: true },
+            { to: '/schedules', icon: Clock,      label: 'Schedules',     show: true },
+            { to: '/audit',     icon: ScrollText, label: 'Audit Log',     show: true },
+          ],
+        },
+      ]
+    : [
+        {
+          label: null, // ungrouped, always-visible top item
+          items: [
+            { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', show: true },
+          ],
+        },
+        {
+          label: 'Devices',
+          items: [
+            { to: '/devices',       icon: Monitor,   label: 'Devices',       show: can(1) },
+            { to: '/topology',      icon: Network,   label: 'Topology',      show: can(1) },
+            { to: '/groups',        icon: Layers,    label: 'Labs & Groups', show: can(8) },
+            { to: '/remote-access', icon: Share2,    label: 'Remote Access', show: can(1) },
+            { to: '/file-push',     icon: FolderOpen,label: 'File Push',     show: can(1) },
+            { to: '/bulk-command',  icon: TerminalSquare, label: 'Bulk Command', show: can(4) },
+          ],
+        },
+        {
+          label: 'Monitoring',
+          items: [
+            { to: '/monitoring', icon: Activity, label: 'Monitoring', show: can(1) },
+            { to: '/alerts',     icon: Bell,     label: 'Alerts',     show: can(1) },
+            { to: '/discovery',  icon: Radar,    label: 'Discovery',  show: can(1024) },
+            { to: '/synthetic-checks', icon: Waypoints, label: 'Health Checks', show: can(65536) },
+            { to: '/capacity',   icon: TrendingUp, label: 'Capacity Forecast', show: can(1) },
+          ],
+        },
+        {
+          label: 'Automation',
+          items: [
+            { to: '/schedules',        icon: Clock,     label: 'Schedules',     show: can(32) },
+            { to: '/bulk-command-schedules', icon: CalendarClock, label: 'Command Schedules', show: can(4) },
+            { to: '/ops-calendar',     icon: CalendarDays, label: 'Ops Calendar', show: can(1) },
+            { to: '/process-policies', icon: ShieldBan, label: 'Process Rules', show: can(4096) },
+            { to: '/runbooks',         icon: Wrench,    label: 'Runbooks',      show: can(1) },
+            { to: '/backups',          icon: Archive,   label: 'Backups',       show: can(8192) },
+          ],
+        },
+        {
+          label: 'Compliance',
+          items: [
+            { to: '/compliance', icon: ShieldCheck, label: 'Compliance', show: can(2048) },
+            { to: '/sla-reports', icon: FileBarChart2, label: 'SLA Reports', show: can(16384) },
+            { to: '/audit',      icon: ScrollText,  label: 'Audit Log',  show: can(128) },
+            { to: '/jobs',       icon: ListChecks,  label: 'Jobs',       show: can(128) },
+          ],
+        },
+      ])
     .map(section => ({ ...section, items: section.items.filter(n => n.show) }))
     .filter(section => section.items.length > 0)
 
-  const ADMIN_NAV = [
+  const ADMIN_NAV = (isOperator ? [] : [
     { to: '/users',         icon: Users,        label: 'Users',         show: isAdmin },
-    { to: '/security',      icon: ShieldAlert,  label: 'Security',      show: isAdmin },
     { to: '/agent-release', icon: PackageCheck, label: 'Agent Release', show: isAdmin },
-  ].filter(n => n.show)
+  ]).filter(n => n.show)
 
   // Auto-expand whichever section owns the current route. Runs on every
   // navigation (not just mount) so clicking a link inside a collapsed
@@ -715,11 +711,6 @@ export default function Layout() {
           {/* Notification bell — live alerts badge, dropdown for quick view */}
           <NotificationBell collapsed={collapsed} isLight={isLight} />
 
-          {/* Organization switcher — multi-tenant "switch client" dropdown.
-              Backend (routes/orgs.js) has supported this since multi-tenancy
-              was added; this was the only piece missing. */}
-          <OrgSwitcher collapsed={collapsed} isLight={isLight} />
-
           {/* Theme toggle */}
           <button
             onClick={toggleTheme}
@@ -738,21 +729,6 @@ export default function Layout() {
             {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{isLight ? 'Light mode' : 'Dark mode'}</span>}
           </button>
 
-          {/* Table density toggle — compact/comfortable, persisted and
-              applied globally via a class on <html> (see densityStore.js),
-              so Devices/Audit/Users tables all pick it up without local
-              per-page state. */}
-          <button
-            onClick={toggleDensity}
-            title={isCompact ? 'Switch to comfortable rows' : 'Switch to compact rows'}
-            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
-              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
-                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
-          >
-            {isCompact ? <Rows2 size={16} className="shrink-0" /> : <Rows3 size={16} className="shrink-0" />}
-            {!collapsed && <span className="text-sm font-body font-medium whitespace-nowrap">{isCompact ? 'Compact rows' : 'Comfortable rows'}</span>}
-          </button>
-
           {/* Notification preferences (per-user severity thresholds + mute) */}
           <button
             onClick={() => setShowNotifPrefs(true)}
@@ -763,18 +739,6 @@ export default function Layout() {
           >
             <BellRing size={16} className="shrink-0" />
             {!collapsed && <span className="text-sm font-body font-medium">Notifications</span>}
-          </button>
-
-          {/* Security / 2FA */}
-          <button
-            onClick={() => setShow2FA(true)}
-            title="Two-factor authentication"
-            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
-              ${isLight ? 'text-slate-500 hover:text-[#1a1a2e] hover:bg-black/[0.04]'
-                        : 'text-slate-500 hover:text-slate-300 hover:bg-surface-3'}`}
-          >
-            <ShieldCheck size={16} className="shrink-0" />
-            {!collapsed && <span className="text-sm font-body font-medium">Security</span>}
           </button>
 
           {/* Active sessions — see/revoke your own logged-in devices */}
@@ -800,7 +764,6 @@ export default function Layout() {
           </button>
         </div>
 
-        <TwoFactorModal open={show2FA} onClose={() => setShow2FA(false)} />
         <SessionsModal open={showSessions} onClose={() => setShowSessions(false)} />
         <NotificationPrefsModal open={showNotifPrefs} onClose={() => setShowNotifPrefs(false)} />
 
