@@ -881,13 +881,13 @@ export default function DevicesPage() {
 
   useEffect(() => { fetchAll() }, [fetchAll])
 
-  // Live polling of SEB device statuses (every 10s) so live exam sessions and exits reflect in real time
+  // Live polling of SEB device statuses (every 4s) so live exam sessions and exits reflect in real time
   useEffect(() => {
     const timer = setInterval(() => {
       api.get('/seb/device-statuses')
         .then(({ data }) => { if (data?.devices) setSebData(data) })
         .catch(() => {})
-    }, 10000)
+    }, 4000)
     return () => clearInterval(timer)
   }, [])
 

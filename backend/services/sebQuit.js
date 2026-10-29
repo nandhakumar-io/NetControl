@@ -37,13 +37,13 @@ function intEnv(name, def, min, max) {
   const n = parseInt(process.env[name], 10);
   return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : def;
 }
-const POLL_MS             = () => intEnv('SEB_POLL_INTERVAL_MS', 3000, 1000, 30000);
+const POLL_MS             = () => intEnv('SEB_POLL_INTERVAL_MS', 1000, 500, 30000);
 const DEFAULT_TIMEOUT_SEC = () => intEnv('SEB_QUIT_TIMEOUT_SEC', 120, 15, 900);
 const MAX_TIMEOUT_SEC     = 900;
 const SHUTDOWN_DELAY_SEC  = () => intEnv('SEB_SHUTDOWN_DELAY_SEC', 0, 0, 120);
-const VERIFY_PROCESS      = () => (process.env.SEB_VERIFY_PROCESS ?? 'true').toLowerCase() !== 'false';
+const VERIFY_PROCESS      = () => (process.env.SEB_VERIFY_PROCESS ?? 'false').toLowerCase() === 'true';
 const PROCESS_FILTER      = () => (process.env.SEB_PROCESS_FILTER || 'SafeExamBrowser*').replace(/[^\w.*-]/g, '');
-const INSTRUCT_CONCURRENCY = 8;
+const INSTRUCT_CONCURRENCY = 30;
 const STALE_HEARTBEAT_SEC = 120;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -103,10 +103,12 @@ async function finalizeRun(runId) {
 async function sebProcessRunning(device) {
   if (!VERIFY_PROCESS() || device.os_type !== 'windows') return null;
   try {
-    const r = await winrm.execCommand(device, `tasklist /FI "IMAGENAME eq ${PROCESS_FILTER()}" /NH`);
+    const check = winrm.execCommand(device, `tasklist /FI "IMAGENAME eq ${PROCESS_FILTER()}" /NH`);
+    const timeoutGuard = new Promise((_, reject) => setTimeout(() => reject(new Error('Process check timeout')), 1500));
+    const r = await Promise.race([check, timeoutGuard]);
     return /^\s*\S+\.exe\s+\d+/im.test(r.stdout || '');
   } catch {
-    return null; // WinRM unavailable — rely on SEB Server's status alone
+    return null; // WinRM unavailable or timed out — rely on SEB Server's status alone
   }
 }
 
@@ -163,43 +165,40 @@ async function orchestrate(run) {
     try {
       connections = await seb.getMonitoring(run.examId);
     } catch (e) {
-      for (const item of items) {
+      await Promise.all(items.map(async (item) => {
         await setItem(item, { state: 'failed', details: e.message });
         await auditItem(run, item, 'seb_quit', 'failure', e.message);
-      }
+      }));
       return;
     }
 
     const claimed = new Set();
     const toInstruct = [];
     const shutdowns = [];
+    const initialUpdates = [];
+
     for (const item of items) {
       const { con, by } = seb.matchConnectionDetailed(item.device, connections);
       if (!con) {
         const d = by === 'binding_miss'
           ? `No SEB connection in exam ${run.examId} carries this device's bound identifier "${item.device.seb_match_key}" — re-bind it or clear the binding`
           : `No SEB connection found for this device in exam ${run.examId} (matched on IP / hostname)`;
-        await setItem(item, { state: 'no_connection', details: d });
-        await auditItem(run, item, 'seb_quit', 'partial', d);
+        initialUpdates.push({ item, fields: { state: 'no_connection', details: d }, audit: ['partial', d] });
         continue;
       }
       if (seb.isTerminal(con.status)) {
-        if (run.shutdownAfter) {
-          const d = `SEB already exited (${con.status}) — shutting down`;
-          await setItem(item, { state: 'exited', seb_status: con.status, details: d });
-          await auditItem(run, item, 'seb_quit', 'success', d);
-          shutdowns.push(shutdownDevice(run, item));
-        } else {
-          const d = `SEB already exited (${con.status})`;
-          await setItem(item, { state: 'exited', seb_status: con.status, details: d });
-          await auditItem(run, item, 'seb_quit', 'success', d);
-        }
+        const d = run.shutdownAfter ? `SEB already exited (${con.status}) — shutting down` : `SEB already exited (${con.status})`;
+        initialUpdates.push({
+          item,
+          fields: { state: 'exited', seb_status: con.status, details: d },
+          audit: ['success', d],
+          shutdown: !!run.shutdownAfter,
+        });
         continue;
       }
       if (claimed.has(con.token)) {
         const d = 'Same SEB connection matched another device in this run (shared IP?) — skipped to avoid quitting the wrong client';
-        await setItem(item, { state: 'failed', details: d });
-        await auditItem(run, item, 'seb_quit', 'failure', d);
+        initialUpdates.push({ item, fields: { state: 'failed', details: d }, audit: ['failure', d] });
         continue;
       }
       claimed.add(con.token);
@@ -207,6 +206,14 @@ async function orchestrate(run) {
       item.seb_status = con.status;
       toInstruct.push(item);
     }
+
+    await Promise.all(initialUpdates.map(async (u) => {
+      await setItem(u.item, u.fields);
+      await auditItem(run, u.item, 'seb_quit', u.audit[0], u.audit[1]);
+      if (u.shutdown) {
+        shutdowns.push(shutdownDevice(run, u.item));
+      }
+    }));
 
     // 2) Register SEB_QUIT (bounded concurrency).
     await pool(toInstruct, INSTRUCT_CONCURRENCY, async (item) => {
@@ -229,18 +236,18 @@ async function orchestrate(run) {
       if (!waiting.length) break;
 
       if (await isCancelled(run.id)) {
-        for (const item of waiting) {
+        await Promise.all(waiting.map(async (item) => {
           await setItem(item, { state: 'cancelled', details: 'Run cancelled — the SEB_QUIT instruction was already sent and cannot be recalled; no shutdown sent' });
           await auditItem(run, item, 'seb_quit', 'partial', 'run cancelled while waiting');
-        }
+        }));
         break;
       }
       if (Date.now() >= deadline) {
-        for (const item of waiting) {
+        await Promise.all(waiting.map(async (item) => {
           const d = `SEB did not report exit within ${run.timeoutSec}s (last status ${item.seb_status || 'unknown'}) — no shutdown sent`;
           await setItem(item, { state: 'timeout', details: d });
           await auditItem(run, item, 'seb_quit', 'failure', d);
-        }
+        }));
         break;
       }
 
@@ -251,25 +258,25 @@ async function orchestrate(run) {
       try { cons = await seb.getMonitoring(run.examId); }
       catch { continue; } // transient SEB Server hiccup — keep waiting until the deadline
 
-      for (const item of waiting) {
+      await Promise.all(waiting.map(async (item) => {
         let con = cons.find(c => c.token === item.connection_token);
         if (!con) {
           try { con = await seb.getConnection(run.examId, item.connection_token); } catch { /* keep waiting */ }
         }
-        if (!con) continue;
+        if (!con) return;
         if (con.status !== item.seb_status) await setItem(item, { seb_status: con.status });
-        if (!seb.isTerminal(con.status)) continue;
+        if (!seb.isTerminal(con.status)) return;
 
         const alive = await sebProcessRunning(item.device);
         if (alive === true) {
           await setItem(item, { details: `SEB Server reports ${con.status}, but the SEB process is still running on the endpoint — waiting` });
-          continue;
+          return;
         }
         const verified = alive === false ? 'confirmed by SEB Server and endpoint process check' : 'confirmed by SEB Server';
         await setItem(item, { state: 'exited', exited_at: NOW, seb_status: con.status, details: `SEB exited (${verified})` });
         await auditItem(run, item, 'seb_quit', 'success', `SEB exited (${verified})`);
         if (run.shutdownAfter) shutdowns.push(shutdownDevice(run, item));
-      }
+      }));
     }
     await Promise.all(shutdowns);
   } catch (e) {

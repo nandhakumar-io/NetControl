@@ -14,7 +14,7 @@ import SebBindingsModal from './SebBindingsModal'
 
 const LS_EXAM = 'nc_seb_exam_id'
 const LS_SHUTDOWN = 'nc_seb_shutdown_after'
-const POLL_MS = 2000
+const POLL_MS = 800
 
 const STATE_META = {
   queued:           { label: 'Queued',                     tone: 'muted',  spin: true  },
